@@ -741,6 +741,7 @@ def main(argv=None):
         prepare_history_warmup(pulse,full_universe=False)
         report['accountRates']=pulse.fee_schedule.snapshot(time.time(),pulse.active_fee_contracts(),
                                                          pulse.position_cost_pct,pulse.slippage_allowance_pct)
+        report['accountRates']['measurementScope']=getattr(api,'commission_scope','symbol')
         save()
         require_empty_account(api,account_scope)
         if args.replay_workers>1:

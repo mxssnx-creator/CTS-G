@@ -57,7 +57,8 @@ class FeeSchedule:
                 if account_wide:self.next_query = now + 60
                 else:self.retry_at[pending[0]] = now + 60
                 return False
-            measured = {"taker": taker, "maker": maker, "t": now}
+            measured = {"taker": taker, "maker": maker, "t": now,
+                        "scope": "account" if account_wide else "symbol"}
             for symbol in (symbols if account_wide else pending[:1]):
                 self.account[symbol] = dict(measured)
                 self.retry_at.pop(symbol, None)

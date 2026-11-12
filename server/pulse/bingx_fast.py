@@ -302,6 +302,11 @@ class FastBingX:
         self.err = err
         self.base = (base or BASE).rstrip("/")
         self.buckets = {k: TokenBucket(*v) for k, v in LIMITS.items()}
+        # Commission queries have a 5/s UID limit with no documented burst.
+        # The general private bucket's ten-token burst was hidden by cold
+        # connections; pooled startup must pace the actual dispatches too.
+        self.path_buckets = {path: TokenBucket(4.0, 1.0) for path in (
+            '/openApi/swap/v2/user/commissionRate', '/openApi/swap/v1/trade/positionHistory')}
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.http = None
@@ -374,17 +379,26 @@ class FastBingX:
         if now < gate:
             return False
         w = self.buckets[lane].take()
+        endpoint = getattr(self, 'path_buckets', {}).get(path)
+        if endpoint is not None:
+            w += endpoint.take()
+        # A concurrent response can begin cooling while this request waits.
+        if time.time() < self.path_cd.get(path, 0.0):
+            self.stats['wait'] += w
+            return False
         self.stats["wait"] += w
         return True
 
     def _trip(self, path: str, body: Dict[str, Any]) -> None:
         code = body.get("code")
         msg = str(body.get("msg") or "")
+        if code == 109421 and any(s in msg.lower() for s in ("order not exist", "order does not exist", "order not found")):
+            return  # an absent order is not an API rate-limit refusal
         if code not in RATE_CODES and "rate limit" not in msg.lower() and "100410" not in msg and "frequency limit" not in msg.lower():
             return
         self.stats["rl"] += 1
         wait = 1.2
-        m = re.search(r"(?:unblocked after|retry after time:\s*)(\d{10,})", msg)
+        m = re.search(r"(?:unblocked after\s*|retry after time:\s*)(\d{10,})", msg)
         if m:
             raw = int(m.group(1))
             until = raw / 1000.0 if raw > 10_000_000_000 else float(raw)
@@ -404,6 +418,9 @@ class FastBingX:
             for k, v in extra.items():
                 if v is None:
                     continue
+                if method == "GET" and path.endswith("/trade/order") and k == "clientOrderID":
+                    k = "clientOrderId"  # lookup uses the canonical lower-camel spelling
+                    v = str(v).lower()
                 params[k] = v if isinstance(v, str) else str(v)
         qs = self._sign(params)
         url = f"{path}?{qs}"
@@ -422,11 +439,31 @@ class FastBingX:
         return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
 
     def _http(self, method: str, url: str) -> Dict[str, Any]:
-        # Always urllib for signed query strings. httpx re-encodes `?` params and
-        # BingX then reports "signature mismatch" on burst entries with attach JSON.
         import urllib.request
         import urllib.error
         full = url if url.startswith("http") else self.base + url
+        client = getattr(self, "http", None)
+        if client is not None and httpx is not None:
+            # The signed query is already encoded. Never supply it as params:
+            # client-level parameter merging or a second encoding changes its
+            # signature, particularly for attached/batch order JSON.
+            prepared = None
+            try:
+                target = urllib.parse.urlsplit(full)
+                expected = (target.path + ("?" + target.query if target.query else "")).encode("ascii")
+                prepared = client.build_request(method, httpx.URL(full),
+                    content=None if method in ("GET", "DELETE") else b"", timeout=HTTP_TIMEOUT_S)
+            except Exception:
+                pass  # No dispatch occurred; the legacy transport remains safe.
+            if prepared is not None and prepared.url.raw_path == expected:
+                try:
+                    response = client.send(prepared)
+                    return loads(response.content)
+                except Exception as exc:
+                    # A write may have reached the venue. Return its unknown
+                    # outcome for exact-ID reconciliation; never resend it on
+                    # the other transport. Exception URLs may contain a signature.
+                    return {"code": -1, "msg": type(exc).__name__, "error": True}
         req = urllib.request.Request(
             full,
             method=method,

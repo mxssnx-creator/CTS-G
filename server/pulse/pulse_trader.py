@@ -917,6 +917,10 @@ class Position:
     position_id: str = ""
     ctrl_verified: bool = False
     ctrl_undercovered: bool = False            # a known quantity shortfall blocks further entries
+    control_pending: dict = field(default_factory=dict)  # durable exact client IDs of unresolved protective writes
+    exit_origin: str = ""
+    exit_confirmed_at: float = 0.0
+    funding_usdt: float = 0.0
     dca_ref: float = 0.0                       # entry the position opened at; a DCA add moves entry to the average
     dca_fills: list = field(default_factory=list)   # [price, qty] of the DCA adds (the add-on lane's own result)
     lane: str = ""                             # the Set's lane at entry: "pos" (Base -> Main -> Real) or "neg" (Real Negative)
@@ -988,6 +992,8 @@ class Closed:
     rel_why: str = ""
     rounds_mult: float = 1.0
     rounds_why: str = ""
+    execution_origin: str = "native"
+    funding_usdt: float = 0.0
 
 
 def new_lift() -> Dict[str, float]:
@@ -2953,10 +2959,92 @@ class Pulse:
             q.pop(0)
         return len(q) >= CTRL_EXISTS_BUDGET
 
+    def reconcile_control_requests(self, pos: Position) -> bool:
+        """Read unresolved protective identities; never retry an unknown write.
+
+        A fill receipt is handed to venue_exit, whose cumulative fill handler
+        settles its quantity and fees once. A missing conditional client ID
+        does not prove rejection; unresolved writes retain their entry barrier.
+        """
+        pending = getattr(pos, "control_pending", {})
+        now = time.time()
+        changed = False
+        for key, intent in list(pending.items()):
+            if intent.get("fill") or now < float(intent.get("nextRead", 0)):
+                continue
+            intent["nextRead"] = now + 2.0
+            body = intent["body"]
+            try:
+                reply = {"code": -1, "error": True}
+                # Conditional orders are not searchable by client ID on all
+                # venues. Only an exact client identity in an order list can
+                # resolve a lost acknowledgement; geometry is not ownership.
+                for path in ("/openApi/swap/v2/trade/openOrders", "/openApi/swap/v2/trade/allOrders"):
+                    listing = self.api.get(path, {"symbol": pos.symbol})
+                    data = listing.get("data") or {}
+                    rows = data.get("orders", []) if isinstance(data, dict) else data
+                    matches = [r for r in rows if isinstance(r, dict) and
+                               str(r.get("clientOrderID") or r.get("clientOrderId") or "").lower() == str(body["clientOrderID"]).lower()] if isinstance(rows, list) else []
+                    if self.ok(listing) and len(matches) == 1:
+                        reply = {"code": 0, "data": {"order": matches[0]}}
+                        break
+            except Exception:
+                continue
+            data = reply.get("data") or {}
+            order = data.get("order", data) if isinstance(data, dict) else {}
+            cid = str(order.get("clientOrderID") or order.get("clientOrderId") or "").lower()
+            oid = real_oid(order.get("orderId") or order.get("orderID"))
+            exact = (self.ok(reply) and oid and cid == str(body["clientOrderID"]).lower()
+                     and order.get("symbol") == pos.symbol and order.get("positionSide") == pos.side
+                     and order.get("side") == body["side"])
+            if exact:
+                status = str(order.get("status") or "").upper()
+                filled = executed_qty(order) or 0.0
+                if filled > 0 or status in ("NEW", "PENDING", "TRIGGERED"):
+                    try:
+                        actual = float(order.get("stopPrice") or body["stopPrice"])
+                    except (TypeError, ValueError):
+                        continue
+                    if not math.isfinite(actual) or actual <= 0:
+                        continue
+                    for attr in (("sl_oid", "sec_sl_oid") if key == "sl" else ("tp_oid", "sec_tp_oid")):
+                        setattr(pos, attr, oid)
+                    if key == "sl":pos.sl = pos.sec_sl = actual
+                    else:pos.tp = pos.sec_tp = actual
+                    if filled > 0:
+                        intent["fill"] = order
+                        pos.controls_ok = pos.ctrl_verified = False
+                        pos.ctrl_undercovered = True
+                    else:
+                        pending.pop(key, None)
+                    changed = True
+                elif status in ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
+                    pending.pop(key, None);changed = True
+                continue
+            # Absence from a bounded list does not establish rejection. Keep
+            # the durable intent and entry barrier rather than submit a new ID.
+        if changed:
+            self.save_open_book()
+        return bool(pending)
+
+    def begin_control_requests(self, pos: Position, requests: Dict[str, Dict[str, Any]]) -> bool:
+        previous = dict(pos.control_pending)
+        for key, body in requests.items():
+            pos.control_pending[key] = {"body": dict(body), "at": time.time(), "miss": 0}
+        if self.save_open_book():
+            return True
+        pos.control_pending = previous
+        self.last_error = f"control {pos.symbol} intent persistence failed"
+        return False
+
     def place_ctrl(self, pos: Position, kind: str, price: float) -> str:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
+        role = "sl" if is_sl else "tp"
+        was_pending = bool(pos.control_pending)
+        if self.reconcile_control_requests(pos) or was_pending:
+            return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         if self.ctrl_exists_budget_spent():
@@ -2991,6 +3079,7 @@ class Pulse:
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
+        flat_refusal = False
         for extra in (0.0, 0.006, 0.012):
             px_try = price
             if extra:
@@ -3007,19 +3096,34 @@ class Pulse:
                     pos.symbol, pos.side, "sl" if is_sl else "tp", px_s, qty_s, cid,
                     close_pos=bool(form["close_pos"]), with_qty=bool(form["with_qty"]), otype=str(form["otype"]),
                 )
-                r = self.api.post("/openApi/swap/v2/trade/order", body)
+                if not self.begin_control_requests(pos, {role: body}):
+                    return have_this
+                try:
+                    r = self.api.post("/openApi/swap/v2/trade/order", body)
+                except Exception:
+                    r = {"code": -1, "error": True, "msg": "control response unavailable"}
                 self.did_io = True
                 if r.get("cooled"):
+                    pos.control_pending.pop(role, None)
+                    self.save_open_book()
                     return ""
+                if r.get("error") or r.get("code") == -1:
+                    pos.controls_ok = pos.ctrl_verified = False
+                    self.last_error = f"control {pos.symbol} response unconfirmed; awaiting exact order"
+                    return have_this
                 msg = str(r.get("msg") or "")
                 kind_err = ctrl_err_kind(msg)
                 if self.ok(r):
                     oid = extract_oid(r)
                     if oid:
+                        pos.control_pending.pop(role, None)
+                        self.save_open_book()
                         pos.close_position = bool(form["close_pos"])
                         price = px_try
                         break
-                    continue
+                    return have_this  # acknowledged without an ID: reconcile this CID first
+                pos.control_pending.pop(role, None)
+                self.save_open_book()  # a definite refusal permits the next form
                 if kind_err == "exists":
                     self.note_ctrl_exists()
                     self.__dict__.setdefault("ctrl_exists_until", {})[exists_key] = time.time() + CTRL_EXISTS_BACKOFF_S
@@ -3057,6 +3161,12 @@ class Pulse:
                     return have_this
                 if kind_err == "qty_close":
                     continue
+                if kind_err == "flat":
+                    # Another price or control form cannot protect a position
+                    # the venue says is gone. Reconcile below without sending
+                    # six redundant orders and exhausting the refusal budget.
+                    flat_refusal = True
+                    break
                 if kind_err == "cap":
                     self.ctrl_skip[pos.symbol] = time.time() + 90
                     self.ctrl_skip["__order_cap__"] = time.time() + 60
@@ -3068,7 +3178,7 @@ class Pulse:
                 if kind_err in ("px", "liq"):
                     self.ctrl_skip[pos.symbol] = time.time() + 45
                     break
-            if oid:
+            if oid or flat_refusal:
                 break
         if not oid:
             short = short_api_msg(msg)
@@ -3116,6 +3226,8 @@ class Pulse:
     def missing_controls(self, pos: Position) -> bool:
         if not getattr(self, "control_orders", True):
             return False
+        if pos.control_pending:
+            return True
         has_sl = bool(real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", "")))
         has_tp = bool(real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", "")))
         grown = (not getattr(pos, "close_position", False) and float(getattr(pos, "ctrl_qty", 0) or 0) + 1e-12 < pos.qty)
@@ -3192,6 +3304,9 @@ class Pulse:
 
     def place_ctrl_pair(self, pos: Position) -> None:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
+        was_pending = bool(pos.control_pending)
+        if self.reconcile_control_requests(pos) or was_pending:
+            return
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return
         if time.time() < self.ctrl_skip.get(pos.symbol, 0) and pos.sl_oid and pos.tp_oid:
@@ -3204,8 +3319,21 @@ class Pulse:
             if not self.quantity_controls_only():
                 b["closePosition"] = "true"
             b["clientOrderID"] = self.cid(ch, pos=pos)
-        r = self.api.batch_place([sl_b, tp_b])
+        if not self.begin_control_requests(pos, {"sl": sl_b, "tp": tp_b}):
+            return
+        try:
+            r = self.api.batch_place([sl_b, tp_b])
+        except Exception:
+            r = {"code": -1, "error": True, "msg": "batch control response unavailable"}
         self.did_io = True
+        if r.get("cooled"):
+            pos.control_pending.clear();self.save_open_book();return
+        if r.get("error") or r.get("code") == -1:
+            pos.controls_ok = pos.ctrl_verified = False
+            self.last_error = f"controls {pos.symbol} response unconfirmed; awaiting exact orders"
+            return
+        if not self.ok(r):
+            pos.control_pending.clear()
         data = r.get("data") or {}
         rows = data.get("orders") if isinstance(data, dict) else data
         if not isinstance(rows, list):
@@ -3213,14 +3341,22 @@ class Pulse:
         for o in rows:
             if not isinstance(o, dict):
                 continue
+            typ = str(o.get("type") or "")
+            kind = self._cid_kind(o)
+            response_cid = str(o.get("clientOrderID") or o.get("clientOrderId") or "").lower()
+            role = "sl" if typ in SL_TYPES or kind in ("u", "s") else ("tp" if typ in TP_TYPES or kind in ("v", "t") else "")
+            expected_body = sl_b if role == "sl" else tp_b
+            if (not role or (response_cid and response_cid != expected_body["clientOrderID"].lower())
+                    or (o.get("symbol") and o["symbol"] != pos.symbol)
+                    or (o.get("positionSide") and o["positionSide"] != pos.side)):
+                continue
             code = o.get("code")
             if code not in (0, None, "0", ""):
+                pos.control_pending.pop(role, None)
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
             if not oid:
                 continue
-            typ = str(o.get("type") or "")
-            kind = self._cid_kind(o)
             if typ in SL_TYPES or kind in ("u", "s"):
                 try:
                     actual = float(o.get("stopPrice") or sl_b["stopPrice"])
@@ -3230,6 +3366,7 @@ class Pulse:
                     continue
                 pos.sl_oid = pos.sec_sl_oid = oid
                 pos.sl = pos.sec_sl = actual
+                pos.control_pending.pop("sl", None)
             elif typ in TP_TYPES or kind in ("v", "t"):
                 try:
                     actual = float(o.get("stopPrice") or tp_b["stopPrice"])
@@ -3239,6 +3376,11 @@ class Pulse:
                     continue
                 pos.tp_oid = pos.sec_tp_oid = oid
                 pos.tp = pos.sec_tp = actual
+                pos.control_pending.pop("tp", None)
+        self.save_open_book()
+        if pos.control_pending:
+            pos.controls_ok = pos.ctrl_verified = False
+            return  # a successful but incomplete reply is not a refusal
         sl_full = bool(real_oid(pos.sl_oid)) and not self.quantity_controls_only()
         tp_full = bool(real_oid(pos.tp_oid)) and not self.quantity_controls_only()
         if not real_oid(pos.sl_oid):
@@ -3262,6 +3404,9 @@ class Pulse:
         self._oo_cache.pop(pos.symbol, None)
 
     def ensure_controls(self, pos: Position) -> None:
+        if self.reconcile_control_requests(pos):
+            pos.controls_ok = pos.ctrl_verified = False
+            return
         now = time.time()
         if not pos.close_position and pos.ctrl_qty + 1e-12 < pos.qty:
             pos.ctrl_undercovered = True
@@ -3363,7 +3508,7 @@ class Pulse:
         pos.sl = pos.sec_sl = sl[1]
         pos.tp = pos.sec_tp = tp[1]
         pos.ctrl_undercovered = not (sl[2] and tp[2])
-        pos.controls_ok = bool(sl[0] and tp[0]) and not pos.ctrl_undercovered
+        pos.controls_ok = bool(sl[0] and tp[0]) and not pos.ctrl_undercovered and not pos.control_pending
         pos.ctrl_verified = sl[3] and tp[3]
         pos.ctrl_qty = pos.qty if pos.controls_ok else 0.0
         pos.overall = pos.controls_ok
@@ -3569,6 +3714,9 @@ class Pulse:
             if ctrl_err_kind(msg) == "qty_close":
                 continue
             if "position not exist" in msg.lower() or "no position to close" in msg.lower():
+                settlement=self.verified_position_settlement(pos)
+                if settlement:
+                    return True,settlement['exit']
                 pos.exit_price_estimated = True
                 return True, self.px.get(pos.symbol) or pos.entry     # the venue already closed it (its stop or TP)
         self.errors += 1
@@ -4314,6 +4462,10 @@ class Pulse:
     def venue_exit(self, pos: Position) -> Optional[Tuple[str, float]]:
         """The venue fill that closed this position: ("sl" or "tp", fill price) when its own stop or TP order FILLED,
         else None. A position the venue closed is a real close of its lane, not a ghost."""
+        for key, intent in list(pos.control_pending.items()):
+            receipt = intent.get("fill")
+            if receipt and self.apply_control_fill(pos, receipt, key):
+                return key, float(receipt["avgPrice"])
         for kind, oids in (("sl", (pos.sl_oid, getattr(pos, "sec_sl_oid", ""))), ("tp", (pos.tp_oid, getattr(pos, "sec_tp_oid", "")))):
             for oid in oids:
                 if not real_oid(oid):
@@ -4384,6 +4536,9 @@ class Pulse:
             pos.exit_fee_qty += delta
             self.note_fee_source(pos, source)
         pos.control_fill_state[oid] = {"qty": total, "value": total * price, "fee": fee}
+        for key, intent in list(pos.control_pending.items()):
+            if str((intent.get("fill") or {}).get("orderId") or "") == oid:
+                pos.control_pending.pop(key, None)
         pos.close_filled_qty += delta
         pos.close_filled_value += value
         pos.qty = max(0.0, pos.qty - delta)
@@ -4524,6 +4679,50 @@ class Pulse:
             pass
         log(f"MANUAL CLOSE {pos.symbol} {pos.side} ({why}): no new {pos.side} on it for {rest_s / 60:.0f} min, everything else keeps trading")
 
+    def verified_position_settlement(self, pos: Position, external: bool = True):
+        """Verify precise whole-position settlement without adopting outside orders.
+
+        Only the final-close caller may include already recorded partial exits;
+        the external-recovery path must still reject a partly allocated parent.
+        """
+        if not pos.order_id or not pos.ours or not self.cid_ours(pos.client_id):
+            return None
+        try:
+            reply=self.api.get('/openApi/swap/v2/trade/order',{'symbol':pos.symbol,'orderId':str(pos.order_id)})
+            data=reply.get('data')or{};entry=data.get('order',data)
+            if not self.ok(reply)or not isinstance(entry,dict):return None
+            pid=str(entry.get('positionID')or entry.get('positionId')or'')
+            if not pid.isdigit()or int(pid)<=0:return None
+            now=time.time()
+            response=self.api.get('/openApi/swap/v1/trade/positionHistory',{
+                'symbol':pos.symbol,'positionId':pid,'startTs':int((pos.opened_at-60)*1000),
+                'endTs':int(now*1000),'pageSize':100})
+            data=response.get('data')or{}
+            rows=data.get('positionHistory',data.get('list',[]))if isinstance(data,dict)else[]
+            if not self.ok(response)or not isinstance(rows,list):return None
+            from position_settlement import verify_position_settlement
+            proof_pos=pos if external else dc_replace(pos,close_filled_qty=0)
+            result=verify_position_settlement(proof_pos,entry,rows,now)
+            if not result:return None
+            # No add-on allocation is involved: the entire verified position
+            # is this parent. Its history supplies precise total commissions.
+            entry_fee=float(pos.entry_fee_usdt or 0)
+            if entry_fee<0 or entry_fee>result['fees']+1e-10:return None
+            pos.entry_fee_usdt=entry_fee
+            pos.base_entry_fee_usdt=entry_fee
+            pos.exit_fee_usdt=max(0.0,result['fees']-entry_fee)
+            pos.exit_fee_qty=pos.qty
+            pos.fee_source='reported-fee'
+            pos.position_id=result['positionId']
+            if external:pos.exit_origin='external'
+            pos.exit_confirmed_at=result['closedAt']
+            pos.funding_usdt=result['funding']
+            pos.exit_price_estimated=False
+            if external:self.note_manual_close(pos,'verified external position close')
+            return result
+        except Exception:
+            return None  # unavailable or ambiguous evidence remains unverified
+
     def drop_ghost(self, pos: Position, why: str) -> None:
         if self.open.get(pos.symbol) is None:
             return
@@ -4535,6 +4734,11 @@ class Pulse:
             return
         if self.close_from_venue(pos, why):
             return
+        settlement=self.verified_position_settlement(pos)
+        if settlement:
+            self.cancel_controls(pos.symbol,side=pos.side)
+            self.close_pos(pos,settlement['exit'],'external-position-close',exchange=False)
+            return
         self.note_manual_close(pos, why)
         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
         self.cancel_controls(pos.symbol, side=pos.side)   # an exchange-side SL/TP does not cancel its sibling
@@ -4542,6 +4746,8 @@ class Pulse:
         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
+        if self.open.get(pos.symbol) is not pos:
+            return  # an already-settled parent cannot close a later position
         quality_issue = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl", "bad-fill"))
         skip_eval = False   # verified emergency closes are real cash outcomes, including their losses
         if exchange:
@@ -4574,6 +4780,14 @@ class Pulse:
         for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", ""), *pos.control_fill_state):
             if real_oid(oid):
                 self.seen_fill_oids.add(str(oid))
+        precise=pos.exit_origin=='external'
+        if not precise and not pos.exit_price_estimated and pos.entry_fee_usdt is not None:
+            settlement=self.verified_position_settlement(pos,external=False)
+            if settlement:
+                exit_px=settlement['exit']
+                precise=True
+        if pos.exit_origin=='external':
+            reason='external-position-close'
         if pos.exit_price_estimated:
             skip_eval = True
             reason = str(reason) + "-unverified-exit"
@@ -4592,12 +4806,14 @@ class Pulse:
             if missing_qty:
                 self.record_exit_fee(pos, {}, missing_qty, exit_px)
             from venue_fill_fees import reconcile_position_fees
-            reconcile_position_fees(pos, getattr(self.api, "reported_fill_fee", None))
+            if not precise:
+                reconcile_position_fees(pos, getattr(self.api, "reported_fill_fee", None))
             accounted = execution_result(pos.entry, exit_px, pos.qty, pos.side,
                                          pos.entry_fee_usdt, pos.exit_fee_usdt)
             pnl = accounted["net"]
         pos.exit_slippage = adverse_slippage(px, exit_px, "SELL" if pos.side == "LONG" else "BUY")
-        hold = time.time() - pos.opened_at
+        settled_at=pos.exit_confirmed_at or time.time()
+        hold = max(0.0,settled_at - pos.opened_at)
         dca_pct = None          # the DCA add-on's own return (on the notional it added)
         base_pct = None         # what the Set lane alone made: exit against the entry the Set opened at
         base_qty = pos.base_qty or 0.0
@@ -4618,7 +4834,8 @@ class Pulse:
         if accounted is not None and base_pct is not None and pos.base_entry_fee_usdt is not None and base_qty > 0:
             base_net = base_pct - (pos.base_entry_fee_usdt + pos.exit_fee_usdt * base_qty / pos.qty) / (base_qty * base_ref)
         rec = Closed(
-            time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
+            settled_at, pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
+            execution_origin=pos.exit_origin or 'native',funding_usdt=pos.funding_usdt,
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
             lane=str(getattr(pos, "lane", "") or ""),

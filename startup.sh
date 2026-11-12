@@ -11,4 +11,4 @@ fi
 if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8080/; then
   exit 0
 fi
-npm run dev -- --host "${CTSG_DEV_HOST:-0.0.0.0}" >>/tmp/cts-g-app-startup.log 2>&1 &
+npm run dev -- --host "${CTSG_DEV_HOST:-127.0.0.1}" >>/tmp/cts-g-app-startup.log 2>&1 &
