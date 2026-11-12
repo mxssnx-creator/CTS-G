@@ -221,6 +221,23 @@ class NativeSessionTests(unittest.TestCase):
         for bad in (-1,11,float('nan'),True,'0.1'):
             with self.assertRaises(ValueError):session.frozen_overlay({'microMinSlDistancePct':bad},own,symbol_count=12)
 
+    def test_no_submission_cleanup_preserves_a_new_foreign_selected_position(self):
+        calls=[]
+        def request(method,path,params=None):
+            calls.append((method,path))
+            return {'code':0,'data':[{'symbol':'S0-USDT','positionSide':'LONG','positionAmt':'7'}]} if path.endswith('/positions') else {'code':0,'data':{'orders':[{'symbol':'S0-USDT','orderId':'99','clientOrderID':'foreign'}]}}
+        with tempfile.TemporaryDirectory() as td:
+            api=SimpleNamespace(base=session.HOST,_req=request)
+            api.get=lambda path,params=None:api._req('GET',path,params)
+            journal=session.Journal(api,td,'G1234',['S0-USDT'])
+            result=session.cleanup(SimpleNamespace(api=api,open={}),journal,5)
+            self.assertTrue(result['confirmedFlat'])
+            self.assertFalse(result['selectedScopeFlat'])
+            self.assertEqual(result['foreignPositionsPreserved'],1)
+            self.assertEqual(result['foreignOrdersPreserved'],1)
+            self.assertEqual(result['ordersSubmitted'],0)
+            self.assertTrue(all(method=='GET' for method,path in calls))
+
     def test_overlay_preserves_admission_and_requires_explicit_universe(self):
         raw = {'setMinPf': 1.37, 'stageFullWindow': True, 'lastNByRange': {'micro': {'baseLong': 30}}, 'blockEnabled': False}
         ov = session.frozen_overlay(raw, SYMBOLS)
