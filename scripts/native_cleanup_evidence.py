@@ -12,7 +12,7 @@ def definite_refusal(reply):
         and not reply.get('error') and not reply.get('data'))
 
 
-def resolve_bound_intents(api, intents, unresolved, deadline, order_bodies, bindings, remember=None):
+def resolve_bound_intents(api, intents, unresolved, deadline, order_bodies, bindings, remember=None, allow_open_controls=True):
     """Read exact previously bound order IDs when the archive omits controls.
 
     A missing client-ID query cannot prove a write was rejected. Only a
@@ -46,7 +46,7 @@ def resolve_bound_intents(api, intents, unresolved, deadline, order_bodies, bind
                          str(row.get('orderId')) == oid and (not found or found.lower() == cid.lower()) and
                          all(row.get(key) == body.get(key) for key in ('symbol', 'side', 'positionSide', 'type')))
                 final = exact and (str(row.get('status')).upper() in TERMINAL or
-                    (body.get('type') != 'MARKET' and str(row.get('status')).upper() in ('NEW', 'PENDING', 'TRIGGERED')))
+                    (allow_open_controls and body.get('type') != 'MARKET' and str(row.get('status')).upper() in ('NEW', 'PENDING', 'TRIGGERED')))
                 if final:
                     if remember is not None:
                         remember(row, body)
@@ -56,7 +56,7 @@ def resolve_bound_intents(api, intents, unresolved, deadline, order_bodies, bind
     return [cid for cid in unresolved if cid in remaining]
 
 
-def terminal_intents(api, intents, deadline, order_bodies, remember=None):
+def terminal_intents(api, intents, deadline, order_bodies, remember=None, allow_open_controls=True):
     required = []
     starts = {}
     for intent in intents:
@@ -107,7 +107,7 @@ def terminal_intents(api, intents, deadline, order_bodies, remember=None):
         row = rows[0] if len(rows) == 1 else None
         matched = row is not None and all(row.get(k) == body.get(k) for k in ('symbol', 'side', 'positionSide', 'type'))
         final = matched and (str(row.get('status')).upper() in TERMINAL or
-            (body.get('type') != 'MARKET' and str(row.get('status')).upper() in ('NEW', 'PENDING', 'TRIGGERED')))
+            (allow_open_controls and body.get('type') != 'MARKET' and str(row.get('status')).upper() in ('NEW', 'PENDING', 'TRIGGERED')))
         if not final:
             unresolved.append(cid)
         elif remember is not None:
