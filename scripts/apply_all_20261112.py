@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply 2026-11-12 system updates: 32h lookback default, paper-historic Base validation, overlay defaults."""
+"""Apply system defaults: 32h lookback, paper-historic Base validation, minPf 1.3, x01 50 symbols."""
 import json
 import re
 from pathlib import Path
@@ -65,16 +65,16 @@ COMMON = {
     "histRefreshS": 60,
     "realStagePaper": True,
     "stagesEnabled": True,
-    "setGateMinTrades": 1,
+    "setGateMinTrades": 3,
     "setGateWindow": 40,
     "setGateMinN": 0,
     "maxSlRatio": 1.0,
     "slMaxPct": 1.0,
     "setSlRatios": [0.5, 0.75, 1.0],
     "slMaxByRange": {"long": 0.75, "wide": 0.75, "normal": 0.75, "short": 0.6, "minimal": 0.5, "micro": 0.4},
-    "setMinStep": 3,
+    "setMinStep": 5,
     "minStep": 8,
-    "shortRangeStepMin": 3,
+    "shortRangeStepMin": 5,
     "shortRangeStepMax": 8,
     "minSlDistancePct": 0.12,
     "slMinPct": 0.25,
@@ -88,22 +88,25 @@ COMMON = {
     "holdAutoMin": 8,
     "holdAutoMax": 40,
     "minPfStepAuto": True,
-    "minPf": 1.15,
-    "setMinPf": 1.15,
-    "minPfMicro": 1.01,
+    "minPf": 1.3,
+    "setMinPf": 1.3,
+    "minPfMicro": 1.15,
     "minPfMicroN": 2,
-    "minPfSignals": 2.2,
+    "minPfSignals": 2.5,
     "mainGateN": 20,
     "realGateN": 12,
     "exitSetsByPack": {"indications": False},
-    "volumeByPack": {"general": 1.25, "indications": 0.75},
-    "volumeByPackKind": {"general:base": 1.5, "general:exit": 1.25, "indications:base": 0.7},
+    "volumeByPack": {"general": 1.5, "indications": 0.0},
+    "volumeByPackKind": {"general:base": 1.5, "general:exit": 0.5, "general:trail": 0.25, "indications:base": 0.0},
+    "stratIndications": False,
+    "maxEntrySlipPct": 2.0,
 }
-X01 = {**COMMON, "symbolCap": 30, "volumeFactor": 0.01, "targetNotional": 0.05, "sizeMaxNotional": 1.5, "sizePctOfBalance": 2}
-for name, patch in [("overlay-bingx-x01.json", X01), ("overlay-bingx-x02.json", COMMON)]:
+X01 = {**COMMON, "symbolCap": 50, "volumeFactor": 0.08, "targetNotional": 0.08, "sizeMaxNotional": 0.5, "sizePctOfBalance": 10}
+X02 = {**COMMON, "symbolCap": 70}
+for name, patch in [("overlay-bingx-x01.json", X01), ("overlay-bingx-x02.json", X02)]:
     path = root / "server/pulse" / name
     d = json.loads(path.read_text())
     d.update(patch)
     path.write_text(json.dumps(d, indent=2) + "\n")
-    print("updated", path.name, "histLookbackBars", d["histLookbackBars"])
+    print("updated", path.name, "cap", d.get("symbolCap"), "minPf", d.get("minPf"), "histLookbackBars", d["histLookbackBars"])
 print("done")
