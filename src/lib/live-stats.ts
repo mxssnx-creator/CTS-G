@@ -239,7 +239,7 @@ export type Execution = {
   /** The replay's result next to the exchange's result of the same settled Set closes (server: sim_diff.diff_report). */
   simDiff?: SimDiff;
 };
-export type SimDiffRow = { n: number; livePf: number | null; simPf: number | null; liveNetPct: number; simNetPct: number; fillGapPct: number; costGapPct: number; netGapPct: number; netGapPerClosePct: number | null };
+export type SimDiffRow = { n: number; livePf: number | null; simPf: number | null; liveNoLoss?: boolean; simNoLoss?: boolean; liveNetPct: number; simNetPct: number; fillGapPct: number; costGapPct: number; netGapPct: number; netGapPerClosePct: number | null };
 export type SimDiff = {
   closes: number; unknown: number; total: SimDiffRow; byExit: Record<string, SimDiffRow>; byPack: Record<string, SimDiffRow>;
   stopFactor: { n: number; median: number | null; mean: number | null; p90: number | null };

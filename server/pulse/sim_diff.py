@@ -116,6 +116,7 @@ def _pct(xs: List[float], q: float) -> Optional[float]:
 def _row(row: Dict[str, float]) -> Dict[str, Any]:
     n = int(row["n"])
     return {"n": n, "livePf": _pf(row["liveG"], row["liveL"]), "simPf": _pf(row["simG"], row["simL"]),
+            "liveNoLoss": row["liveG"] > 0 and row["liveL"] == 0, "simNoLoss": row["simG"] > 0 and row["simL"] == 0,
             "liveNetPct": round(100.0 * (row["liveG"] - row["liveL"]), 4), "simNetPct": round(100.0 * (row["simG"] - row["simL"]), 4),
             "fillGapPct": round(100.0 * row["fill"], 4), "costGapPct": round(100.0 * row["cost"], 4), "netGapPct": round(100.0 * row["net"], 4),
             "netGapPerClosePct": round(100.0 * row["net"] / n, 5) if n else None}
