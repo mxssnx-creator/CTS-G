@@ -9,6 +9,7 @@ on; 0 = off, the default), max drawdown time below setMaxDdtHours, and a fresh e
 keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
+import copy
 
 import re
 import bisect
@@ -1245,6 +1246,7 @@ class SetState:
     trail_key: str
     trail_arm: float
     trail_give: float
+    micro_sl_floor: Optional[float] = field(default=None, kw_only=True)  # captured absolute price fraction; None retains the legacy global policy
     trail_sl: float = 0.0           # a trailing Set of a trailing stop family (trailSlRatios): initial stop = trail_sl x its arm; 0 = the shipped family (TRAIL_SL_RATIO x the mid-step TP)
     step: int = 3
     tp_pct: float = 0.0045
@@ -1493,7 +1495,7 @@ def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = Non
     """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
     ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under TP_MIN_COSTS x PositionCost.
     The live trader takes a Set position's levels from here, so live and replay share one formula."""
-    return max(sl_floor_frac(cost_pct, min_distance_pct=min_sl_distance_pct), set_stop_base(st)), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
+    return max(getattr(st, "micro_sl_floor", None) if getattr(st, "micro_sl_floor", None) is not None else sl_floor_frac(cost_pct, min_distance_pct=min_sl_distance_pct), set_stop_base(st)), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
 
 
 def set_stop_base(st: "SetState") -> float:
@@ -1609,7 +1611,7 @@ def rest_after(cooldown: int, pause: int, win: bool) -> int:
 class SetLane:
     """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
     replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
-    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac", "hold", "honor", "pause")
+    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "sl_floor", "tp_frac", "hold", "honor", "pause")
 
     def __init__(self, st: "SetState", symbol: str) -> None:
         self.st = st
@@ -1622,6 +1624,7 @@ class SetLane:
         self.arm = st.trail_arm / 100.0 if self.use_trail else 0.0
         self.give = st.trail_give / 100.0 if self.use_trail else 0.0
         self.sl_base = set_stop_base(st)
+        self.sl_floor = st.micro_sl_floor
         self.tp_frac = st.tp_pct
         # TP by kind: a base Set takes its TP (the step is its target), an Exit Set never does (exitIgnoreTp is its own
         # strategy type), a trailing Set follows cfg["honor_tp"] (not exitIgnoreTp)
@@ -1684,7 +1687,7 @@ class SetLane:
             return None
         close = float(bar[3])
         cost_frac = cost_as_frac(cfg["cost_pct"])
-        sl_frac = max(sl_floor_frac(cfg["cost_pct"], min_distance_pct=cfg.get("min_sl_distance_pct")), self.sl_base)   # never under PositionCost + steps
+        sl_frac = max(self.sl_floor if self.sl_floor is not None else sl_floor_frac(cfg["cost_pct"], min_distance_pct=cfg.get("min_sl_distance_pct")), self.sl_base)   # never under PositionCost + steps
         tp_frac = max(TP_MIN_COSTS * cost_frac, self.tp_frac)       # a TP never under TP_MIN_COSTS x PositionCost
         if d > 0:
             sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
@@ -1725,7 +1728,7 @@ class SetLane:
         pause_fixed = self.pause
         cost_pct = cfg["cost_pct"]
         cost_frac = cost_as_frac(cost_pct)
-        sl_floor = sl_floor_frac(cost_pct, min_distance_pct=cfg.get("min_sl_distance_pct"))
+        sl_floor = self.sl_floor if self.sl_floor is not None else sl_floor_frac(cost_pct, min_distance_pct=cfg.get("min_sl_distance_pct"))
         honor_tp = bool(cfg["honor_tp"] if self.honor is None else self.honor)
         use_trail = self.use_trail
         arm = self.arm
@@ -2090,6 +2093,8 @@ class SetBook:
         self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT  # serialized legacy alias, not an active stop floor
         self.min_sl_distance_pct = MIN_SL_DISTANCE_PCT_DEFAULT
+        self.micro_min_sl_pct = None
+        self.micro_min_trail_pct = None
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
         # relationLanes: last-N lanes of the post-Base orders by relation (overall / indication / type / range / step), next to the per-configuration lanes; their
         # verdicts raise the volume of a member Set's positive-lane entry (relation_lanes.py). Off by default: nothing is built and every multiple is 1.
@@ -2152,7 +2157,7 @@ class SetBook:
             self._load(ov, cts)
             signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
-                              self.min_sl_distance_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
+                              self.min_sl_distance_pct, self.micro_min_sl_pct, self.micro_min_trail_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
@@ -2385,6 +2390,16 @@ class SetBook:
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
         self.short_steps = list(range(lo, hi + 1))
         self.min_sl_distance_pct = normalize_min_sl_distance_pct(ov.get("minSlDistancePct"))
+        def own_distance(key):
+            value = ov.get(key)
+            if value is None:
+                return None  # a saved legacy overlay retains its original economics
+            value = float(value)
+            if not math.isfinite(value) or not 0 <= value <= 10:
+                raise ValueError(key + " must be 0..10 percent of price")
+            return value
+        self.micro_min_sl_pct = own_distance("microMinSlDistancePct")
+        self.micro_min_trail_pct = own_distance("microMinTrailDistancePct")
         # Per-book trailing floor. Do not mutate process-wide defaults during configuration.
         self.trail_min_steps = int(max(1, min(7, round(finite(ov.get("trailMinSteps"), TRAIL_MIN_STEPS_DEFAULT)))))
         # Set grid: every SL ratio in setSlRatios (default 0.5..3.5 step 0.25) x every TP step x every pack.
@@ -2445,6 +2460,20 @@ class SetBook:
                        if math.isfinite(t[1]) and math.isfinite(t[2])
                        and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9
                        and t[2] + 1e-9 >= give_floor]
+        if self.micro_min_trail_pct is not None:
+            # Micro has its own gap ladder and does not inherit the global cost-step floor.
+            own_trails = {key: (key, arm, give) for key, arm, give in self.trails
+                          if tp_range_of(int(round(arm / TP_UNIT_PCT))) != "micro"}
+            lo = max(TRAIL_STEP_SETTING_MIN, int(finite(ov.get("trailMinStep"), TRAIL_STEP_DEFAULT)))
+            for step in range(lo, min(self.trail_step_max, 3) + 1):
+                arm = round(step * TP_UNIT_PCT, 4)
+                for gi in range(1, int(round(arm / .05)) + 1):
+                    give = round(gi * .05, 4)
+                    if give + 1e-9 < self.micro_min_trail_pct or give > arm + 1e-9:
+                        continue
+                    key = f"{arm:.2f}:{give:.2f}"
+                    own_trails[key] = (key, arm, give)
+            self.trails = list(own_trails.values())
         # named trailing ranges (trailRanges, owner 2026-11-03 "extend trailing with thin ranges"): the arm's step in the TP bands Micro .. Wide, each switched
         # on or off on its own; a range off builds none of its trailing Sets, the other ranges' Sets are unchanged (their ids carry arm and give only)
         self.trail_ranges = tp_ranges_on(ov.get("trailRanges")) if ov.get("trailRanges") is not None else {k: True for k in TP_RANGES_DEFAULT}
@@ -2629,6 +2658,8 @@ class SetBook:
                 st.active = True        # back on the grid: eligible again once it is re-scored
                 st.deact_reason = ""
                 st.evaluated_at = 0.0
+            step = st.step if st.kind != "trail" else int(round(st.trail_arm / TP_UNIT_PCT))
+            st.micro_sl_floor = self.micro_min_sl_pct / 100.0 if self.micro_min_sl_pct is not None and tp_range_of(step) == "micro" else None
             st.idx = idx
             next_sets[st.id] = st
             by_idx.append(st)
@@ -2665,7 +2696,7 @@ class SetBook:
             floor_sl = sl_floor_frac(self.cost_pct, min_distance_pct=self.min_sl_distance_pct)
 
             def eff_stop(r: float, k: int) -> float:
-                return round(max(floor_sl, step_tp_pct(k, self.cost_pct) * r), 12)
+                return round(max(self.micro_min_sl_pct / 100.0 if self.micro_min_sl_pct is not None and tp_range_of(k) == "micro" else floor_sl, step_tp_pct(k, self.cost_pct) * r), 12)
 
             def low_ok(r: float, k: int) -> bool:
                 """A low SL ratio (0.2 / 0.3 / 0.4) builds a Set at step k only when its floored stop differs from every other ratio's there:
@@ -3205,6 +3236,17 @@ class SetBook:
             with self._lock:
                 gen0 = self._topo_gen
                 lookback0 = self.lookback
+                # Feed refreshes replace bars and clocks while this pass is
+                # running. Keep one coherent frame for every requested symbol
+                # and every peer indication; later symbols must not read bars
+                # that closed after the pass's decision clock. Arrays are
+                # shared read-only, so this does not copy the market history.
+                replay_book = copy.copy(self)
+                replay_book.bars = market
+                replay_book.bar_t = dated
+            prefetch = getattr(self, '_prefetch_replay', None)
+            if prefetch is not None:
+                prefetch(replay_book, names, now)
             sym_failed = 0
             aborted = False
             for i, symbol in enumerate(names):
@@ -3219,7 +3261,7 @@ class SetBook:
                 per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
                 replay_bar_at = dated.get(symbol)
                 try:
-                    inputs = self._replay_symbol(symbol, per_set, now, on_step=on_step)
+                    inputs = replay_book._replay_symbol(symbol, per_set, now, on_step=on_step)
                 except Exception as exc:  # one symbol never stops the others
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
@@ -4309,6 +4351,8 @@ class SetBook:
             "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
             "minSlDistancePct": self.min_sl_distance_pct,
+            "microMinSlDistancePct": self.micro_min_sl_pct,
+            "microMinTrailDistancePct": self.micro_min_trail_pct,
             "effectiveMinSlPct": self.cost_pct + self.min_sl_distance_pct,
             "minSteps": {"trail": self.trail_min_steps},
             "trailMinLockPct": self.trail_min_lock,

@@ -33,7 +33,7 @@ import pickle
 import sys
 import time
 from array import array
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import hashlib
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -153,6 +153,9 @@ def _symbol_job(args):
 
 
 def build(names, bars, times, jobs: int):
+    from replay_storage import compact_shadow
+    if jobs < 1:
+        raise ValueError("replay workers must be positive")
     out = {}
     checkpoints = os.environ.get("STAGE_SYMBOL_CHECKPOINT_DIR")
     identity = None
@@ -169,18 +172,34 @@ def build(names, bars, times, jobs: int):
                                 if p.is_file() and p.suffix in ('.ts','.json')})
         os.makedirs(checkpoints,exist_ok=True)
         for symbol in names:
-            path=os.path.join(checkpoints,symbol+'.pkl')
+            path=os.path.join(checkpoints,symbol+('.pkl.gz' if os.environ.get('STAGE_CHECKPOINT_COMPRESS') == '1' else '.pkl'))
             if os.path.isfile(path):
-                out[symbol]=replay_cache.load(path,identity)
+                part = {symbol: replay_cache.load(path,identity)}
+                compact_shadow(part)
+                out[symbol] = part[symbol]
                 print(f"shadow checkpoint {len(out)}/{len(names)} {symbol}",flush=True)
     with ProcessPoolExecutor(max_workers=jobs, initializer=_init_replay_market, initargs=(bars, times)) as pool:
-        work={pool.submit(_symbol_job,(s,bars[s],times[s][0])):s for s in names if s not in out}
-        for future in as_completed(work):
-            s,w,d,c,o=future.result()
-            out[s] = (w, d, c, o)
-            if checkpoints:
-                replay_cache.save(os.path.join(checkpoints,s+'.pkl'),out[s],identity)
-            print(f"shadow {len(out)}/{len(names)} {s}", flush=True)
+        pending = {}
+        remaining = iter(s for s in names if s not in out)
+        def submit_next():
+            s = next(remaining, None)
+            if s is not None:
+                pending[pool.submit(_symbol_job, (s, bars[s], times[s][0]))] = s
+        for _ in range(jobs):
+            submit_next()
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                pending.pop(future)
+                s,w,d,c,o = future.result()
+                part = {s: (w, d, c, o)}
+                compact_shadow(part)
+                out[s] = part[s]
+                if checkpoints:
+                    suffix = '.pkl.gz' if os.environ.get('STAGE_CHECKPOINT_COMPRESS') == '1' else '.pkl'
+                    replay_cache.save(os.path.join(checkpoints,s+suffix),out[s],identity)
+                print(f"shadow {len(out)}/{len(names)} {s}", flush=True)
+                submit_next()
     return out
 
 

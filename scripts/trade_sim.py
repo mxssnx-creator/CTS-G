@@ -30,6 +30,7 @@ usage: trade_sim.py --data DIR --cache shadow.pkl [--symbols 20] [--out FILE] [-
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import bisect
 import collections
 import heapq
@@ -188,7 +189,7 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--out", default="")
     ap.add_argument("--sealed", action="store_true", help="read the sealed window (finalists only, once)")
-    ap.add_argument("--patch", default="", help="overlay patch (JSON) applied to the x01 overlay")
+    ap.add_argument("--patch", default="", help="overlay patch: JSON object or a path to a JSON file")
     ap.add_argument("--refresh", type=int, default=0, help="seconds between gate evaluations of the execution; 0 = per order")
     ap.add_argument("--eval-every", type=int, default=600, help="seconds between the listing's validation samples")
     ap.add_argument("--last-hours", type=int, default=0, help="simulate only the last N hours of the data (a report window)")
@@ -196,12 +197,22 @@ def main() -> int:
     ap.add_argument("--stage-details", action="store_true", help="export each hourly last-N stage by type and TP range")
     ap.add_argument("--execution-cache", default="", help="trusted local detailed executed parents, for independent strategy comparisons")
     ap.add_argument("--axis-current", action="store_true", help="apply the overlay's Axis rules to every entry, as live")
-    ap.add_argument("--indexed-stage", action="store_true", help="exact causal prefix index for immutable tapes; native fallback on context expiry")
+    query_mode = ap.add_mutually_exclusive_group()
+    query_mode.add_argument("--indexed-stage", dest="indexed_stage", action="store_true", default=True,
+                           help="use exact causal prefix indexing (default); native fallback on context expiry")
+    query_mode.add_argument("--native-stage", dest="indexed_stage", action="store_false",
+                           help="use uncached native stage queries for independent comparison")
     ap.add_argument("--next", default="", help="extra next-N order windows after a validation, e.g. 15,25 (next_pf in the JSON)")
     a = ap.parse_args()
     args_refresh = max(60, min(3600, int(a.eval_every)))
     if a.patch:
-        os.environ["STAGE_OVERLAY_PATCH"] = a.patch
+        try:
+            patch = json.loads(a.patch if a.patch.lstrip().startswith('{') else Path(a.patch).read_text())
+            if not isinstance(patch, dict):
+                raise ValueError('patch must be a JSON object')
+        except (OSError, ValueError) as exc:
+            ap.error(f'invalid overlay patch: {exc}')
+        os.environ["STAGE_OVERLAY_PATCH"] = json.dumps(patch)
     import stage_eval as sg  # noqa: E402  (reads STAGE_OVERLAY_PATCH)
     import replay_cache  # noqa: E402
     from position_cost import MIN_VALIDATION_N, cost_as_frac  # noqa: E402
@@ -507,7 +518,9 @@ def main() -> int:
     print(f"-- last-N: fewest gate-window orders behind a validation {min(vmin) if vmin else None} (gate minimum {book.gate_min})")
     if a.out:
         os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
-        json.dump(out, open(a.out + ".json", "w"), indent=1)
+        output_path = a.out if a.out.endswith('.json') else a.out + '.json'
+        with open(output_path, 'w') as stream:
+            json.dump(out, stream, indent=1)
     print(f"done [{time.time() - t0:.0f}s]")
     return 0
 

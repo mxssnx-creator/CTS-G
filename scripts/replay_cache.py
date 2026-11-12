@@ -1,5 +1,6 @@
 """Fingerprint and verify trusted, locally generated shadow replay caches."""
 import hashlib
+import gzip
 import json
 import os
 import pickle
@@ -41,7 +42,11 @@ def load(cache, expected):
         meta = json.load(f)
     if meta.get("fingerprint") != expected or meta.get("cacheSha256") != file_sha(cache):
         raise ValueError("cache provenance differs from the market data, settings, engine or saved bytes")
-    with open(cache, "rb") as f:
+    encoding = meta.get("encoding", "pickle")
+    if encoding not in ("pickle", "pickle-gzip"):
+        raise ValueError("unsupported replay cache encoding")
+    opener = gzip.open if encoding == "pickle-gzip" else open
+    with opener(cache, "rb") as f:
         return pickle.load(f)
 
 
@@ -53,8 +58,14 @@ def save(cache, value, expected):
     try:
         with tempfile.NamedTemporaryFile(dir=directory, delete=False) as f:
             temporary.append(f.name)
-            pickle.dump(value, f)
+            if str(cache).endswith(".gz"):
+                with gzip.GzipFile(filename="", fileobj=f, mode="wb", compresslevel=1, mtime=0) as packed:
+                    pickle.dump(value, packed)
+            else:
+                pickle.dump(value, f)
         meta = {"fingerprint": expected, "cacheSha256": file_sha(temporary[0])}
+        if str(cache).endswith(".gz"):
+            meta["encoding"] = "pickle-gzip"
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as f:
             temporary.append(f.name)
             json.dump(meta, f, sort_keys=True)

@@ -1,20 +1,19 @@
-# Bounded compact regression memo
+# Bounded regression memo
 
-The repeated full-grid test fixture spans four symbols. A two-symbol LRU evicts
-the previous pass before any entry can be reused. The harness now retains up to
-four symbols and two million observations, stored in compact native columns.
-An oversized symbol is replayed normally without retaining it. This changes
-test execution only; the trading engine does not import this memo.
+Repeated full-grid fixtures span four symbols. The memo retains immutable,
+compressed raw replay snapshots, up to 32 entries and 64 MiB of payload.
+Every hit decodes fresh rows and input arrays. Oversized or unpickleable
+snapshots run through the native replay without retention. Native scoring,
+stage admission and Last-N evaluations still execute for each check.
 
-Every hit reconstructs fresh row dictionaries with the original Set identity.
-Verify mode also reruns the native replay and compares every row and signal
-input. Cost, candle, distance, global minimum, topology and clock inputs remain
-part of the identity. Peer-dependent imported signals and pause-dependent
-replays use the native path rather than a symbol-only memo.
+The integrated tests retain the four-symbol native comparison, cost/candle/
+distance invalidation, copied-input isolation and oversized-cache checks from
+the earlier compact-column memo. Dependent peer frames and fixed pause
+settings are now represented in the key. Automatic pause closures that cannot
+be serialized take the native path. Global legacy stop-step settings no
+longer affect a book's raw replay: distance inputs are explicit per book.
+Admission-only window changes may reuse raw rows and must rerun their own
+scoring. The cache is used only by the regression harness.
 
-Five focused checks cover exact four-symbol native parity, input invalidation,
-copy isolation, row-budget eviction, oversized tapes and the dependent-input
-fallbacks. CI runs these alongside the scheduling and complete engine suites.
-The optional controlled benchmark alternates two/four/four/two-symbol limits
-on identical seeded histories; it measures repeated fixtures, not whole-suite
-wall time or trading-loop latency.
+See [performance and native verification](performance-native-x02-20261111.md)
+for measured timings, frozen economic parity and execution limitations.

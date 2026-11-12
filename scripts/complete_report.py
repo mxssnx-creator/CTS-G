@@ -27,6 +27,19 @@ def assemble(baseline, breadth, strategies=None, checks=None):
     return dict(baseline=baseline, breadth=breadth, strategies=strategies or {}, checks=checks or {})
 
 
+def display_payload(data):
+    """Retain every displayed result without embedding unused aggregate cubes.
+
+    Complete machine-readable results remain in the input JSON. Make fresh
+    mappings so report generation never changes that evidence in memory.
+    """
+    baseline = {k: v for k, v in data['baseline'].items() if k != 'stage_evaluations'}
+    breadth = dict(data['breadth'])
+    breadth['stage_evaluations'] = [row for row in breadth.get('stage_evaluations', [])
+                                    if row['dimension'] in ('all', 'type')]
+    return {**data, 'baseline': baseline, 'breadth': breadth}
+
+
 TEMPLATE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>CTS-G · 50-symbol execution audit</title>
 <style>
@@ -84,6 +97,7 @@ def main():
     parser.add_argument('--strategies')
     parser.add_argument('--checks')
     parser.add_argument('--out', required=True)
+    parser.add_argument('--full-payload', action='store_true', help='also embed aggregate cubes unused by the display')
     args = parser.parse_args()
     read = lambda p: json.loads(Path(p).read_text()) if p else None
     data = assemble(read(args.baseline), read(args.breadth), read(args.strategies), read(args.checks))
@@ -91,7 +105,7 @@ def main():
     data.update(generated=dt.datetime.now(dt.timezone.utc).isoformat(),
                 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),
                 branch=subprocess.check_output(['git','branch','--show-current'],cwd=root,text=True).strip())
-    raw = json.dumps(data, separators=(',',':'), allow_nan=False).replace('<','\\u003c')
+    raw = json.dumps(data if args.full_payload else display_payload(data), separators=(',',':'), allow_nan=False).replace('<','\\u003c')
     Path(args.out).write_text(TEMPLATE.replace('__DATA__', raw))
     print(args.out)
 

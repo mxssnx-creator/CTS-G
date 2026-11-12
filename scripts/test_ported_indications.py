@@ -56,7 +56,7 @@ class Ported(unittest.TestCase):
   js="import {waveBars} from './shared/cts-indications/fixtures.ts';console.log(JSON.stringify(waveBars(240)))"
   rows=json.loads(subprocess.check_output(['node','--experimental-strip-types','--input-type=module','-e',js],cwd=ROOT,text=True));bars=[[b[k] for k in ['open','high','low','close','volume']]for b in rows];base=rows[0]['timestamp']/1000+60
   names=['ao__inverse-known-ema-9-21__t1','ao__tactic-dca-bounce-8-percent-0.5-1-0.25__t1'];packs=['extra.'+n for n in names]
-  out=pack_signals(bars,packs,{},base,0);self.assertTrue(any(x[0]for x in out[packs[0]]));self.assertTrue(all(known(n)for n in names));self.assertTrue(all(n not in INDICATORS for n in names),'native votes are unchanged')
+  out=pack_signals(bars,packs,{},base,0);self.assertTrue(any(x[0]for x in out[packs[0]]),p.status());self.assertTrue(all(known(n)for n in names));self.assertTrue(all(n not in INDICATORS for n in names),'native votes are unchanged')
   for i in [80,120,160,239]:
    live=bar_signal(bars,i,packs,{},base+i*60)
    for pack in packs:self.assertEqual(live[pack],out[pack][i])
