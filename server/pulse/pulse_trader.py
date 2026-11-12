@@ -4636,6 +4636,14 @@ class Pulse:
                              for p in rows2 if abs(float(p.get("positionAmt") or 0)) > 1e-12}
             if (pos.symbol, pos.side) in confirmed:
                 continue
+            settlement=self.verified_position_settlement(pos)
+            if settlement:
+                pos.downtime_close=True
+                self.cancel_controls(pos.symbol,side=pos.side)
+                self.close_pos(pos,settlement['exit'],'external-position-close',exchange=False)
+                self.note_restore('closed-by-history',pos.symbol,pos.side,'exact owned position settled while offline')
+                self.cooldown[pos.symbol]=time.time()+90.0
+                continue
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
             self.note_restore("dropped", pos.symbol, pos.side, "the venue no longer holds it (two reads)")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
@@ -4702,6 +4710,13 @@ class Pulse:
             if not self.ok(response)or not isinstance(rows,list):return None
             from position_settlement import verify_position_settlement
             proof_pos=pos if external else dc_replace(pos,close_filled_qty=0)
+            # Older saved books may contain the position endpoint's rounded
+            # average. The original confirmed base fill remains authoritative.
+            exact_entry=float(entry.get('avgPrice')or 0)
+            if (not pos.block_fills and not pos.dca_fills and pos.base_qty>0
+                    and abs(pos.base_qty-pos.qty)<=max(1e-12,pos.qty*1e-10)
+                    and abs(pos.base_entry-exact_entry)<=max(1e-12,exact_entry*1e-10)):
+                proof_pos=dc_replace(proof_pos,entry=exact_entry)
             result=verify_position_settlement(proof_pos,entry,rows,now)
             if not result:return None
             # No add-on allocation is involved: the entire verified position
@@ -4710,6 +4725,7 @@ class Pulse:
             if entry_fee<0 or entry_fee>result['fees']+1e-10:return None
             pos.entry_fee_usdt=entry_fee
             pos.base_entry_fee_usdt=entry_fee
+            pos.entry=pos.base_entry=result['entry']
             pos.exit_fee_usdt=max(0.0,result['fees']-entry_fee)
             pos.exit_fee_qty=pos.qty
             pos.fee_source='reported-fee'
@@ -6652,6 +6668,9 @@ class Pulse:
             ranked = sorted(ranked, key=_min_n)
         placed = 0
         skipped = 0
+        # Yield between slow synchronous venue placements so the next cycle can
+        # manage held positions. Eligible candidates remain available next cycle.
+        entry_deadline = time.monotonic() + max(0.05, SCAN_S)
         for conf, s, d, why in ranked:
             if self.entries_blocked():
                 break
@@ -6668,7 +6687,8 @@ class Pulse:
             burst = 16 if MAX_OPEN <= 0 else 6  # unlimited: no order-count throttle
             if room < 8:
                 burst = 1
-            if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
+            if (time.monotonic() >= entry_deadline or placed >= burst
+                    or (slot_cap > 0 and len(self.open) >= slot_cap)):
                 break
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
@@ -6717,6 +6737,52 @@ class Pulse:
             return True
         return False
 
+    def reconcile_block_pending(self, pos: Position, venue_qty: float) -> bool:
+        """Consume only the pending add's exact cumulative order receipt.
+
+        A position snapshot proves neither its entry price nor who added it.
+        Partial receipts carry a persisted cumulative watermark across polls.
+        """
+        intent=pos.block_pending
+        if not intent:return False
+        try:
+            cid=str(intent['client_id']).lower()
+            if not self.cid_ours(cid):return False
+            reply=self.api.get('/openApi/swap/v2/trade/order',{'symbol':pos.symbol,'clientOrderId':cid})
+            data=reply.get('data')or{};row=data.get('order',data)
+            if (not self.ok(reply)or not isinstance(row,dict)or row.get('symbol')!=pos.symbol
+                    or row.get('positionSide')!=pos.side
+                    or row.get('side')!=('BUY'if pos.side=='LONG'else'SELL')
+                    or str(row.get('clientOrderId')or row.get('clientOrderID')or'').lower()!=cid
+                    or not real_oid(row.get('orderId')or row.get('orderID'))):return False
+            quantity=float(row.get('executedQty')or 0);previous=float(intent.get('accountedQty',0))
+            requested=float(intent['qty']);tolerance=max(1e-12,requested*1e-10)
+            if not all(math.isfinite(x)for x in(quantity,previous,requested,venue_qty)):return False
+            if requested<=0 or quantity<previous-tolerance or quantity>requested+tolerance or quantity<0:return False
+            delta=quantity-previous
+            if venue_qty<pos.qty+delta-max(1e-12,venue_qty*1e-10):return False
+            if delta>tolerance:
+                avg=float(row.get('avgPrice')or 0);value=quantity*avg
+                add_value=value-float(intent.get('accountedValue',0));price=add_value/delta
+                if not all(math.isfinite(x)and x>0 for x in(avg,price,add_value)):return False
+                total_fee,source=self.fill_cost(row,quantity,avg,pos.symbol,pos)
+                fee=total_fee-float(intent.get('accountedFee',0))
+                if not math.isfinite(fee):return False
+                pos.block_fills.append({'group':int(intent['group']),'qty':delta,'price':price,
+                    'client_id':cid,'order_id':str(row.get('orderId')or row.get('orderID')),'t':intent['t'],
+                    'fee_usdt':fee if source!='configured-estimate'else None})
+                pos.entry=(pos.qty*pos.entry+add_value)/(pos.qty+delta)
+                pos.qty+=delta;pos.notional=pos.qty*pos.entry
+                if pos.entry_fee_usdt is not None:
+                    pos.entry_fee_usdt+=fee;self.note_fee_source(pos,source)
+                intent.update(accountedQty=quantity,accountedValue=value,accountedFee=total_fee)
+                pos.controls_ok=pos.ctrl_verified=False
+            if str(row.get('status','')).upper()in('FILLED','CANCELED','CANCELLED','EXPIRED','REJECTED'):
+                pos.block_pending={}
+            self.save_open_book()
+            return True
+        except (ValueError,TypeError,KeyError,OverflowError):return False
+
     def adopt_exchange_positions(self) -> None:
         """Refresh OUR book only. Ignore any exchange position/order without our tracking id."""
         self.did_io = True
@@ -6750,11 +6816,7 @@ class Pulse:
                     if self.close_from_venue(pos, "stale"):
                         self.cooldown[sym] = time.time() + 90.0
                         continue
-                    log(f"DROP stale local {sym} (exchange flat)")
-                    self._exec_inc("dropped")       # left the book with no close record: counted, never lost
-                    self.cancel_controls(sym, side=pos.side)
-                    self.rounds_release(pos)
-                    self.open.pop(sym, None)
+                    self.drop_ghost(pos, 'stale')
                     self.cooldown[sym] = time.time() + 90.0
                 self.save_open_book()
             log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
@@ -6827,26 +6889,13 @@ class Pulse:
                         ours.ctrl_undercovered = True
                         self.last_error = f"unattributed position reduction: {sym} {side}; waiting for own fills"
                     continue
-                if px > 0 and ours.close_filled_qty == 0:
-                    # A position snapshot has no close fill price/fee attribution.
-                    # It must not undo a confirmed partial or count it a second time.
-                    if ours.block_pending and qty > ours.qty + 1e-12:
-                        add_qty = qty - ours.qty
-                        add_price = (qty * px - ours.qty * ours.entry) / add_qty
-                        intent = ours.block_pending
-                        if add_price > 0 and add_qty <= float(intent.get("qty") or 0) * 1.001:
-                            fee, source = self.fill_cost({}, add_qty, add_price, sym, ours)
-                            ours.block_fills.append({"group": int(intent["group"]), "qty": add_qty, "price": add_price,
-                                                    "client_id": intent["client_id"], "t": intent["t"],
-                                                    "fee_usdt": fee if source != "configured-estimate" else None})
-                            if ours.entry_fee_usdt is not None:
-                                ours.entry_fee_usdt += fee
-                                self.note_fee_source(ours, source)
-                            ours.block_pending = {}
-                    ours.qty = qty
-                    ours.entry = px
-                    ours.notional = qty * px
-                    ours.ours = True
+                if ours.close_filled_qty == 0:
+                    if ours.block_pending:self.reconcile_block_pending(ours,qty)
+                    if qty>ours.qty+max(1e-12,ours.qty*1e-10):
+                        self.last_error=f'unattributed position increase ignored: {sym} {side}; waiting for exact own fills'
+                    # The snapshot average can be rounded by a whole tick.
+                    # Keep the confirmed fill ledger even when quantity agrees.
+                    ours.notional=ours.qty*ours.entry
                 if not getattr(ours, "set_id", "") and tagged:
                     try:
                         trk = self.parse_track(self.order_cid(tagged[0])) or {}

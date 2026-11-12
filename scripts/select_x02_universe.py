@@ -34,6 +34,7 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--exclude',nargs='+',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
+    ap.add_argument('--symbol-count',type=int,default=50,choices=range(1,51))
     ap.add_argument('--overlay',type=Path,default=ROOT/'server/pulse/overlay-bingx-x02.json')
     ap.add_argument('--seed',type=Path,help='reuse recent, validated VST candles without re-downloading them')
     args=ap.parse_args()
@@ -58,8 +59,9 @@ def main():
         except (ValueError,TypeError):return 0
     candidates=sorted((row['symbol']for row in contracts if ordinary_crypto_contract(row)
                        and row['symbol']not in excluded),key=lambda s:(-volume(s),s))
-    if len(candidates)<50:raise RuntimeError('fewer than 50 disjoint active contracts')
-    raw=json.loads(args.overlay.read_text());book=SetBook();book.load(frozen_overlay(raw,candidates[:50]))
+    count=args.symbol_count
+    if len(candidates)<count:raise RuntimeError('fewer disjoint active contracts than requested')
+    raw=json.loads(args.overlay.read_text());book=SetBook();book.load(frozen_overlay(raw,candidates[:count],symbol_count=count))
     if args.seed:seed_history(book,args.seed,candidates,time.time())
     seeded=frozenset(book.bars)
     target=book.history_bars()+1
@@ -97,17 +99,17 @@ def main():
         for _ in range(4):
             symbol=next(todo,None)
             if symbol:pending.append((symbol,pool.submit(fetch,symbol)))
-        while pending and len(selected)<50:
+        while pending and len(selected)<count:
             symbol,future=pending.popleft();symbol,data,why=future.result()
             if data:selected[symbol]=data
             else:rejected[symbol]=why
             print(json.dumps({'selected':len(selected),'checked':len(selected)+len(rejected),'symbol':symbol,'quality':why or 'valid'}),flush=True)
             atomic_json(args.out/'progress.json',{'selected':list(selected),'rejected':rejected,'excluded':sorted(excluded)})
-            if len(selected)<50:
+            if len(selected)<count:
                 symbol=next(todo,None)
                 if symbol:pending.append((symbol,pool.submit(fetch,symbol)))
         for _,future in pending:future.cancel()
-    if len(selected)!=50:raise RuntimeError('could not obtain 50 valid disjoint market histories')
+    if len(selected)!=count:raise RuntimeError('could not obtain all requested valid disjoint market histories')
     symbols=list(selected)
     atomic_json(args.out/'session.json',{'host':HOST,'connection':CONN,'symbols':symbols,
                 'selection':'ordinary crypto contracts with matching symbol/display name; synthetic aliases/commodities excluded; descending reported quote volume; full candle quality/continuity; no PnL selection',

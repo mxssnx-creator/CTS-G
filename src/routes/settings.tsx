@@ -1085,6 +1085,12 @@ function SettingsPage() {
                   hint={overlay.minPfBySize !== false ? "The window-size PF controls currently take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
+                <Slider label="Micro minimum SL (% of entry)" value={overlay.microMinSlDistancePct} min={0} max={10} step={0.01}
+                  hint="Absolute Micro-only stop floor, shared by replay and live Set lanes. Costs are deducted once from returns."
+                  onChange={(v) => patch("microMinSlDistancePct", v)} />
+                <Slider label="Micro minimum trailing gap (% of entry)" value={overlay.microMinTrailDistancePct} min={0} max={10} step={0.01}
+                  hint="Micro trailing gaps use their own ladder instead of the global cost-step floor."
+                  onChange={(v) => patch("microMinTrailDistancePct", v)} />
                 <Slider
                   label="Minimum SL above costs (%)"
                   value={overlay.minSlDistancePct}
