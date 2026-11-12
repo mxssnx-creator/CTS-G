@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Alternate identical ordinary-pack signals against the pre-optimization math."""
-import argparse,contextlib,hashlib,json,statistics,sys,time
+import argparse,contextlib,hashlib,importlib.util,json,statistics,sys,time
 from pathlib import Path
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
@@ -16,9 +16,14 @@ def main():
     ap.add_argument('--market',type=Path,required=True)
     ap.add_argument('--overlay',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
+    ap.add_argument('--baseline-lib',type=Path,help='Frozen published indication_lib.py; otherwise use the pre-optimization mathematical oracle')
     ap.add_argument('--windows',type=int,default=12)
     ap.add_argument('--repeats',type=int,default=5)
     args=ap.parse_args()
+    baseline=None
+    if args.baseline_lib:
+        spec=importlib.util.spec_from_file_location('published_indication_baseline',args.baseline_lib)
+        baseline=importlib.util.module_from_spec(spec);spec.loader.exec_module(baseline)
     raw=args.market.read_bytes();rows=json.loads(raw)
     bars=[r[1:6]for r in rows];ov=json.loads(args.overlay.read_text());book=se.SetBook();book.load(ov)
     start=len(bars)-args.windows
@@ -27,21 +32,28 @@ def main():
         for mode in (('plain','optimized')if repetition%2==0 else('optimized','plain')):
             with contextlib.ExitStack()as stack:
                 if mode=='plain':
-                    families=dict(lib.FAMILIES);families['kama']=(families['kama'][0],old_kama)
-                    stack.enter_context(patch.multiple(lib,_atr=old_atr,_ema=old_ema,_rsi=old_rsi,_wma=old_wma,FAMILIES=families))
-                    stack.enter_context(patch.dict(extra.INDICATORS,lib.build()))
+                    if baseline:
+                        baseline._tls.memo={}
+                        if hasattr(baseline,'clear_vector_memo'):baseline.clear_vector_memo()
+                        stack.enter_context(patch.dict(extra.INDICATORS,baseline.LIB))
+                    else:
+                        families=dict(lib.FAMILIES);families['kama']=(families['kama'][0],old_kama)
+                        stack.enter_context(patch.multiple(lib,_atr=old_atr,_ema=old_ema,_rsi=old_rsi,_wma=old_wma,FAMILIES=families))
+                        stack.enter_context(patch.dict(extra.INDICATORS,lib.build()))
                 lib._tls.memo={};lib.clear_vector_memo()
                 before=time.perf_counter()
                 signals=[se.bar_signal(bars,i,book.packs,book.ind_settings,rows[i][0]/1000+60)for i in range(start,len(bars))]
                 elapsed=time.perf_counter()-before
                 digest=hashlib.sha256(json.dumps(signals,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
                 if expected is None:expected=digest
-                if digest!=expected:raise AssertionError('Optimized directions/confidences/reasons differ from the plain oracle')
+                if digest!=expected:raise AssertionError('Optimized directions/confidences/reasons differ from the baseline')
                 result=dict(repetition=repetition,mode=mode,seconds=elapsed,sha256=digest,vectorMemo=lib.vector_memo_info())
                 results.append(result)
                 print(json.dumps({'mode':mode,'seconds':round(elapsed,4),'repetition':repetition}),flush=True)
     ratios=[next(x['seconds']for x in results if x['mode']=='plain'and x['repetition']==i)/next(x['seconds']for x in results if x['mode']=='optimized'and x['repetition']==i)for i in range(args.repeats)]
     report=dict(schema='cts-g-indication-primitive-benchmark-v1',marketSha256=hashlib.sha256(raw).hexdigest(),
+        baseline='published-library'if baseline else'plain-math-oracle',
+        baselineLibrarySha256=hashlib.sha256(args.baseline_lib.read_bytes()).hexdigest()if baseline else None,
         librarySha256=hashlib.sha256(Path(lib.__file__).read_bytes()).hexdigest(),packs=list(book.packs),windows=args.windows,
         repetitions=args.repeats,medianSpeedup=statistics.median(ratios),pairedSpeedups=ratios,allOutputsIdentical=True,
         signalRowsPerRun=args.windows*len(book.packs),allSignalRowsCompared=args.windows*len(book.packs)*len(results),
