@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server/pulse'))
 import pulse_trader as pt
-from native_cleanup_evidence import terminal_intents
+from native_cleanup_evidence import terminal_intents, resolve_bound_intents, definite_refusal
 from x02_native_session import order_bodies
 
 
@@ -55,6 +55,37 @@ class CleanupEvidence(unittest.TestCase):
         self.assertEqual(terminal_intents(api,[intent],time.monotonic()-1,order_bodies),[body['clientOrderID']])
         self.assertEqual(calls,[])
 
+    def test_exact_bound_control_resolves_when_archive_omits_it(self):
+        body, row, intent = self.fixture()
+        body.update(type='STOP_MARKET', side='SELL')
+        row.update(type='STOP_MARKET', side='SELL', status='CANCELLED')
+        calls=[];remembered=[]
+        api=SimpleNamespace(get=lambda *args:calls.append(args) or {'code':0,'data':{'order':row}})
+        binding={(body['symbol'],row['orderId']):body}
+        self.assertEqual(resolve_bound_intents(api,[intent],[body['clientOrderID']],time.monotonic()+2,
+            order_bodies,binding,lambda r,b:remembered.append((r,b))),[])
+        self.assertEqual(calls[0][1],{'symbol':body['symbol'],'orderId':row['orderId']})
+        self.assertEqual(len(remembered),1)
+
+    def test_bound_lookup_rejects_wrong_identity_and_unfinished_market(self):
+        body,row,intent=self.fixture();binding={(body['symbol'],row['orderId']):body}
+        for key,value in [('orderId','88'),('symbol','OTHER-USDT'),('positionSide','SHORT'),
+                          ('side','SELL'),('type','LIMIT'),('status','NEW'),('clientOrderID','foreign')]:
+            with self.subTest(key=key):
+                api=SimpleNamespace(get=lambda *args:{'code':0,'data':{'order':{**row,key:value}}})
+                self.assertEqual(resolve_bound_intents(api,[intent],[body['clientOrderID']],time.monotonic()+2,
+                    order_bodies,binding),[body['clientOrderID']])
+
+    def test_unbound_or_expired_submissions_remain_unresolved_without_lookup(self):
+        body,row,intent=self.fixture();calls=[]
+        api=SimpleNamespace(get=lambda *args:calls.append(args))
+        for response,deadline in [({'code':-1,'error':True},time.monotonic()+2),
+                                  (intent['response'],time.monotonic()-1)]:
+            pending={**intent,'response':response}
+            self.assertEqual(resolve_bound_intents(api,[pending],[body['clientOrderID']],deadline,
+                order_bodies,{}),[body['clientOrderID']])
+        self.assertEqual(calls,[])
+
     def test_definite_refusal_needs_no_fill_lookup_but_unknown_dispatch_does(self):
         body,row,intent=self.fixture();calls=[]
         api=SimpleNamespace(get=lambda *args:calls.append(args)or {'code':0,'data':{'orders':[]}})
@@ -68,6 +99,16 @@ class CleanupEvidence(unittest.TestCase):
         uncertain={**intent,'response':{'code':109421,'msg':'order unavailable'}}
         self.assertEqual(terminal_intents(api,[uncertain],time.monotonic()+2,order_bodies),[body['clientOrderID']])
         self.assertEqual(len(calls),2)
+
+    def test_explicit_no_position_close_refusal_is_narrowly_identified(self):
+        rejected={'code':101205,'msg':'No position to close','data':{}}
+        self.assertTrue(definite_refusal(rejected))
+        for changed in [{'msg':'order unavailable'},{'error':True},{'data':{'orderId':'123'}},{'code':109421}]:
+            self.assertFalse(definite_refusal({**rejected,**changed}))
+        body,row,intent=self.fixture();calls=[]
+        api=SimpleNamespace(get=lambda *args:calls.append(args))
+        self.assertEqual(terminal_intents(api,[{**intent,'response':rejected}],time.monotonic()+2,order_bodies),[])
+        self.assertEqual(calls,[])
 
     def test_slow_placements_yield_and_all_eligible_entries_still_progress(self):
         p=pt.Pulse.__new__(pt.Pulse);p.halted=False;p.real_stage_paper=False
