@@ -19,6 +19,12 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Python runtime dependencies
+        run: python -m pip install -r requirements.txt
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
       - name: Check types
@@ -37,11 +43,17 @@ jobs:
       - name: Run offline engine tests
         run: python3 scripts/regression/run.py --jobs 4
       - name: Check VST transport and accounting offline
-        run: PYTHONPATH=server/pulse:scripts python3 -m unittest scripts/test_x02_batch.py
+        run: |
+          PYTHONPATH=server/pulse:scripts python3 -m unittest scripts/test_x02_batch.py
+          python3 scripts/test_bingx_signed_pool.py
+          python3 scripts/test_native_fill_audit.py
+          python3 scripts/test_position_settlement.py
+          python3 scripts/test_compact_replay_memory.py
       - name: Check x02 ownership and protection offline
         run: |
           python3 scripts/test_x02_native_session.py
           python3 scripts/test_native_cleanup_evidence.py
+          python3 scripts/test_fee_scope_refresh.py
           python3 scripts/test_venue_fill_fees.py
           python3 scripts/test_disjoint_lastn.py
           python3 scripts/test_trailing_control_pacing.py
