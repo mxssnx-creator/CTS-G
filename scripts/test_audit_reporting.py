@@ -17,6 +17,12 @@ from fee_policy import cost_policy, paper_cost_pct
 
 
 class AuditReporting(unittest.TestCase):
+    def test_execution_pf_distinguishes_no_sample_no_loss_and_a_real_ratio_of_99(self):
+        from extend_native_report import execution_pf
+        self.assertEqual(execution_pf({'orders':0,'exec_gain':0,'exec_loss':0}),'—')
+        self.assertEqual(execution_pf({'orders':1,'exec_gain':1,'exec_loss':0}),'∞')
+        self.assertEqual(execution_pf({'orders':2,'exec_gain':99,'exec_loss':1}),'99.000')
+        self.assertEqual(execution_pf({'orders':1,'exec_gain':0,'exec_loss':0}),'1.000')
     def test_partial_last_market_hour_is_not_reported_as_a_complete_hour(self):
         from trade_sim import complete_report_hours
         self.assertEqual(complete_report_hours(0,2*3600+25*60),[0.,3600.])

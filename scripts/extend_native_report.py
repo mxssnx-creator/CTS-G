@@ -31,6 +31,13 @@ def pf(values):
     gain=sum(max(v,0)for v in values);loss=-sum(min(v,0)for v in values)
     return gain/loss if loss else('∞'if gain else 1.0)
 def pftext(value):return value if isinstance(value,str)else number(value)
+def execution_pf(row):
+    if not row.get('orders'):return '—'
+    gain,loss=row.get('exec_gain'),row.get('exec_loss')
+    if gain is not None and loss is not None:
+        return pftext(gain/loss if loss else('∞'if gain else 1.0))
+    if row.get('wins')==row['orders']:return '∞'
+    return number(row.get('exec_pf'))
 
 
 def plot(title,series,labels):
@@ -147,9 +154,9 @@ def fresh_section(path):
     parts=['<section id="fresh"><h2>Fresh 50-symbol replay · unchanged x02 preset</h2><p class="sub">'+esc(stamp(run['start_utc'])+' → '+stamp(run['end_utc'])+' Europe/Vienna · '+str(run['hours'])+' scored hours · measured account fees · separate disjoint market universe')+'</p>']
     parts.append('<div class="cards">'+''.join([card('Configured Sets',number(run['sets'],0),'Each Set owns its own tape and stages'),card('Selected Base PF',number(all_['eff_pf']),'Selection-window statistic'),card('Execution PF',number(all_['exec_pf']),str(all_['orders'])+' closed simulated parents'),card('Settled unit net',number(all_['net_pct'])+'%','Percent of one base notional'),card('Held at cutoff',len(run.get('open_at_end',[])),'Marks remain separate from realized results')])+'</div>')
     parts.append('<div class="grid">'+plot('Fresh replay · settled unit net by exit hour',[('Cumulative unit net %',cumulative)],labels)+plot('Fresh replay · sufficient Last-N samples',[(stage,[next((row.get('enough_samples_pct')for row in run['stage_evaluations']if row['dimension']=='all'and row['stage']==stage and row['t']==h['t']),None)for h in hours])for stage in('baseLong','mainLong','real','realNeg')],labels)+'</div>')
-    parts.append(panel('Every fresh scored hour',table(['Vienna exit hour','Opened','Closed','Wins','Settled return PF','Unit net %','Cumulative unit net %'],[[stamp(h['t']),h['opened'],h['orders'],h['wins'],number(h.get('exec_pf')),number(h['net_pct']),number(cumulative[i])]for i,h in enumerate(hours)])))
+    parts.append(panel('Every fresh scored hour',table(['Vienna exit hour','Opened','Closed','Wins','Settled return PF','Unit net %','Cumulative unit net %'],[[stamp(h['t']),h['opened'],h['orders'],h['wins'],execution_pf(h),number(h['net_pct']),number(cumulative[i])]for i,h in enumerate(hours)])))
     summary_headers=['Group','Sets','Base validated %','Selected Base PF','Full execution gate %','Closed parents','Execution PF','Unit net %','Win %']
-    def summary(rows):return [[r['group'],r.get('sets'),number(r.get('valid_pct'),2),number(r.get('eff_pf')),number(r.get('executable_pct'),2),r.get('orders'),number(r.get('exec_pf')),number(r.get('net_pct')),number(r.get('win_pct'),2)]for r in rows]
+    def summary(rows):return [[r['group'],r.get('sets'),number(r.get('valid_pct'),2),number(r.get('eff_pf')),number(r.get('executable_pct'),2),r.get('orders'),execution_pf(r),number(r.get('net_pct')),number(r.get('win_pct'),2)]for r in rows]
     parts.append(panel('Every indication and strategy type',table(summary_headers,summary(run.get('types',[])))))
     for indication in run.get('indications',[]):
         pack=indication['group'];configs=[r for r in run.get('configurations',[])if r['pack']==pack]
