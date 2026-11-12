@@ -292,6 +292,7 @@ def _batch_numbers(order: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class FastBingX:
+    commission_scope = 'account'
     def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: Optional[str] = None) -> None:
         from conn_guard import resolve_bingx_price_stream
         # Resolve before constructing HTTP clients or starting background threads.

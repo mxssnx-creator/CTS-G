@@ -59,6 +59,10 @@ def frozen_overlay(raw, symbols, history_hours=18, symbol_count=50):
               minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
               indExtraSources=False, ownedQuantityControls=True)
+    for name, default in (('microMinSlDistancePct', .1), ('microMinTrailDistancePct', .05)):
+        value = ov.setdefault(name, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 10:
+            raise ValueError(name + ' must be a finite absolute price percent in 0..10')
     # Preserve every configured PF/sample/Last-N policy and strategy toggle.
     return ov
 
@@ -421,38 +425,23 @@ def shared_account_protection_verified():
 
 
 def collect_account_fees(pulse, symbols, stopped, deadline, progress):
-    """Bounded parallel GETs during paused startup, using the native limiter.
-
-    Each worker uses the same native fee parser and owns its temporary book;
-    only the main thread publishes validated rates to the runtime.
-    """
-    from execution_cost import FeeSchedule
-    def fetch(symbol):
-        schedule = FeeSchedule()
-        schedule.refresh(pulse.api, [symbol], time.time())
-        return symbol, schedule.account.get(symbol), schedule.error
-
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix='x02-fees') as pool:
-        while True:
-            pending = [s for s in symbols if pulse.fee_schedule.rates(s, None, time.time())[2] != 'account-rate']
-            if not pending:
-                return
-            if stopped():
-                raise SessionEnd('requested session stop')
-            if time.monotonic() >= deadline:
-                raise SessionEnd('account fee readiness deadline')
-            futures = [pool.submit(fetch, symbol) for symbol in pending]
-            for future in as_completed(futures):
-                symbol, row, error = future.result()
-                if row is not None:
-                    pulse.fee_schedule.account[symbol] = row
-                progress(len(pulse.fee_schedule.account), len(symbols), error)
-                if stopped() or time.monotonic() >= deadline:
-                    for item in futures:
-                        item.cancel()
-                    raise SessionEnd('requested session stop' if stopped() else 'account fee readiness deadline')
-            if any(s not in pulse.fee_schedule.account for s in pending):
-                time.sleep(1)
+    """Warm the account-wide measured commission without per-symbol request fan-out."""
+    while True:
+        pending = [s for s in symbols if pulse.fee_schedule.rates(s, None, time.time())[2] != 'account-rate']
+        if not pending:
+            return
+        if stopped():
+            raise SessionEnd('requested session stop')
+        if time.monotonic() >= deadline:
+            raise SessionEnd('account fee readiness deadline')
+        pulse.fee_schedule.refresh(pulse.api, symbols, time.time())
+        measured = sum(pulse.fee_schedule.rates(s, None, time.time())[2] == 'account-rate' for s in symbols)
+        progress(measured, len(symbols), pulse.fee_schedule.error)
+        if measured == len(symbols):
+            return
+        # The FeeSchedule owns its cooldown. Polling here only checks stop/deadline;
+        # it cannot turn a rate-limit response into another network request.
+        time.sleep(1)
 
 
 def prepare_history_warmup(pulse, full_universe=True):
