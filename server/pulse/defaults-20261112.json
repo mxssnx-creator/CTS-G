@@ -1,15 +1,15 @@
 {
-  "description": "maxSl 0.8 per range; dynamic last-N long/short/last; higher PF; general-only",
-  "maxSlRatio": 0.8,
-  "lastN": {
+  "description": "Full last-N lanes: Base long/short/last + Main long/short/last + Real; per-range baseMin/mainMin; maxSl 0.8",
+  "lanes": {
     "baseLong": "setGateWindow=40",
     "baseShort": "setGateShortN=16",
+    "baseLast": "setGateMinN=2 positive",
     "mainLong": "mainGateN=20",
-    "mainShort": "mainShortWindows [5,8,12,16] dynamic pick",
+    "mainShort": "mainShortWindows [5,8,12,16] dynamic",
     "mainLast": "mainMinN=2 positive",
-    "lastNByRange": "micro..wide independent windows"
+    "real": "realGateN=12",
+    "independent": "lastNByRange baseMin/mainMin per TP range"
   },
-  "minPf": 1.25,
-  "minPfMicro": 1.12,
-  "x01": {"symbolCap": 25, "volumeFactor": 0.05}
+  "maxSlRatio": 0.8,
+  "minPf": 1.25
 }

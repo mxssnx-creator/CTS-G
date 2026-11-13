@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""Apply defaults: maxSlRatio 0.8 per range, paper-historic, general-only, higher PF, dynamic last-N."""
+"""Apply defaults: maxSl 0.8, full last-N long/short/last on Base+Main, per-range independence."""
 import json, re, math
 from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 import runpy
 runpy.run_path(str(root / "scripts/patch_max_sl_ratio.py"))
+runpy.run_path(str(root / "scripts/patch_lastn_base_min.py"))
 engine = root / "server/pulse/set_engine.py"
 text = engine.read_text()
 text, n = re.subn(r"LOOKBACK_DEFAULT = \d+", "LOOKBACK_DEFAULT = 1920  # 32 h of 1m bars", text, count=1)
 print("LOOKBACK_DEFAULT", n)
 engine.write_text(text)
 COMMON = {
-  "stagesEnabled": True, "setGateWindow": 40, "setGateShortN": 16, "setGateMinTrades": 5, "setGateMinN": 3,
+  "stagesEnabled": True, "setGateWindow": 40, "setGateShortN": 16, "setGateMinTrades": 5,
+  "setGateMinN": 2, "setGateMinMode": "positive",
   "mainGateEnabled": True, "mainGateN": 20, "mainShortEnabled": True, "mainShortWindows": [5, 8, 12, 16],
   "mainShortMin": 3, "mainMinN": 2, "mainMinMode": "positive", "mainNegEnabled": True, "mainNegWindows": [5, 10],
   "realGateEnabled": True, "realGateN": 12,
   "lastNByRange": {
-    "micro": {"baseLong": 30, "baseShort": 12, "mainLong": 15, "mainShort": [4, 6, 8, 12], "negWindows": [5, 10], "realN": 8, "realNegN": 8},
-    "minimal": {"baseLong": 35, "baseShort": 14, "mainLong": 18, "mainShort": [5, 8, 12], "negWindows": [5, 10], "realN": 10, "realNegN": 10},
-    "short": {"baseLong": 40, "baseShort": 16, "mainLong": 20, "mainShort": [5, 8, 12, 16], "negWindows": [5, 10], "realN": 12, "realNegN": 12},
-    "normal": {"baseLong": 40, "baseShort": 18, "mainLong": 22, "mainShort": [6, 10, 14], "negWindows": [5, 10], "realN": 12, "realNegN": 12},
-    "long": {"baseLong": 50, "baseShort": 20, "mainLong": 25, "mainShort": [8, 12, 16], "negWindows": [5, 10], "realN": 15, "realNegN": 15},
-    "wide": {"baseLong": 50, "baseShort": 20, "mainLong": 25, "mainShort": [8, 12, 16], "negWindows": [5, 10], "realN": 15, "realNegN": 15}
+    "micro": {"baseLong": 30, "baseShort": 12, "baseMin": 2, "mainLong": 15, "mainShort": [4, 6, 8, 12], "mainMin": 2, "negWindows": [5, 10], "realN": 8, "realNegN": 8},
+    "minimal": {"baseLong": 35, "baseShort": 14, "baseMin": 2, "mainLong": 18, "mainShort": [5, 8, 12], "mainMin": 2, "negWindows": [5, 10], "realN": 10, "realNegN": 10},
+    "short": {"baseLong": 40, "baseShort": 16, "baseMin": 2, "mainLong": 20, "mainShort": [5, 8, 12, 16], "mainMin": 2, "negWindows": [5, 10], "realN": 12, "realNegN": 12},
+    "normal": {"baseLong": 40, "baseShort": 18, "baseMin": 2, "mainLong": 22, "mainShort": [6, 10, 14], "mainMin": 2, "negWindows": [5, 10], "realN": 12, "realNegN": 12},
+    "long": {"baseLong": 50, "baseShort": 20, "baseMin": 2, "mainLong": 25, "mainShort": [8, 12, 16], "mainMin": 2, "negWindows": [5, 10], "realN": 15, "realNegN": 15},
+    "wide": {"baseLong": 50, "baseShort": 20, "baseMin": 2, "mainLong": 25, "mainShort": [8, 12, 16], "mainMin": 2, "negWindows": [5, 10], "realN": 15, "realNegN": 15}
   },
   "histEnabled": True, "setUseHistoricGate": True, "histLookbackBars": 1440,
   "maxSlRatio": 0.8, "slMaxPct": 0.8, "setSlRatios": [0.5, 0.65, 0.8],
