@@ -1,14 +1,12 @@
 {
-  "description": "maxSl 0.8, minPf 1.3, x01 25 symbols, min volumeFactor 0.01, 32h paper-historic, general-only",
+  "description": "all tpRanges micro..wide, minPfStepAuto, micro minPf 1.08, maxSl 0.8, x01 25 symbols vol 0.01, general-only",
   "apply": ["python3 scripts/apply_all_20261112.py"],
   "lookback_default_bars": 1920,
   "maxSlRatio": 0.8,
-  "minPf": 1.3,
-  "x01": {
-    "symbolCap": 25,
-    "volumeFactor": 0.01,
-    "histLookbackBars": 1920,
-    "minPf": 1.3,
-    "maxSlRatio": 0.8
-  }
+  "minPf": 1.25,
+  "minPfMicro": 1.08,
+  "minPfStepAuto": true,
+  "tpRanges": {"micro": true, "minimal": true, "short": true, "normal": true, "long": true, "wide": true},
+  "minPfByRange": {"micro": 1.08, "minimal": 1.15, "short": 1.2, "normal": 1.25, "long": 1.3, "wide": 1.3},
+  "x01": {"symbolCap": 25, "volumeFactor": 0.01, "maxSlRatio": 0.8}
 }
