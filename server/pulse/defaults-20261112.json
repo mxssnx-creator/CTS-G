@@ -1,14 +1,15 @@
 {
-  "description": "maxSlRatio 0.8 enforced per range+grid; higher PF gates; general-only; all TP ranges; trail/coord off",
-  "bugfix": "maxSlRatio was ignored except partial slMaxByRange; micro could use ratios > max",
+  "description": "maxSl 0.8 per range; dynamic last-N long/short/last; higher PF; general-only",
   "maxSlRatio": 0.8,
-  "setSlRatios": [0.5, 0.65, 0.8],
-  "slMaxByRange": {"micro": 0.4, "minimal": 0.5, "short": 0.6, "normal": 0.75, "long": 0.8, "wide": 0.8},
+  "lastN": {
+    "baseLong": "setGateWindow=40",
+    "baseShort": "setGateShortN=16",
+    "mainLong": "mainGateN=20",
+    "mainShort": "mainShortWindows [5,8,12,16] dynamic pick",
+    "mainLast": "mainMinN=2 positive",
+    "lastNByRange": "micro..wide independent windows"
+  },
   "minPf": 1.25,
   "minPfMicro": 1.12,
-  "minPfStepAuto": true,
-  "groupGate": true,
-  "tpRanges": "micro..wide ON",
-  "trailRanges": "OFF",
   "x01": {"symbolCap": 25, "volumeFactor": 0.05}
 }
