@@ -281,6 +281,12 @@
     "wide": 0.8
   },
   "leverageStopCap": false,
+  "groupGate": true,
+  "groupGateSide": true,
+  "groupGateN": 3,
+  "groupGatePf": 1.0,
+  "groupGateHours": 6,
+  "groupGateMin": 1,
   "stratBlock": true,
   "blockCounts": [
     {

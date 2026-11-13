@@ -803,11 +803,12 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
     gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if getattr(book, "group_gate", False) else None
     ghist: Dict[str, List[Tuple[float, float]]] = {}
+    gside = bool(getattr(book, "group_gate_side", False))
 
     def group_ok(st_, lane_: str, now_: float) -> bool:
         if gg is None:
             return True
-        return se.group_verdict(ghist.get(se.set_group(st_.id, lane_), ()), now_, gg[0], gg[1], gg[2], gg[3])[0]
+        return se.group_verdict(ghist.get(se.set_group(st_.id, lane_, gside), ()), now_, gg[0], gg[1], gg[2], gg[3])[0]
 
     # with a per-candidate rule (Axis) a Set open on both lanes is a candidate of each, as the engine lists it; without one the first lane always takes it
     both_lanes = axis_coord is not None or axis_pick is not None
@@ -978,7 +979,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))
                 if gg is not None:
-                    ghist.setdefault(se.set_group(st.id, lane_pick), []).append((rec["t"], rec["net"]))
+                    ghist.setdefault(se.set_group(st.id, lane_pick, gside), []).append((rec["t"], rec["net"]))
     return executed
 
 

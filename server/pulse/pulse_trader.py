@@ -3831,7 +3831,7 @@ class Pulse:
             blocked = []
             def allows(st, lane):
                 if self.sets.group_gate:
-                    gkey = set_group(st.id, lane)
+                    gkey = set_group(st.id, lane, self.sets.group_gate_side)
                     g_ok, g_pf, g_k = group_verdict(self.__dict__.get("group_exec", {}).get(gkey, ()), time.time(), self.sets.group_gate_n,
                                                     self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)
                     self.coord.scopes[gkey] = {"allow": g_ok, "orders": g_k, "pf": g_pf, "source": "executed", "minPf": self.sets.group_gate_pf,
@@ -3869,10 +3869,10 @@ class Pulse:
                 # the profit group gate: skip the Sets whose group is losing, the next-ranked Set of another group runs instead
                 now_g = time.time()
                 def group_open(st_):
-                    return group_verdict(self.__dict__.get("group_exec", {}).get(set_group(st_.id, self.sets.lane_of(st_) or "pos"), ()), now_g,
+                    return group_verdict(self.__dict__.get("group_exec", {}).get(set_group(st_.id, self.sets.lane_of(st_) or "pos", self.sets.group_gate_side), ()), now_g,
                                          self.sets.group_gate_n, self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)[0]
                 if not group_open(chosen):
-                    group_blocked = set_group(chosen.id, self.sets.lane_of(chosen) or "pos")
+                    group_blocked = set_group(chosen.id, self.sets.lane_of(chosen) or "pos", self.sets.group_gate_side)
                     chosen = self.sets.pick_any(pack, side=side, predicate=group_open)
         except Exception:
             return None, "", ""
@@ -5276,9 +5276,10 @@ class Pulse:
                 if net_return is not None:
                     # the profit group gate reads each group's own executed results (set_group: pack x kind x TP range x lane), newest last
                     gx = self.__dict__.setdefault("group_exec", {})
-                    gq = gx.get(set_group(rec.set_id, lane))
+                    gside = bool(getattr(self.sets, "group_gate_side", False))
+                    gq = gx.get(set_group(rec.set_id, lane, gside))
                     if gq is None:
-                        gq = gx[set_group(rec.set_id, lane)] = collections.deque(maxlen=200)
+                        gq = gx[set_group(rec.set_id, lane, gside)] = collections.deque(maxlen=200)
                     gq.append((float(rec.t), float(net_return)))
 
     def execution_snapshot(self) -> Dict[str, Any]:

@@ -214,8 +214,10 @@ _GROUP_ST = re.compile(r":st(\d+)")
 _GROUP_TR = re.compile(r":tr([0-9.]+):([0-9.]+)(?::ts[0-9.]+)?$")
 
 
-def set_group(set_id: str, lane: str = "pos") -> str:
-    """The group key of a Set id and lane: "group:<pack>:<kind>:<range>:<lane>". An id that names no step or arm keeps the range "?" (its own group)."""
+def set_group(set_id: str, lane: str = "pos", side: bool = False) -> str:
+    """The group key of a Set id and lane: "group:<pack>:<kind>:<range>:<lane>". An id that names no step or arm keeps the range "?" (its own group). With `side`
+    (groupGateSide, the rally / falling direction acceptance ported from CTS-A-O: type x range x SIDE) the Set's direction ":L" / ":S" is part of the key, so a losing
+    long group closes only longs while the short group of the same pack / kind / range keeps its own record; a combined Set (no side marker) keeps ":B"."""
     sid = str(set_id or "")
     pack = sid.split(":", 1)[0] or "-"
     tr = _GROUP_TR.search(sid)
@@ -232,7 +234,11 @@ def set_group(set_id: str, lane: str = "pos") -> str:
         m = _GROUP_ST.search(sid)
         if m:
             rng = tp_range_of(int(m.group(1)))
-    return f"group:{pack}:{kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+    key = f"group:{pack}:{kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+    if side:
+        m = re.search(r":([LS]):", sid)
+        key += ":" + (m.group(1) if m else "B")
+    return key
 
 
 def group_verdict(rows, now: float, n: int = 10, floor: float = 1.0, hours: float = 12.0, min_n: int = 1) -> Tuple[bool, Optional[float], int]:
@@ -1104,6 +1110,7 @@ def pack_signals(
     on_step: Optional[Callable[[], None]] = None,
     cache: Optional[Dict[int, Dict[str, Tuple[int, float, str]]]] = None,
     salt: int = 0,
+    workers: int = 0,
 ) -> Dict[str, List[Tuple[int, float, str]]]:
     """Causal signal per bar and pack: (direction, confidence, why). The only signal loop: the engine
     replay and the streaming simulator both call it, so a bar gets the same signal in both places.
@@ -1115,7 +1122,7 @@ def pack_signals(
     imported = _ported_pack_sources(packs)
     if imported:
         from ported_indications import batch
-        native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt) if len(imported)<len(packs) else {}
+        native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt) if len(imported)<len(packs) else {}   # workers stay 0 here: ported packs read the whole history
         calculated=batch(bars,list(imported.values()),base_ts,str(ind_settings.get("portedSymbol") or "ASSET-USDT"),ind_settings.get("portedPeers") or ())
         native.update({p:[(0,0.0,"")]*min(warmup,len(bars))+calculated[name][warmup:] for p,name in imported.items()})
         return native
@@ -1124,6 +1131,21 @@ def pack_signals(
     hs = [hash(tuple(b)) for b in bars] if cache is not None else None
     used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
     sig_w = signal_window(packs, ind_settings)      # the memo key covers every bar a pack reads
+    pre: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    if workers and n - warmup >= 96:
+        # opt-in worker processes (overlay replayWorkers): the bars no memo entry covers are computed in parallel, window by window, exactly as bar_signal reads them
+        # below; every other bar, and every bar the pool could not do, takes the loop's own path
+        seen = set()
+        todo = []
+        for i in range(warmup, n):
+            if cache is not None:
+                k = hash((salt, tuple(hs[max(0, i + 1 - sig_w) : i + 1])))
+                if k in used or k in cache or k in seen:
+                    continue
+                seen.add(k)
+            todo.append(i)
+        from signal_pool import compute as _pool_compute
+        pre = _pool_compute(bars, todo, packs, ind_settings, base_ts, sig_w, workers, on_step) or {}
     for i in range(warmup, n):
         key = None
         if cache is not None:
@@ -1139,7 +1161,7 @@ def pack_signals(
                 if on_step and i % 50 == 0:
                     on_step()
                 continue
-        row = bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
+        row = pre.get(i) or bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
         for p in packs:
             signals[p][i] = row.get(p, (0, 0.0, ""))
         if key is not None:
@@ -2103,6 +2125,8 @@ class SetBook:
         self.relation_at = 0.0                                  # the event clock of that pass (0 = none yet)
         self.relation_ms = 0.0                                  # what the last pass spent on the relation lanes
         self.window_basis = "time"           # lastNBasis: "time" (windows inside the lookback) or "count" (the newest N orders of the configuration, whatever their age)
+        self.replay_workers = 0              # replayWorkers: worker processes for the per-bar signals of a replay (0 = off, the engine's own process computes them)
+        self.group_gate_side = False         # groupGateSide: the group key also carries the Set's direction (long / short groups judged apart)
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
@@ -2500,6 +2524,11 @@ class SetBook:
         self.relation_cfg = rel_cfg
         # the profit group gate (entry-time only: it changes no tape, so it is not part of the evaluation signature)
         self.group_gate = bool(ov.get("groupGate", False))
+        self.group_gate_side = bool(ov.get("groupGateSide", False))
+        try:
+            self.replay_workers = max(0, min(6, int(float(ov.get("replayWorkers") or 0))))
+        except (TypeError, ValueError):
+            self.replay_workers = 0
         def _num(key, default, lo, hi):
             try:
                 x = float(ov.get(key) if ov.get(key) is not None else default)
@@ -3490,7 +3519,7 @@ class SetBook:
         if _ported_pack_sources(self.packs):
             peer_symbols=_ported_peer_symbols(self.packs)
             settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<latest_close]} for s,rs in market.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=dated.get(s)) is not None]
-        signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt)
+        signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt, workers=self.replay_workers)
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
@@ -4356,7 +4385,7 @@ class SetBook:
             "effectiveMinSlPct": self.cost_pct + self.min_sl_distance_pct,
             "minSteps": {"trail": self.trail_min_steps},
             "trailMinLockPct": self.trail_min_lock,
-            "groupGate": {"on": self.group_gate, "n": self.group_gate_n, "pf": self.group_gate_pf, "hours": self.group_gate_hours, "min": self.group_gate_min},
+            "groupGate": {"on": self.group_gate, "side": self.group_gate_side, "n": self.group_gate_n, "pf": self.group_gate_pf, "hours": self.group_gate_hours, "min": self.group_gate_min},
             "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
             "product": len(self.by_idx),
             "indexed": True,

@@ -3193,6 +3193,35 @@ def a_manual_close_rests_only_that_symbol_and_direction():
     return ok, f"rest active (AAA long, AAA short, BBB long) {active}, after 241 min {later}, 0 = off {off}, persisted {list(saved)}, pruned {pruned}, wired into place() and both drop paths {wired}"
 
 
+def the_side_aware_group_gate_judges_long_and_short_groups_apart():
+    """Rally / falling direction acceptance (ported from CTS-A-O's type x range x side rule): with groupGateSide on, the group key carries the Set's direction, so three
+    losing LONG results of a pack / kind / range stop the long group only; the short group of the same pack / kind / range has its own record and keeps opening. Off (the
+    default) the key is unchanged and both directions share one record, as before. A Set id without a side marker keeps the combined key. The engine and the simulator feed
+    set_group the same flag."""
+    import time as _t
+    from set_engine import SetBook, group_verdict, set_group
+    now = _t.time()
+    long_id, short_id, both_id = "general:L:1m:sl0.5:st4", "general:S:1m:sl0.5:st4", "general:1m:sl0.5:st4"
+    keys_off = {set_group(i, "pos") for i in (long_id, short_id, both_id)}
+    k_l, k_s, k_b = (set_group(i, "pos", True) for i in (long_id, short_id, both_id))
+    losses = [(now - 60 * i, -0.02) for i in range(3)]
+    def allowed(side_on, sid, record):
+        key = set_group(sid, "pos", side_on)
+        return group_verdict(record.get(key, ()), now, 5, 1.0, 12.0, 1)[0]
+    rec_off, rec_on = {set_group(long_id, "pos", False): list(losses)}, {set_group(long_id, "pos", True): list(losses)}
+    on = (allowed(True, long_id, rec_on), allowed(True, short_id, rec_on))
+    off = (allowed(False, long_id, rec_off), allowed(False, short_id, rec_off))
+    book = SetBook()
+    book.load({"groupGate": True, "groupGateSide": True})
+    default_book = SetBook()
+    default_book.load({"groupGate": True})
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    wired = src.count("group_gate_side") >= 4
+    ok = (len(keys_off) == 1 and len({k_l, k_s, k_b}) == 3 and k_b.endswith(":B") and k_l.endswith(":L") and k_s.endswith(":S")
+          and on == (False, True) and off == (False, False) and book.group_gate_side is True and default_book.group_gate_side is False and wired)
+    return ok, f"off: one key {len(keys_off) == 1}, long/short allowed after 3 long losses off {off}, on {on}, keys {k_l[-2:]} {k_s[-2:]} {k_b[-2:]}, default off {default_book.group_gate_side is False}, wired {wired}"
+
+
 def transfers_move_the_drawdown_basis_not_the_drawdown():
     """Owner 2026-11-04 ("on each session money got transferred"): a deposit or a withdrawal is neither a gain nor a loss. The wallet balance moves by realized PnL, fees and
     funding (the venue's income feed) and by transfers (not in the feed): a change the feed does not explain, confirmed on a second read (the feed can lag a fill), moves the
@@ -3508,6 +3537,7 @@ CHECKS = [
     ("trader.closes-made-while-the-engine-was-down-are-recorded-but-not-scored", closes_made_while_the_engine_was_down_are_recorded_but_not_scored),
     ("trader.live-executed-pf-equals-the-plain-reading-of-the-trades-file", live_executed_pf_equals_the_plain_reading_of_the_trades_file),
     ("trader.group-gate-blocks-a-losing-group-and-only-that-group", the_group_gate_blocks_a_losing_group_and_only_that_group),
+    ("trader.side-aware-group-gate-judges-long-and-short-groups-apart", the_side_aware_group_gate_judges_long_and_short_groups_apart),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
     ("trader.max-leverage-is-the-default-everywhere", max_leverage_is_the_default_everywhere),
