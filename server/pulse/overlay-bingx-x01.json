@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 20,
+  "symbolCap": 25,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -50,7 +50,8 @@
   "noise": 0.05,
   "volWeight": 0.3,
   "minStep": 10,
-  "maxStopLossRatio": 2.5,
+  "maxStopLossRatio": 0.8,
+  "setSlRatios": [0.25, 0.5, 0.75],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
@@ -191,7 +192,7 @@
     "micro": true,
     "minimal": true,
     "short": true,
-    "normal": false,
+    "normal": true,
     "long": true,
     "wide": true
   },
@@ -280,8 +281,8 @@
     "general:exit": 1.5
   },
   "slMaxByRange": {
-    "long": 1.0,
-    "wide": 1.0
+    "long": 0.8,
+    "wide": 0.8
   },
   "leverageStopCap": false,
   "stratBlock": true,
@@ -369,7 +370,10 @@
       }
     }
   },
-  "stratTrend": false,
+  "stratTrend": true,
+  "stratReversion": true,
+  "stratFlow": true,
+  "stratMulti": true,
   "stratBreakout": true,
   "manualCloseRestMin": 240,
   "minPfStepAutoHigh": 1.15,
