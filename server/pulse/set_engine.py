@@ -2186,6 +2186,10 @@ class SetBook:
         self.steps: List[int] = list(range(STEP_MIN, STEP_DEFAULT_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
+        self.sl_by_range: Dict[str, List[float]] = {}
+        self.sl_grid_all: List[float] = list(SL_RATIOS)
+        self.sl_min_ratio = 0.0
+        self.exit_set_hold_bars = 0
         self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
         self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
         self.trail_step_max = TRAIL_STEP_MAX                  # trailStepMax: the largest trailing arm in TP steps (22 = 2.2 %, up to TRAIL_STEP_CEIL)
@@ -2492,6 +2496,20 @@ class SetBook:
         self.sl_min_ratio = max(0.0, min(5.0, finite(ov.get("setSlMinRatio"), 0.0)))
         kept = [r for r in ratios if r + 1e-9 >= self.sl_min_ratio]
         self.sl_ratios = sorted(set(kept)) or sorted(set(ratios)) or list(SL_RATIOS)
+        # slRatiosByRange {range: [ratios]}: a TP range with its own SL ratios (e.g. long / wide 0.2 .. 0.8 step 0.1); it replaces the global list and the
+        # minimum ratio for the cells of that range only, every other range is unchanged
+        by_range: Dict[str, List[float]] = {}
+        raw_by = ov.get("slRatiosByRange")
+        if isinstance(raw_by, dict):
+            for rk, vals in raw_by.items():
+                try:
+                    lst = sorted({round(float(x), 2) for x in (vals or []) if 0.05 <= float(x) <= 5.0})
+                except (TypeError, ValueError):
+                    continue
+                if lst:
+                    by_range[str(rk)] = lst
+        self.sl_by_range = by_range
+        self.sl_grid_all = sorted(set(self.sl_ratios) | {r for lst in by_range.values() for r in lst})
         # exitSetHoldBars (0 = the global time stop): Exit Sets (no TP) hold this many minutes before the time exit
         self.exit_set_hold_bars = int(max(0, min(720, finite(ov.get("exitSetHoldBars"), 0.0))))
         self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
@@ -2755,7 +2773,7 @@ class SetBook:
             pack_i = self.packs.index(pack)
             pack_steps = self.short_steps if pack == SHORT_PACK else self.steps
             pr = self.pack_ranges.get(pack)
-            pack_ratios = self.sl_ratios
+            pack_ratios = self.sl_grid_all
             pack_kinds = SET_KINDS
             if pr:
                 # an indicationConfigs entry: its own TP-step range, SL ratios and Set types for this indication
@@ -2794,8 +2812,17 @@ class SetBook:
 
             sl_cap = self.sl_max_by_range
 
+            sl_by = self.sl_by_range
+
             def sl_allowed(r: float, k: int) -> bool:
-                lim = sl_cap.get(tp_range_of(k))
+                rng = tp_range_of(k)
+                own = None if pr else sl_by.get(rng)
+                if own is not None:
+                    if not any(abs(r - o) < 1e-9 for o in own):
+                        return False
+                elif not pr and not any(abs(r - o) < 1e-9 for o in self.sl_ratios):
+                    return False            # a ratio only another range asked for (slRatiosByRange) is not built here
+                lim = sl_cap.get(rng)
                 return lim is None or r <= lim + 1e-9
 
             for sl_i, sl in enumerate(pack_ratios if "base" in pack_kinds else ()):

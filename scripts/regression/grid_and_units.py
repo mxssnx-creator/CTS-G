@@ -29,6 +29,20 @@ def min_sl_ratio_and_exit_hold():
     return ok, f"full={full.sl_ratios} min0.5={cut.sl_ratios} exit sets={len(ex)} hold={sorted({cut.hold_bars_for(s) for s in ex})}"
 
 
+def sl_ratios_by_range():
+    from position_cost import tp_range_of
+    L = [round(0.2 + 0.1 * i, 2) for i in range(7)]
+    b = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25], setSlMinRatio=0.5, slRatiosByRange={"long": L, "wide": L}, tpRanges={"wide": True}, setStepMax=50)
+    seen = {}
+    for st in b.by_idx:
+        if st.kind in ("base", "exit"):
+            seen.setdefault(tp_range_of(st.step), set()).add(round(st.sl_ratio, 2))
+    plain = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25], setSlMinRatio=0.5, tpRanges={"wide": True}, setStepMax=50)
+    ok = seen.get("long") == set(L) and seen.get("wide") == set(L) and all(seen[k] == {0.5, 0.75, 1.0, 1.25} for k in ("micro", "minimal", "short", "normal"))
+    ok = ok and all(st.sl_ratio >= 0.5 - 1e-9 for st in plain.by_idx if st.kind != "trail")
+    return ok, f"by range { {k: sorted(v) for k, v in seen.items()} }"
+
+
 def tp_steps():
     steps = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1))
     tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
@@ -376,13 +390,14 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     # their counterfactual numbers stay the evidence they were. Still true: Micro Sets exist, no trailing pair is dropped for its lock, the pack set below is complete.
     all_packs = {"shortrange", "general", "indications", "trend", "reversion", "flow", "multi", "breakout"}
     ok = (any(st.kind != "trail" and st.step <= 3 for st in b.by_idx) and all_packs <= {st.pack for st in b.by_idx}
-          and ratios == {0.5, 0.75, 1.0, 1.25} and locks and min(locks) < 0.1 and any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
+          and ratios == {0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 1.0, 1.25} and locks and min(locks) < 0.1 and any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
     return ok, f"x01 {len(b.by_idx)} Sets, packs {sorted({st.pack for st in b.by_idx})}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
 
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.25-2.5", sl_ratios),
+    ("grid.long-and-wide-have-their-own-sl-ratios", sl_ratios_by_range),
     ("grid.min-sl-ratio-drops-lower-stops-and-exit-sets-hold-later", min_sl_ratio_and_exit_hold),
     ("grid.default-grid-follows-its-rules", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),

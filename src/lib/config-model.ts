@@ -551,6 +551,7 @@ export type PulseOverlay = {
   exitOptSlMax: number;
   exitMinHoldS: number;
   setSlMinRatio: number;
+  slRatiosByRange: Record<string, number[]>;
   exitSetHoldBars: number;
   exitPfWindow: number;
   exitDeactN: number;
@@ -777,7 +778,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   mainNegEnabled: true,
   mainNegWindows: [5, 10],
   realGateEnabled: true,
-  realGateN: 8,
+  realGateN: 20,
   realStagePaper: true,
   minPfLinked: true,
   histLookbackAuto: false,
@@ -842,6 +843,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
   setSlMinRatio: 0.5,
+  slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
   exitSetHoldBars: 720,
   exitPfWindow: 8,
   exitDeactN: 25,
@@ -1112,6 +1114,7 @@ export type CtsSettings = {
   exitOptSlMax?: number;
   exitMinHoldS?: number;
   setSlMinRatio?: number;
+  slRatiosByRange?: Record<string, number[]>;
   exitSetHoldBars?: number;
   exitPfWindow?: number;
   exitDeactN?: number;
@@ -1562,7 +1565,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     mainNegEnabled: bool(cts.mainNegEnabled, true),
     mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
     realGateEnabled: bool(cts.realGateEnabled, true),
-    realGateN: Math.max(1, Math.min(200, Math.round(num(cts.realGateN, 15)))),
+    realGateN: Math.max(1, Math.min(200, Math.round(num(cts.realGateN, 20)))),
     realStagePaper: bool(cts.realStagePaper, true),
     minPfLinked: bool(cts.minPfLinked, true),
     histLookbackAuto: bool(cts.histLookbackAuto, true),
@@ -1632,6 +1635,15 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitOptSlMax: num(cts.exitOptSlMax, 0.9),
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     setSlMinRatio: num(cts.setSlMinRatio, 0.5),
+    slRatiosByRange: ((raw: unknown): Record<string, number[]> => {
+      if (!raw || typeof raw !== "object") return { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] };
+      const out: Record<string, number[]> = {};
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        const xs = Array.isArray(v) ? v.filter((x): x is number => typeof x === "number" && Number.isFinite(x) && x >= 0.05 && x <= 5) : [];
+        if (xs.length) out[k] = [...new Set(xs.map((x) => Math.round(x * 100) / 100))].sort((a, b) => a - b);
+      }
+      return out;
+    })(cts.slRatiosByRange),
     exitSetHoldBars: num(cts.exitSetHoldBars, 720),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),

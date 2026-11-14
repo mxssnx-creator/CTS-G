@@ -2018,6 +2018,23 @@ function SettingsPage() {
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
                 <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
                 <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
+                {(["long", "wide"] as const).map((rg) => {
+                  const xs = overlay.slRatiosByRange?.[rg] ?? [];
+                  const lo = xs.length ? xs[0] : 0.2;
+                  const hi = xs.length ? xs[xs.length - 1] : 0.8;
+                  const setRange = (a: number, b: number) => {
+                    const from = Math.min(a, b), to = Math.max(a, b);
+                    const list: number[] = [];
+                    for (let r = from; r <= to + 1e-9; r += 0.1) list.push(Math.round(r * 100) / 100);
+                    patch("slRatiosByRange", { ...overlay.slRatiosByRange, [rg]: list });
+                  };
+                  return (
+                    <div key={rg} className="grid grid-cols-2 gap-2">
+                      <Num label={`${rg} SL min`} value={lo} min={0.1} max={2} step={0.1} onChange={(v) => setRange(v, hi)} />
+                      <Num label={`${rg} SL max`} value={hi} min={0.1} max={2} step={0.1} onChange={(v) => setRange(lo, v)} />
+                    </div>
+                  );
+                })}
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
