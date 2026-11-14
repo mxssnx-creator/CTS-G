@@ -89,6 +89,7 @@ from indication_engine import (
 from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
 from risk_variants import parse_trail, trail_grid
 from indication_config import source_name, expand as expand_indication_configs
+import signal_packs
 
 PACKS = ("indications", "general")
 EXTRA_INDICATOR_PREFIX = "extra."
@@ -1048,6 +1049,10 @@ def _variant_signal(rows: Sequence[Sequence[float]], names: Sequence[str]) -> Tu
     return (1 if longs else -1), max(v[1] for v in side), "+".join(v[2] for v in side)
 
 
+# Signals default when stratSignals is on without signalConfigs: every source and range on 5m and 15m, TP steps 5 .. 12, SL ratios 0.5 / 0.75 / 1.0, base and trailing Sets
+SIGNAL_CONFIGS_DEFAULT = [{"label": "signals default", "timeframes": [5, 15], "stepMin": 5, "stepMax": 12, "slRatios": [0.5, 0.75, 1.0], "types": ["base", "trail"]}]
+
+
 def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
     """The most closed 1m bars any pack reads for one bar's signal: the indication pack's window, or the longest window of
     the indicators named in extraIndicators and in the Short Range and extra packs' variant lists (a 15m name reads 900).
@@ -1059,7 +1064,8 @@ def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
         if pk in packs:
             names += list(ind_settings.get(vkey) or default)
     w = IND_WINDOW_BARS if "indications" in packs else GENERAL_WINDOW_BARS
-    return max([w, EXTRA_WINDOW if names else 0] + [window_of(source_name(str(n))) for n in names])
+    sig = [signal_packs.window_minutes(p) for p in packs if p.startswith(signal_packs.PREFIX)]
+    return max([w, EXTRA_WINDOW if names else 0] + [window_of(source_name(str(n))) for n in names] + sig)
 
 
 def _ported_pack_sources(packs):
@@ -1108,6 +1114,8 @@ def bar_signal(
     for pk in packs:
         if pk.startswith(EXTRA_INDICATOR_PREFIX) and pk not in imported:
             row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
+        elif pk.startswith(signal_packs.PREFIX):
+            row[pk] = signal_packs.signal(bars, i, ts, pk)
     return row
 
 
@@ -2160,6 +2168,7 @@ class SetBook:
         self.pause_off: set = set()                   # packs an indicationConfigs entry set to no pause (0)
         self.pack_ranges: Dict[str, Dict[str, Any]] = {}      # pack -> {"lo", "hi", "ratios", "kinds"}: the Sets of an indication built from indicationConfigs
         self.config_report: Dict[str, Any] = {"entries": [], "dropped": [], "names": 0}
+        self.signal_report: Dict[str, Any] = {"enabled": False, "packs": 0, "entries": [], "dropped": []}
         self.pause_now: Dict[Tuple[str, str, int], int] = {}    # (pack, symbol, side) -> minutes the Auto Mode chose at the end of the last replay
         self.entry_conf = 0.58
         self.retry_s = 30.0
@@ -2476,6 +2485,13 @@ class SetBook:
         self._config_pause = {EXTRA_INDICATOR_PREFIX + n: int(m) for n, m in expanded["pause"].items()}
         self.config_report = {"entries": expanded["entries"], "dropped": expanded["dropped"][:200], "names": len(expanded["names"])}
         packs.extend(EXTRA_INDICATOR_PREFIX + name for name in extra_names)
+        # Signals (owner 2026-11-14): every (source, range, timeframe) of signal_sources is its own pack sig-<source>-<range>-t<tf> with its own Set grid
+        self.signal_report = {"enabled": False, "packs": 0, "entries": [], "dropped": []}
+        if bool(ov.get("stratSignals", False)):
+            sig = signal_packs.expand(ov.get("signalConfigs") or SIGNAL_CONFIGS_DEFAULT, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
+            packs.extend(sig["packs"])
+            self.pack_ranges.update(sig["ranges"])
+            self.signal_report = {"enabled": True, "packs": len(sig["packs"]), "entries": sig["entries"], "dropped": sig["dropped"][:200]}
         self.packs = packs       # an explicitly empty strategy selection stays empty
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
@@ -5333,6 +5349,10 @@ class SetBook:
             "stepPf": {"on": self.pf_by_step, "auto": self.pf_step_auto, "ratio": self.pf_step_ratio, "autoN": self.pf_step_auto_n,
                        "autoMin": self.pf_step_auto_min, "steps": list(self.step_floor_report)},
             "indicationConfigs": dict(self.config_report),
+            "signalConfigs": dict(getattr(self, "signal_report", {}) or {}),
+            "setFloors": {"scope": "set" if getattr(self, "pf_set_auto", False) else "step", "learned": len(getattr(self, "set_floor_auto", {}) or {}),
+                          "defaults": max(0, len(self.by_idx) - len(getattr(self, "set_floor_auto", {}) or {})) if getattr(self, "pf_set_auto", False) else len(self.by_idx),
+                          "minAdmitted": int(getattr(self, "pf_set_auto_min", 10))},
             "coverage": cover,
             "index": index,
             "minStep": self.min_step,

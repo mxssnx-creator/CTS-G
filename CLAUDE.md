@@ -24,6 +24,13 @@
   (e) **Owner's expectation, recorded as asked ("note this for later and projects"):** only validated high-PF Sets should process, so the executed PF should be higher
   than the pool's. The measurements in this file (selection PF 1.7 - 25 against delivered 0.2 - 0.9; persistence sign flips between regimes) say it is not on these signals:
   a gate selects the end of a lucky stretch. Keep reporting executed PF next to the selection PF; do not read a higher gate as a higher executed PF.
+  (f) **"Run always all ... the evals decide" (x02 demo only):** DCA on behind its own Axis gate (`dcaEnabled`, `stratDca`, `dcaOnAxis` true, `dcaOnSets` false) and every
+  pack's Exit Sets (`exitSetsByPack` {}); every pack, range, type and both directions already run. x01 and the Bybit overlays / presets keep the earlier values (checks
+  `logistics.dca-off-by-default-...` and `grid.shipped-overlays-switch-off-the-indications-exit-sets` name x02 as the exception). Independence is pinned by
+  `stages.every-config-set-is-independent-with-its-own-floor-and-execution-window` (40 other Sets turned to noise: the probe Sets' verdicts, windows, lane, execution
+  window and own Auto floor 1.72 unchanged) and the mutant `set auto: a Set's own floor is learned from the pooled pairs of its step`.
+  (g) **Engine stop:** SIGTERM ended only the main thread and worker threads kept trading (seen on x01 and x02); `_term` now ends the process (`os._exit(0)`), state files
+  and venue-side stops / targets stay.
 
 - **2026-11-14, owner (series of instructions): x01 live on 40 symbols at the minimum volume factor 0.05, max SL ratio 0.8, every TP range and every signal pack open, leverage always the exchange maximum, "rally" direction acceptance.**
   Shipped in `overlay-bingx-x01.json` / `-x02.json` (x01 symbolCap 40; both: `setSlRatios` [0.25, 0.5, 0.75], `maxStopLossRatio` 0.8, `slMaxByRange` 0.8, Normal range on, trend / reversion / flow / multi on, `groupGate` + `groupGateSide`

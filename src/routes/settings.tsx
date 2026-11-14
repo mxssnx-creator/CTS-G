@@ -6,6 +6,7 @@ import { ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_R
 import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
+import { SignalConfigEditor } from "@/components/signal-config-editor";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -285,6 +286,7 @@ function SettingsPage() {
                 <EnableSlider label="Reversion (Sets and Base evaluation)" on={overlay.stratReversion} onChange={(v) => patch("stratReversion", v)} />
                 <EnableSlider label="Flow (Sets and Base evaluation)" on={overlay.stratFlow} onChange={(v) => patch("stratFlow", v)} />
                 <EnableSlider label="Multi (Sets and Base evaluation)" on={overlay.stratMulti} onChange={(v) => patch("stratMulti", v)} />
+                <EnableSlider label="Signals (each source x range x timeframe its own pack)" on={overlay.stratSignals} hint="CTS-A-O sources (ema-cross, macd-cross, rsi, donchian, bb, cci, obv) as Set packs through Base, Main, Real and the lanes; floor minPfSignals." onChange={(v) => patch("stratSignals", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="Off disables trailing Sets, peak-following and recalculation. Existing protective stops remain managed." onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -292,6 +294,12 @@ function SettingsPage() {
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
               </Grid>
+              {overlay.stratSignals && (
+                <div className="mt-3">
+                  <div className="mb-1 text-sm font-medium">Signals packs</div>
+                  <SignalConfigEditor value={overlay.signalConfigs} onChange={(v) => patch("signalConfigs", v)} />
+                </div>
+              )}
               <p className="text-sm text-muted">
                 These sliders write the overlay. Save on Live or VST persists every field — including DCA steps, modules and symbol universe — and the engine reloads the file.
               </p>

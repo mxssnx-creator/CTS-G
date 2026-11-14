@@ -364,6 +364,8 @@ export type PulseOverlay = {
   stratGeneral: boolean;
   /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
   stratShortRange: boolean;
+  stratSignals: boolean;
+  signalConfigs: SignalConfig[];
   stratTrend: boolean;
   stratBreakout: boolean;
   stratReversion: boolean;
@@ -702,6 +704,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   strategyProcessingByRange: {},
   stratGeneral: true,
   stratShortRange: true,
+  stratSignals: false,
+  signalConfigs: [],
   stratTrend: true,
   stratBreakout: false,
   stratReversion: true,
@@ -975,6 +979,8 @@ export type CtsSettings = {
   strategyProcessingByRange?: Record<string, { normal?: boolean; trailing?: boolean }>;
   stratGeneral?: boolean;
   stratShortRange?: boolean;
+  stratSignals?: boolean;
+  signalConfigs?: Partial<SignalConfig>[];
   stratTrend?: boolean;
   stratBreakout?: boolean;
   stratReversion?: boolean;
@@ -1214,6 +1220,51 @@ const strList = (v: unknown): string[] =>
 const numList = (v: unknown, lo: number, hi: number): number[] =>
   [...new Set((Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;\s]+/) : []).map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x) && x >= lo && x <= hi))];
 /** Normalise the saved range configurations; the engine expands and validates the names, so an unknown family is reported there, not silently kept here. */
+/** Signals packs (engine `signal_packs`): every source x range x timeframe is its own pack sig-<source>-<range>-t<tf> with this entry's Set geometry. */
+export const SIGNAL_SOURCES = ["ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian", "bb-bounce", "cci-reversal", "obv-trend"] as const;
+export const SIGNAL_RANGES = ["short", "medium"] as const;
+export const SIGNAL_TIMEFRAMES = [1, 5, 15, 30] as const;
+export interface SignalConfig {
+  label: string;
+  enabled: boolean;
+  sources: string[];
+  ranges: string[];
+  timeframes: number[];
+  stepMin: number;
+  stepMax: number;
+  slRatios: number[];
+  types: string[];
+}
+export const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
+  label: "signals", enabled: true, sources: [...SIGNAL_SOURCES], ranges: [...SIGNAL_RANGES], timeframes: [5, 15],
+  stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"],
+};
+export function signalConfigList(v: unknown): SignalConfig[] {
+  if (!Array.isArray(v)) return [];
+  const words = (x: unknown): string[] => (Array.isArray(x) ? x : typeof x === "string" ? x.split(/[,;\s]+/) : []).map((y) => String(y).trim().toLowerCase()).filter(Boolean);
+  return v.slice(0, 32).map((raw, i) => {
+    const e = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const lo = Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMin) || DEFAULT_SIGNAL_CONFIG.stepMin)));
+    const hi = Math.max(lo, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMax) || DEFAULT_SIGNAL_CONFIG.stepMax)));
+    const sources = words(e.sources).filter((s) => (SIGNAL_SOURCES as readonly string[]).includes(s));
+    const ranges = words(e.ranges).filter((s) => (SIGNAL_RANGES as readonly string[]).includes(s));
+    const tfs = words(e.timeframes).map(Number).filter((x) => (SIGNAL_TIMEFRAMES as readonly number[]).includes(x));
+    const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.05 && x <= 5);
+    const types = words(e.types).filter((t) => (SET_TYPES as readonly string[]).includes(t));
+    return {
+      label: String(e.label ?? `signals ${i + 1}`).slice(0, 60),
+      enabled: e.enabled !== false,
+      sources: sources.length ? sources : [...SIGNAL_SOURCES],
+      ranges: ranges.length ? ranges : [...SIGNAL_RANGES],
+      timeframes: tfs.length ? tfs : [...DEFAULT_SIGNAL_CONFIG.timeframes],
+      stepMin: lo,
+      stepMax: hi,
+      slRatios: ratios.length ? ratios : [...DEFAULT_SIGNAL_CONFIG.slRatios],
+      types: types.length ? types : [...DEFAULT_SIGNAL_CONFIG.types],
+    };
+  });
+}
+
 export function indicationConfigList(v: unknown): IndicationConfig[] {
   if (!Array.isArray(v)) return [];
   return v.slice(0, 64).map((raw, i) => {
@@ -1497,6 +1548,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     strategyProcessingByRange: processingByRangeOf(cts.strategyProcessingByRange),
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
+    stratSignals: bool(cts.stratSignals, false),
+    signalConfigs: signalConfigList(cts.signalConfigs),
     stratTrend: bool(cts.stratTrend, false),
     stratBreakout: bool(cts.stratBreakout, false),
     stratReversion: bool(cts.stratReversion, false),
