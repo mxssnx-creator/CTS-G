@@ -488,6 +488,46 @@ def ratio_midpoints_match_desk_half_up_normalization():
     return True,"28 midpoint ratios snap half-up identically to desk; extreme finite inputs remain bounded"
 
 
+def the_packed_simulator_floors_equal_the_plain_ones():
+    """trade_sim installs compact_replay_memory.PackedFloors over stage_eval.AutoFloors; both must learn the same step floors and the same floor of every Set
+    (the packed copy once built 4-field rows and every Signals sweep died in apply)."""
+    import json as _json
+    import os as _os
+    import stage_eval as sg
+    from compact_replay_memory import CompactMemory
+    from common import SMALL, T0, synth_bars
+    names = ["S0-USDT", "S1-USDT"]
+    bars = {s_: synth_bars(61 + i, 1300, drift=0.0004 if i % 2 == 0 else -0.0004, vol=0.003) for i, s_ in enumerate(names)}
+    times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
+    patch = {**SMALL, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+             "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoMin": 20, "minPfStepAutoN": 5, "minPfStepAutoScope": "set", "minPfSetAutoMin": 8,
+             "directionMode": "split", "pauseMode": "off", "setScratchEnabled": True}
+    saved = _os.environ.get("STAGE_OVERLAY_PATCH")
+    try:
+        _os.environ["STAGE_OVERLAY_PATCH"] = _json.dumps(patch)
+        shadow = {}
+        for s_ in names:
+            _, warm, dirs, confs, out = sg._symbol_job((s_, bars[s_], times[s_][0]))
+            shadow[s_] = (warm, dirs, confs, out)
+        book = sg.make_book()
+        tapes = sg.Tapes(book, names, times, shadow)
+        hour = float(int((times[names[0]][0] + 1000 * 60) // 3600) * 3600)
+        sg.AutoFloors(book, tapes).apply(book, hour)
+        plain = (dict(book.step_floor_auto), dict(book.set_floor_auto))
+        mem = CompactMemory(sg).install()
+        try:
+            sg.AutoFloors(book, tapes).apply(book, hour)
+        finally:
+            mem.restore()
+        packed = (dict(book.step_floor_auto), dict(book.set_floor_auto))
+    finally:
+        if saved is None:
+            _os.environ.pop("STAGE_OVERLAY_PATCH", None)
+        else:
+            _os.environ["STAGE_OVERLAY_PATCH"] = saved
+    return plain == packed and bool(plain[1]), f"step floors equal {plain[0] == packed[0]}, Set floors equal {plain[1] == packed[1]} ({len(plain[1])} Sets with their own floor)"
+
+
 def shipped_floors_are_all_above_one():
     """Owner 2026-11-14 ("only if stage Real has PF over 1 ... mirrored to live"): on the shipped x01 / x02 overlays every floor a window can ask is above 1 -- the
     manual step floors, the Auto candidates (minPfStepAutoLow 1.02; live x02 had three Sets valid with a Real window PF of exactly 1.00 at a learned floor of 1.00),
@@ -515,4 +555,4 @@ CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,
     auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors, the_simulator_learns_the_engines_own_floor_of_every_set,
-    shipped_floors_are_all_above_one)]
+    shipped_floors_are_all_above_one, the_packed_simulator_floors_equal_the_plain_ones)]
