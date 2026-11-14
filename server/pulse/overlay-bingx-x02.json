@@ -242,7 +242,7 @@
   "mainGateEnabled": true,
   "mainGateN": 25,
   "minPfLinked": true,
-  "histLookbackAuto": true,
+  "histLookbackAuto": false,
   "histLookbackMax": 4320,
   "stagesEnabled": true,
   "setGateShortN": 25,
@@ -414,5 +414,7 @@
       0.7,
       0.8
     ]
-  }
+  },
+  "replayWorkers": 3,
+  "signalCachePath": "/opt/grok-x01-pulse/signal-cache-bingx-x02.pkl"
 }
