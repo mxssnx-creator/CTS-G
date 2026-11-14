@@ -80,6 +80,10 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     # x01 (owner 2026-11-05, disable the non-performers): Micro range, trend pack and Short Range off, five SL ratios dropped, trailing pairs that lock under 0.2 % dropped; fixtures keep the full grid
     ov["trailMinLockPct"], ov["stratShortRange"] = 0.0, True
     ov.pop("setSlRatios", None)
+    # the shipped overlays (owner 2026-11-13/14) run every signal pack, the group gate by side and the 0.8 SL ceiling; fixtures keep the earlier packs, no gate and the full ratio grid
+    ov["stratReversion"], ov["stratFlow"], ov["stratMulti"] = False, False, False
+    ov["groupGate"], ov["groupGateSide"], ov["groupGateN"], ov["groupGateHours"], ov["groupGatePf"], ov["groupGateMin"] = False, False, 10, 12, 1.0, 1
+    ov["maxStopLossRatio"] = 2.5
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov

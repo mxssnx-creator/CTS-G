@@ -2561,7 +2561,11 @@ def _signal_book():
     import json
     import set_engine as se
     b = se.SetBook()
-    b.load(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"))))
+    ov = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json")))
+    # the shipped x01 now runs every signal pack, so some pack signals on nearly every bar of this synthetic trend and the "quiet bar" half of the check disappears; the check
+    # pins the packs it was written for (the signal transport is the same for every pack)
+    ov["stratReversion"] = ov["stratFlow"] = ov["stratMulti"] = ov["stratTrend"] = False
+    b.load(ov)
     return b, se
 
 
