@@ -2027,20 +2027,27 @@ function SettingsPage() {
                 <Slider label="Execution last N (end of Real)" value={overlay.execGateN} min={0} max={60} step={5} hint="the newest N results of the lane's Real Set must pass the minimum PF again right before execution; 0 = off (10 .. 35 tested)" onChange={(v) => patch("execGateN", v)} />
                 <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
                 <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
-                {(["long", "wide"] as const).map((rg) => {
+                {(["micro", "minimal", "short", "normal", "long", "wide"] as const).map((rg) => {
                   const xs = overlay.slRatiosByRange?.[rg] ?? [];
-                  const lo = xs.length ? xs[0] : 0.2;
-                  const hi = xs.length ? xs[xs.length - 1] : 0.8;
+                  const own = xs.length > 0;
+                  const lo = own ? xs[0] : 0.5;
+                  const hi = own ? xs[xs.length - 1] : 1.25;
                   const setRange = (a: number, b: number) => {
                     const from = Math.min(a, b), to = Math.max(a, b);
                     const list: number[] = [];
                     for (let r = from; r <= to + 1e-9; r += 0.1) list.push(Math.round(r * 100) / 100);
                     patch("slRatiosByRange", { ...overlay.slRatiosByRange, [rg]: list });
                   };
+                  const clear = () => {
+                    const next = { ...overlay.slRatiosByRange };
+                    delete next[rg];
+                    patch("slRatiosByRange", next);
+                  };
                   return (
-                    <div key={rg} className="grid grid-cols-2 gap-2">
-                      <Num label={`${rg} SL min`} value={lo} min={0.1} max={2} step={0.1} onChange={(v) => setRange(v, hi)} />
+                    <div key={rg} className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
+                      <Num label={`${rg} SL min ${own ? "" : "(global grid)"}`} value={lo} min={0.1} max={2} step={0.1} onChange={(v) => setRange(v, hi)} />
                       <Num label={`${rg} SL max`} value={hi} min={0.1} max={2} step={0.1} onChange={(v) => setRange(lo, v)} />
+                      <button type="button" className="mb-1 text-xs text-muted hover:text-fg" disabled={!own} onClick={clear}>global</button>
                     </div>
                   );
                 })}
