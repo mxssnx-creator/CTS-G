@@ -5276,7 +5276,7 @@ class Pulse:
                 if net_return is not None:
                     # the profit group gate reads each group's own executed results (set_group: pack x kind x TP range x lane), newest last
                     gx = self.__dict__.setdefault("group_exec", {})
-                    gside = bool(getattr(self.sets, "group_gate_side", False))
+                    gside = getattr(self.sets, "group_gate_side", False)
                     gq = gx.get(set_group(rec.set_id, lane, gside))
                     if gq is None:
                         gq = gx[set_group(rec.set_id, lane, gside)] = collections.deque(maxlen=200)

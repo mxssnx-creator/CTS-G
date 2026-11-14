@@ -803,7 +803,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
     gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if getattr(book, "group_gate", False) else None
     ghist: Dict[str, List[Tuple[float, float]]] = {}
-    gside = bool(getattr(book, "group_gate_side", False))
+    gside = getattr(book, "group_gate_side", False)
 
     def group_ok(st_, lane_: str, now_: float) -> bool:
         if gg is None:

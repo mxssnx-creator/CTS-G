@@ -3221,9 +3221,18 @@ def the_side_aware_group_gate_judges_long_and_short_groups_apart():
     default_book.load({"groupGate": True})
     src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
     wired = src.count("group_gate_side") >= 4
-    ok = (len(keys_off) == 1 and len({k_l, k_s, k_b}) == 3 and k_b.endswith(":B") and k_l.endswith(":L") and k_s.endswith(":S")
+    # pooled scope (groupGateScope "side", CTS-A-O's engine direction acceptance): one record per direction, whatever the pack, kind, range or lane
+    pooled_rec = {set_group(long_id, "pos", "pooled"): list(losses)}
+    other_long, other_short = "flow:L:1m:tr0.80:0.70", "flow:S:1m:tr0.80:0.70"
+    pooled = (group_verdict(pooled_rec.get(set_group(long_id, "pos", "pooled"), ()), now, 5, 1.0, 12.0, 1)[0],
+              group_verdict(pooled_rec.get(set_group(other_long, "neg", "pooled"), ()), now, 5, 1.0, 12.0, 1)[0],
+              group_verdict(pooled_rec.get(set_group(other_short, "pos", "pooled"), ()), now, 5, 1.0, 12.0, 1)[0])
+    pooled_book = SetBook()
+    pooled_book.load({"groupGate": True, "groupGateScope": "side"})
+    pooled_ok = pooled == (False, False, True) and pooled_book.group_gate_side == "pooled" and set_group(both_id, "pos", "pooled") == "side:B"
+    ok = (pooled_ok and len(keys_off) == 1 and len({k_l, k_s, k_b}) == 3 and k_b.endswith(":B") and k_l.endswith(":L") and k_s.endswith(":S")
           and on == (False, True) and off == (False, False) and book.group_gate_side is True and default_book.group_gate_side is False and wired)
-    return ok, f"off: one key {len(keys_off) == 1}, long/short allowed after 3 long losses off {off}, on {on}, keys {k_l[-2:]} {k_s[-2:]} {k_b[-2:]}, default off {default_book.group_gate_side is False}, wired {wired}"
+    return ok, f"pooled (long losses stop longs of every pack, shorts run) {pooled_ok}; off: one key {len(keys_off) == 1}, long/short allowed after 3 long losses off {off}, on {on}, keys {k_l[-2:]} {k_s[-2:]} {k_b[-2:]}, default off {default_book.group_gate_side is False}, wired {wired}"
 
 
 def transfers_move_the_drawdown_basis_not_the_drawdown():

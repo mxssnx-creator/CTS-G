@@ -214,11 +214,14 @@ _GROUP_ST = re.compile(r":st(\d+)")
 _GROUP_TR = re.compile(r":tr([0-9.]+):([0-9.]+)(?::ts[0-9.]+)?$")
 
 
-def set_group(set_id: str, lane: str = "pos", side: bool = False) -> str:
+def set_group(set_id: str, lane: str = "pos", side: Any = False) -> str:
     """The group key of a Set id and lane: "group:<pack>:<kind>:<range>:<lane>". An id that names no step or arm keeps the range "?" (its own group). With `side`
     (groupGateSide, the rally / falling direction acceptance ported from CTS-A-O: type x range x SIDE) the Set's direction ":L" / ":S" is part of the key, so a losing
     long group closes only longs while the short group of the same pack / kind / range keeps its own record; a combined Set (no side marker) keeps ":B"."""
     sid = str(set_id or "")
+    if side == "pooled":       # groupGateScope "side" (CTS-A-O's engine direction acceptance): every executed result of one direction is ONE record, whatever the pack, kind, range or lane
+        m_side = re.search(r":([LS]):", sid)
+        return "side:" + (m_side.group(1) if m_side else "B")
     pack = sid.split(":", 1)[0] or "-"
     tr = _GROUP_TR.search(sid)
     if sid.endswith(":" + EXIT_TAG):
@@ -2524,7 +2527,7 @@ class SetBook:
         self.relation_cfg = rel_cfg
         # the profit group gate (entry-time only: it changes no tape, so it is not part of the evaluation signature)
         self.group_gate = bool(ov.get("groupGate", False))
-        self.group_gate_side = bool(ov.get("groupGateSide", False))
+        self.group_gate_side = "pooled" if str(ov.get("groupGateScope") or "group").lower() == "side" else bool(ov.get("groupGateSide", False))   # "pooled": one record per direction
         try:
             self.replay_workers = max(0, min(6, int(float(ov.get("replayWorkers") or 0))))
         except (TypeError, ValueError):
