@@ -5,6 +5,15 @@ export function secureMinimalPreset(): PulseOverlay {
   return {
     ...defaultOverlay(),
     ...PF_TYPE_DEFAULTS,
+    // the conservative start keeps the earlier packs, no group gate and the wide SL ceiling whatever the desk default is (the desk default follows the x01 instruction of 2026-11-14)
+    stratTrend: false,
+    stratReversion: false,
+    stratFlow: false,
+    stratMulti: false,
+    groupGate: false,
+    groupGateN: 10,
+    groupGateHours: 12,
+    maxStopLossRatio: 2.5,
     symbols: ["*"],
     symbolsAll: true,
     symbolsDynamic: true,
