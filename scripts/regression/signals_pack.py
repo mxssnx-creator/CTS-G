@@ -97,7 +97,27 @@ def blocks_equal_completed_bars():
     return not bad, f"phases x timeframes differing: {bad[:5]}"
 
 
+def the_signal_memo_keeps_only_signalling_packs_and_answers_the_same():
+    """Memory (2026-11-14): a memo row keeps only the packs that signalled on that bar; a pass answered from the memo equals a pass computed bar by bar, for
+    every pack, and the rows are smaller than the pack list."""
+    bars = synth_bars(17, 900, drift=0.0003, vol=0.003)
+    base_ts = float(int(T0 // 1800) * 1800)
+    b = se.SetBook()
+    b.load(overlay(**{**SMALL, "stratTrend": True, "stratReversion": True}))
+    packs = list(b.packs) + [sp.pack_name("ema-cross", "short", 5), sp.pack_name("rsi-reversal", "short", 1)]
+    settings = dict(b.ind_settings)
+    plain = se.pack_signals(bars, packs, settings, base_ts, 120)
+    cache = {}
+    first = se.pack_signals(bars, packs, settings, base_ts, 120, cache=cache, salt=3)
+    again = se.pack_signals(bars, packs, settings, base_ts, 120, cache=cache, salt=3)
+    width = sum(len(v) for v in cache.values()) / max(1, len(cache))
+    no_empty = all(v != se._NO_SIGNAL for row in cache.values() for v in row.values())
+    ok = plain == first == again and width < len(packs) and no_empty and any(cache.values())
+    return ok, f"identical {plain == first == again}; {width:.2f} of {len(packs)} packs per memo row; empty entries kept: {not no_empty}"
+
+
 CHECKS = [
+    ("signals-pack.the-signal-memo-keeps-only-signalling-packs-and-answers-the-same", the_signal_memo_keeps_only_signalling_packs_and_answers_the_same),
     ("signals-pack.blocks-equal-completed-bars", blocks_equal_completed_bars),
     ("signals-pack.the-signal-is-the-sources-onset-on-its-own-window", the_signal_is_the_sources_onset_on_its_own_window),
     ("signals-pack.the-signal-never-reads-a-later-bar", the_signal_never_reads_a_later_bar),

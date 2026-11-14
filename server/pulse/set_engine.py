@@ -11,6 +11,7 @@ keeps being scored and becomes valid again on its own; only a lock is sticky.
 from __future__ import annotations
 import copy
 import os
+import sys
 
 import re
 import bisect
@@ -1164,6 +1165,9 @@ def load_signal_cache(path: str, salt: int) -> Dict[str, Dict[int, Dict[str, Tup
         return {}
 
 
+_NO_SIGNAL: Tuple[int, float, str] = (0, 0.0, "")
+
+
 def pack_signals(
     bars: Sequence[Sequence[float]],
     packs: Sequence[str],
@@ -1220,15 +1224,17 @@ def pack_signals(
             if hit is not None:
                 used[key] = hit
                 for p in packs:
-                    signals[p][i] = hit[p]
+                    signals[p][i] = hit.get(p, _NO_SIGNAL)      # a memo row keeps only the packs that signalled
                 if on_step and i % 50 == 0:
                     on_step()
                 continue
         row = pre.get(i) or bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
         for p in packs:
-            signals[p][i] = row.get(p, (0, 0.0, ""))
+            signals[p][i] = row.get(p, _NO_SIGNAL)
         if key is not None:
-            used[key] = row
+            # memory (2026-11-14): most packs do not signal on most bars; the memo row keeps only those that did (x02: about 7,000 bars x 100 symbols x
+            # 44 packs were held as full dicts and the engine grew past 1.7 GB); the reasons are interned so equal texts share one string
+            used[key] = {p: (v if not v[2] else (v[0], v[1], sys.intern(v[2]))) for p, v in row.items() if v != _NO_SIGNAL}
         if on_step and i % 50 == 0:
             on_step()
     if cache is not None:
