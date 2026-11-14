@@ -84,7 +84,21 @@ def a_signal_pack_reads_only_its_own_source():
     return alone == mixed and fired > 0, f"{fired} signals of {pk}; identical next to {len(others)} other packs: {alone == mixed}"
 
 
+def blocks_equal_completed_bars():
+    """The fast aggregation (signal_packs._blocks, slices) gives exactly signal_sources.completed_bars on contiguous minutes, for every timeframe and start phase."""
+    bars = synth_bars(13, 400, vol=0.003)
+    bad = []
+    for start in range(0, 31):
+        close = float(int(T0 // 1800) * 1800) + 60.0 * (399 + start)
+        rows = _rows_ms(bars, close)
+        for tf in (5, 15, 30):
+            if sp._blocks(rows, tf) != ss.completed_bars(rows, tf):
+                bad.append((start, tf))
+    return not bad, f"phases x timeframes differing: {bad[:5]}"
+
+
 CHECKS = [
+    ("signals-pack.blocks-equal-completed-bars", blocks_equal_completed_bars),
     ("signals-pack.the-signal-is-the-sources-onset-on-its-own-window", the_signal_is_the_sources_onset_on_its_own_window),
     ("signals-pack.the-signal-never-reads-a-later-bar", the_signal_never_reads_a_later_bar),
     ("signals-pack.every-signal-pack-is-its-own-set-grid-at-the-signals-floor", every_signal_pack_is_its_own_set_grid_at_the_signals_floor),

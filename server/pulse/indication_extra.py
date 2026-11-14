@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import re
 import threading
+from array import array
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -849,7 +850,11 @@ def _agg(rows: Sequence[Row], minutes: int) -> List[List[float]]:
     # Exact content, including interior corrections, is part of the key.
     # Callers treat these internal shared aggregates as read-only. Sixteen
     # windows bound retention independently of symbols or replay length.
-    key = (m, tuple(tuple(row[:5]) for row in rows))
+    try:
+        # the exact content as IEEE bytes (built in C; the same rows give the same key, any interior correction a new one)
+        key = (m, len(rows), array("d", [float(x) for row in rows for x in row[:5]]).tobytes())
+    except (TypeError, ValueError):
+        key = (m, tuple(tuple(row[:5]) for row in rows))
     if key in cache:
         cache.move_to_end(key)
         return cache[key]

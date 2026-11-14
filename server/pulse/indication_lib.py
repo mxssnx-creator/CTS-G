@@ -105,10 +105,11 @@ MEMO_CAP = 4096                 # entries of the per-thread memo before it is cl
 
 class _AggregatedBars(list):
     """Owned, read-only indicator input; derived features share its lifetime."""
-    __slots__ = ('true_ranges',)
+    __slots__ = ('true_ranges', 'closes')
     def __init__(self,values):
         super().__init__(values)
         self.true_ranges = None
+        self.closes = None
 
 
 def _memo() -> Dict:
@@ -188,6 +189,7 @@ def _ema(vals: Sequence[float], n: int) -> List[float]:
     return out
 
 
+@_vector_memo
 def _wma(vals: Sequence[float], n: int) -> List[float]:
     out = []
     for i in range(len(vals)):
@@ -220,6 +222,11 @@ def _rsi(c: Sequence[float], n: int) -> List[float]:
 
 
 def _cl(b):
+    if isinstance(b, _AggregatedBars):
+        c = b.closes
+        if c is None:
+            c = b.closes = [float(x[3]) for x in b]
+        return list(c)                 # a fresh list each call: a caller may change its copy
     return [float(x[3]) for x in b]
 
 

@@ -54,6 +54,22 @@ def window_minutes(pack: str) -> int:
     return int(min(WINDOW_CAP, (6 * warmup_bars(source, rng) + 2) * tf))
 
 
+def _blocks(rows: Sequence[Tuple[float, ...]], tf: int) -> List[List[float]]:
+    """signal_sources.completed_bars for contiguous minute rows, by slices: the complete UTC-aligned tf blocks, [open time, first open, max high,
+    min low, last close, volume summed left to right] -- the same numbers in the same order (check signals-pack.blocks-equal-completed-bars)."""
+    width = tf * 60000
+    n = len(rows)
+    s = 0
+    while s < n and rows[s][0] % width:
+        s += 1
+    out: List[List[float]] = []
+    while s + tf <= n:
+        blk = rows[s:s + tf]
+        out.append([rows[s][0], blk[0][1], max(r[2] for r in blk), min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk)])
+        s += tf
+    return out
+
+
 def signal(bars: Sequence[Sequence[float]], i: int, close_ts: float, pack: str) -> Tuple[int, float, str]:
     """The pack's signal on 1m bar i (rows [o, h, l, c, v]); close_ts = the close time of bar i in seconds."""
     p = parse(pack)
@@ -67,10 +83,7 @@ def signal(bars: Sequence[Sequence[float]], i: int, close_ts: float, pack: str) 
     open0 = close_ts - 60.0 - (i - lo) * 60.0
     rows = [(int(round((open0 + 60.0 * k) * 1000.0)), float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]))
             for k, r in enumerate(bars[lo:i + 1])]
-    try:
-        agg = completed_bars(rows, tf) if tf > 1 else [list(r) for r in rows]
-    except ValueError:
-        return (0, 0.0, "")
+    agg = _blocks(rows, tf) if tf > 1 else [list(r) for r in rows]
     if len(agg) < 2 or agg[-1][0] + tf * 60000 != int(round(close_ts * 1000.0)):
         return (0, 0.0, "")                                  # the newest completed timeframe bar must end at bar i
     try:

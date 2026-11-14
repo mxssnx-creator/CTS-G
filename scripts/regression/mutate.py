@@ -97,6 +97,8 @@ MUTATIONS = [
      "signal_packs.py", "    if st[-1] and st[-1] != st[-2]:", "    if st[-1]:"),
     ("signals pack: the signal reads the bar after i",
      "signal_packs.py", "            for k, r in enumerate(bars[lo:i + 1])]", "            for k, r in enumerate(bars[lo:i + 2])]"),
+    ("signals pack: the fast aggregation drops the first minute's volume",
+     "signal_packs.py", "min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk)])", "min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk[1:])])"),
     ("signals pack: an entry's step range and ratios are ignored",
      "set_engine.py", "            self.pack_ranges.update(sig[\"ranges\"])", "            pass"),
     ("exec gate: the last check before execution never blocks",
