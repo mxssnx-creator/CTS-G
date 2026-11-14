@@ -1129,7 +1129,7 @@ def stable_salt(settings_json: str, packs: Sequence[str]) -> int:
     return int.from_bytes(h.digest(), "big", signed=True)
 
 
-SIG_CACHE_VERSION = 1
+SIG_CACHE_VERSION = 2
 
 
 def save_signal_cache(path: str, salt: int, caches: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]]) -> int:
@@ -1206,7 +1206,7 @@ def pack_signals(
         todo = []
         for i in range(warmup, n):
             if cache is not None:
-                k = hash((salt, tuple(hs[max(0, i + 1 - sig_w) : i + 1])))
+                k = hash((salt, base_ts + i * BAR_S, tuple(hs[max(0, i + 1 - sig_w) : i + 1])))
                 if k in used or k in cache or k in seen:
                     continue
                 seen.add(k)
@@ -1217,7 +1217,9 @@ def pack_signals(
         key = None
         if cache is not None:
             lo_w = max(0, i + 1 - sig_w)
-            key = hash((salt, tuple(hs[lo_w : i + 1])))
+            # UTC alignment changes which completed timeframe bar can signal.
+            # Identical OHLCV at another clock time is a different memo input.
+            key = hash((salt, base_ts + i * BAR_S, tuple(hs[lo_w : i + 1])))
             hit = used.get(key)
             if hit is None:
                 hit = cache.get(key)
