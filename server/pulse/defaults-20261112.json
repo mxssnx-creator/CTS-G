@@ -1,15 +1,8 @@
 {
-  "description": "Full last-N lanes: Base long/short/last + Main long/short/last + Real; per-range baseMin/mainMin; maxSl 0.8",
-  "lanes": {
-    "baseLong": "setGateWindow=40",
-    "baseShort": "setGateShortN=16",
-    "baseLast": "setGateMinN=2 positive",
-    "mainLong": "mainGateN=20",
-    "mainShort": "mainShortWindows [5,8,12,16] dynamic",
-    "mainLast": "mainMinN=2 positive",
-    "real": "realGateN=12",
-    "independent": "lastNByRange baseMin/mainMin per TP range"
-  },
+  "description": "last min windows 1-4 step1; Base+Main long/short/last; maxSl 0.8",
+  "mainMinWindows": [1, 2, 3, 4],
+  "setGateMinWindows": [1, 2, 3, 4],
+  "rule": "largest passing last-window among 1..4 wins",
   "maxSlRatio": 0.8,
   "minPf": 1.25
 }
