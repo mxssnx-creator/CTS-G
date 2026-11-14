@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 70,
+  "symbolCap": 100,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -30,10 +30,10 @@
   "blockPauseCountRatio": 1,
   "blockActiveLive": true,
   "blockActiveReal": true,
-  "dcaEnabled": false,
+  "dcaEnabled": true,
   "dcaAuto": true,
   "dcaOnSets": false,
-  "dcaOnAxis": false,
+  "dcaOnAxis": true,
   "dcaMaxExposureX": 0,
   "symbols": [
     "*"
@@ -50,12 +50,18 @@
   "noise": 0.05,
   "volWeight": 0.3,
   "minStep": 10,
-  "maxStopLossRatio": 2.5,
+  "maxStopLossRatio": 1.4,
+  "setSlRatios": [
+    0.5,
+    0.75,
+    1.0,
+    1.25
+  ],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
   "rearrangeGap": 0.22,
-  "positionCostPct": 0.176,
+  "positionCostPct": 0.11,
   "pfWindow": 8,
   "setPfWindow": 8,
   "exitPfWindow": 8,
@@ -134,7 +140,7 @@
   "setStepMax": 32,
   "setStepAdapt": false,
   "trailMinStep": 3,
-  "histLookbackBars": 4320,
+  "histLookbackBars": 1920,
   "histRefreshS": 120,
   "exitRevOn": false,
   "exitMinHoldS": 45,
@@ -159,7 +165,7 @@
   ],
   "dcaAutoDeact": true,
   "dcaMinPf": 1.25,
-  "stratDca": false,
+  "stratDca": true,
   "indTypeState": true,
   "indTypeDirection": true,
   "indTypeMove": true,
@@ -200,9 +206,7 @@
   "volumeByPack": {},
   "volumeByKind": {},
   "volumeByRange": {},
-  "exitSetsByPack": {
-    "indications": false
-  },
+  "exitSetsByPack": {},
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
@@ -236,7 +240,7 @@
   "mainGateEnabled": true,
   "mainGateN": 25,
   "minPfLinked": true,
-  "histLookbackAuto": true,
+  "histLookbackAuto": false,
   "histLookbackMax": 4320,
   "stagesEnabled": true,
   "setGateShortN": 25,
@@ -260,7 +264,7 @@
     10
   ],
   "realGateEnabled": true,
-  "realGateN": 15,
+  "realGateN": 20,
   "realStagePaper": true,
   "ddHaltBasis": "session",
   "minPfBySize": true,
@@ -276,10 +280,16 @@
   "minPfMediumN": 35,
   "volumeByPackKind": {},
   "slMaxByRange": {
-    "long": 1.0,
-    "wide": 1.0
+    "long": 1.4,
+    "wide": 1.4
   },
   "leverageStopCap": false,
+  "groupGate": true,
+  "groupGateSide": true,
+  "groupGateN": 3,
+  "groupGatePf": 1.0,
+  "groupGateHours": 6,
+  "groupGateMin": 1,
   "stratBlock": true,
   "blockCounts": [
     {
@@ -373,12 +383,60 @@
   "blockRiskPctOfBalance": 0,
   "minPfStepAutoHigh": 1.27,
   "manualCloseRestMin": 240,
-  "slippageAllowancePct": 0.016,
-  "makerFeeRate": 0.0005,
-  "takerFeeRate": 0.0008,
+  "slippageAllowancePct": 0.01,
+  "makerFeeRate": 0.0002,
+  "takerFeeRate": 0.0005,
   "slippageFeeRatio": 0.1,
-  "minSlDistancePct": 0.1,
+  "minSlDistancePct": 0.3,
   "minPfByRange": {
     "micro": 1.01
-  }
+  },
+  "setSlMinRatio": 0.5,
+  "exitSetHoldBars": 720,
+  "slRatiosByRange": {
+    "long": [
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8
+    ],
+    "wide": [
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8
+    ]
+  },
+  "replayWorkers": 3,
+  "signalCachePath": "/opt/grok-x01-pulse/signal-cache-bingx-x02.pkl",
+  "minPfStepAutoScope": "set",
+  "minPfSetAutoMin": 10,
+  "stratSignals": true,
+  "signalConfigs": [
+    {
+      "label": "signals default",
+      "timeframes": [
+        5,
+        15
+      ],
+      "stepMin": 5,
+      "stepMax": 12,
+      "slRatios": [
+        0.5,
+        0.75,
+        1.0
+      ],
+      "types": [
+        "base",
+        "trail"
+      ]
+    }
+  ],
+  "minPfStepAutoLow": 1.02
 }

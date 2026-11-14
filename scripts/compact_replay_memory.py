@@ -41,7 +41,7 @@ class CompactMemory:
                     if symbols is None:symbols=(f'unknown:{st.id}',)*len(tx)
                     for t,e,x,symbol in zip(tx,te,pp,symbols):
                         run=hash((run,sg.se.auto_evidence_key(t,symbol,x,e,st.side)));sig.append(run)
-                    self.sets.append(((book.auto_step_bucket(st),st.side),tx,sig,pairs))
+                    self.sets.append(((book.auto_step_bucket(st),st.side),tx,sig,pairs,st.id))
         def packed_prefix(tapes,idx):
             cache=tapes.__dict__.setdefault('_prefix',{})
             if idx not in cache:

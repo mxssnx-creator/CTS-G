@@ -16,6 +16,46 @@ def _book(**extra):
     return b
 
 
+def min_sl_ratio_and_exit_hold():
+    full = _book(setSlRatios=[0.25, 0.5, 0.75])
+    cut = _book(setSlRatios=[0.25, 0.5, 0.75], setSlMinRatio=0.5, exitSetHoldBars=600)
+    allcut = _book(setSlRatios=[0.25], setSlMinRatio=0.5)
+    ex = [st for st in cut.by_idx if st.kind == "exit"]
+    base = [st for st in cut.by_idx if st.kind == "base"]
+    ok = full.sl_ratios == [0.25, 0.5, 0.75] and cut.sl_ratios == [0.5, 0.75] and allcut.sl_ratios == [0.25]
+    ok = ok and all(st.sl_ratio >= 0.5 - 1e-9 for st in cut.by_idx if st.kind != "trail")
+    ok = ok and ex and all(cut.hold_bars_for(st) == 600 for st in ex) and all(cut.hold_bars_for(st) == 0 for st in base)
+    ok = ok and all(full.hold_bars_for(st) == 0 for st in full.by_idx)
+    return ok, f"full={full.sl_ratios} min0.5={cut.sl_ratios} exit sets={len(ex)} hold={sorted({cut.hold_bars_for(s) for s in ex})}"
+
+
+def sl_ratios_by_range():
+    from position_cost import tp_range_of
+    L = [round(0.2 + 0.1 * i, 2) for i in range(7)]
+    b = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25], setSlMinRatio=0.5, slRatiosByRange={"long": L, "wide": L}, tpRanges={"wide": True}, setStepMax=50)
+    seen = {}
+    for st in b.by_idx:
+        if st.kind in ("base", "exit"):
+            seen.setdefault(tp_range_of(st.step), set()).add(round(st.sl_ratio, 2))
+    plain = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25], setSlMinRatio=0.5, tpRanges={"wide": True}, setStepMax=50)
+    ok = seen.get("long") == set(L) and seen.get("wide") == set(L) and all(seen[k] == {0.5, 0.75, 1.0, 1.25} for k in ("micro", "minimal", "short", "normal"))
+    ok = ok and all(st.sl_ratio >= 0.5 - 1e-9 for st in plain.by_idx if st.kind != "trail")
+    return ok, f"by range { {k: sorted(v) for k, v in seen.items()} }"
+
+
+def max_sl_ratio_caps_the_grid():
+    """maxStopLossRatio was only reported (coord_engine) and capped nothing; now no base / Exit Set is built above it, per-range lists keep their own bounds."""
+    from position_cost import tp_range_of
+    cap = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], maxStopLossRatio=1.4)
+    free = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], maxStopLossRatio=0)
+    L = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    rng = _book(setSlRatios=[0.5, 1.0, 1.5], maxStopLossRatio=1.4, slRatiosByRange={"long": L}, setStepMax=32)
+    top = max(st.sl_ratio for st in cap.by_idx if st.kind != "trail")
+    longs = {round(st.sl_ratio, 2) for st in rng.by_idx if st.kind != "trail" and tp_range_of(st.step) == "long"}
+    ok = cap.sl_ratios == [0.5, 0.75, 1.0, 1.25] and top <= 1.4 and free.sl_ratios == [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] and longs == set(L)
+    return ok, f"cap 1.4 -> {cap.sl_ratios} (largest built {top}); no cap -> {free.sl_ratios}; long range {sorted(longs)}"
+
+
 def tp_steps():
     steps = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1))
     tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
@@ -291,7 +331,7 @@ def long_and_wide_ranges_stop_at_sl_ratio_one_and_the_minimum_step_stays_two():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     ship = {_o.path.basename(f): (lambda d: (d.get("slMaxByRange"), d.get("setMinStep"), d.get("setStepAdapt")))(_j.load(open(f))) for f in files}
-    ship_ok = all(v == ({"long": 1.0, "wide": 1.0}, 2, False) for v in ship.values())
+    ship_ok = all(v[1:] == (2, False) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for v in ship.values())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
     plain = SetBook()
     plain.load({"histEnabled": True})
     eng_ok = plain.step_adapt is False and plain.sl_max_by_range == {"long": 1.0, "wide": 1.0} and plain.min_step == 2
@@ -308,7 +348,8 @@ def shipped_overlays_switch_off_the_indications_exit_sets():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     got = {_o.path.basename(f): _j.load(open(f)).get("exitSetsByPack") for f in files}
-    ok = all(v == {"indications": False} for v in got.values())
+    # owner 2026-11-14 ("run always all"): the x02 demo builds every pack's Exit Sets and lets the evals decide; every other overlay and preset keeps them off
+    ok = all(v == ({} if k == "overlay-bingx-x02.json" else {"indications": False}) for k, v in got.items())
     return ok, f"{got}"
 
 
@@ -358,14 +399,21 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     base = [st for st in b.by_idx if st.kind in ("base", "exit")]
     ratios = {round(float(st.sl_ratio), 2) for st in base}
     locks = [st.trail_arm - st.trail_give for st in b.by_idx if st.kind == "trail"]
-    ok = (any(st.kind != "trail" and st.step <= 3 for st in b.by_idx) and {"shortrange", "general", "indications"} <= {st.pack for st in b.by_idx} and "trend" not in {st.pack for st in b.by_idx}
-          and len(ratios) == 10 and locks and min(locks) < 0.1 and not any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
+    # owner 2026-11-13/14 ("open also other coordinations, not only micro ... with max SL ratio 0.8"): x01 now runs every TP range (Normal included) and every signal pack
+    # (trend, reversion, flow and multi next to breakout) with the SL ratios 0.25 / 0.5 / 0.75; the earlier trend-off and Normal-off decisions above are superseded by that instruction,
+    # their counterfactual numbers stay the evidence they were. Still true: Micro Sets exist, no trailing pair is dropped for its lock, the pack set below is complete.
+    all_packs = {"shortrange", "general", "indications", "trend", "reversion", "flow", "multi", "breakout"}
+    ok = (any(st.kind != "trail" and st.step <= 3 for st in b.by_idx) and all_packs <= {st.pack for st in b.by_idx}
+          and ratios == {0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 1.0, 1.25} and locks and min(locks) < 0.1 and any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
     return ok, f"x01 {len(b.by_idx)} Sets, packs {sorted({st.pack for st in b.by_idx})}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
 
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.25-2.5", sl_ratios),
+    ("grid.long-and-wide-have-their-own-sl-ratios", sl_ratios_by_range),
+    ("grid.max-sl-ratio-caps-the-grid", max_sl_ratio_caps_the_grid),
+    ("grid.min-sl-ratio-drops-lower-stops-and-exit-sets-hold-later", min_sl_ratio_and_exit_hold),
     ("grid.default-grid-follows-its-rules", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),
     ("grid.trail-give-le-arm-and-floor", trail_rules_default),

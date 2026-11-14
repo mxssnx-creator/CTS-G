@@ -740,7 +740,7 @@ class AutoFloors:
             for t_, e_, x_, symbol in zip(tx, te, pp, symbols):
                 run = hash((run, se.auto_evidence_key(t_, symbol, x_, e_, st.side)))
                 sig.append(run)
-            self.sets.append(((book.auto_step_bucket(st), st.side), list(tx), sig, pairs))
+            self.sets.append(((book.auto_step_bucket(st), st.side), list(tx), sig, pairs, st.id))
 
     def apply(self, book, now: float) -> bool:
         """Learn before the evaluation window, matching native replay; refresh hourly."""
@@ -755,10 +755,17 @@ class AutoFloors:
         n_win = int(book.pf_step_auto_n)
         before: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
         seen: set = set()
-        for key, tx, sig, pairs in self.sets:
+        own: Dict[str, float] = {}
+        set_scope = bool(getattr(book, "pf_set_auto", False))
+        for key, tx, sig, pairs, sid in self.sets:
             cut = bisect.bisect_left(tx, boundary)        # native now - lookback; strict close boundary
             if cut <= n_win:
                 continue
+            if set_scope:
+                got_own = se.learn_step_floor([(p_, n_) for (t_, p_, n_) in pairs if t_ < boundary], book.pf_set_auto_min, book.pf_step_auto_tol,
+                                              book.step_auto_candidates())
+                if got_own:
+                    own[sid] = float(got_own["floor"])
             if sig[cut - 1] in seen:
                 continue                                  # a copy of a Set already read, on the orders the engine can see at this hour
             seen.add(sig[cut - 1])
@@ -775,6 +782,7 @@ class AutoFloors:
                 if got:
                     learned[(bucket, side)] = got["floor"]
         book.step_floor_auto = learned
+        book.set_floor_auto = own
         return True
 
 
@@ -803,11 +811,12 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
     gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if getattr(book, "group_gate", False) else None
     ghist: Dict[str, List[Tuple[float, float]]] = {}
+    gside = getattr(book, "group_gate_side", False)
 
     def group_ok(st_, lane_: str, now_: float) -> bool:
         if gg is None:
             return True
-        return se.group_verdict(ghist.get(se.set_group(st_.id, lane_), ()), now_, gg[0], gg[1], gg[2], gg[3])[0]
+        return se.group_verdict(ghist.get(se.set_group(st_.id, lane_, gside), ()), now_, gg[0], gg[1], gg[2], gg[3])[0]
 
     # with a per-candidate rule (Axis) a Set open on both lanes is a candidate of each, as the engine lists it; without one the first lane always takes it
     both_lanes = axis_coord is not None or axis_pick is not None
@@ -978,7 +987,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))
                 if gg is not None:
-                    ghist.setdefault(se.set_group(st.id, lane_pick), []).append((rec["t"], rec["net"]))
+                    ghist.setdefault(se.set_group(st.id, lane_pick, gside), []).append((rec["t"], rec["net"]))
     return executed
 
 

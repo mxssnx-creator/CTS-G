@@ -6,6 +6,7 @@ import { ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_R
 import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
+import { SignalConfigEditor } from "@/components/signal-config-editor";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -285,6 +286,7 @@ function SettingsPage() {
                 <EnableSlider label="Reversion (Sets and Base evaluation)" on={overlay.stratReversion} onChange={(v) => patch("stratReversion", v)} />
                 <EnableSlider label="Flow (Sets and Base evaluation)" on={overlay.stratFlow} onChange={(v) => patch("stratFlow", v)} />
                 <EnableSlider label="Multi (Sets and Base evaluation)" on={overlay.stratMulti} onChange={(v) => patch("stratMulti", v)} />
+                <EnableSlider label="Signals (each source x range x timeframe its own pack)" on={overlay.stratSignals} hint="CTS-A-O sources (ema-cross, macd-cross, rsi, donchian, bb, cci, obv) as Set packs through Base, Main, Real and the lanes; floor minPfSignals." onChange={(v) => patch("stratSignals", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="Off disables trailing Sets, peak-following and recalculation. Existing protective stops remain managed." onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -292,6 +294,12 @@ function SettingsPage() {
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
               </Grid>
+              {overlay.stratSignals && (
+                <div className="mt-3">
+                  <div className="mb-1 text-sm font-medium">Signals packs</div>
+                  <SignalConfigEditor value={overlay.signalConfigs} onChange={(v) => patch("signalConfigs", v)} />
+                </div>
+              )}
               <p className="text-sm text-muted">
                 These sliders write the overlay. Save on Live or VST persists every field — including DCA steps, modules and symbol universe — and the engine reloads the file.
               </p>
@@ -2016,7 +2024,27 @@ function SettingsPage() {
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
-                <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
+                <Slider label="Execution last N (end of Real)" value={overlay.execGateN} min={0} max={60} step={5} hint="the newest N results of the lane's Real Set must pass the minimum PF again right before execution; 0 = off (10 .. 35 tested)" onChange={(v) => patch("execGateN", v)} />
+                <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
+                <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
+                {(["long", "wide"] as const).map((rg) => {
+                  const xs = overlay.slRatiosByRange?.[rg] ?? [];
+                  const lo = xs.length ? xs[0] : 0.2;
+                  const hi = xs.length ? xs[xs.length - 1] : 0.8;
+                  const setRange = (a: number, b: number) => {
+                    const from = Math.min(a, b), to = Math.max(a, b);
+                    const list: number[] = [];
+                    for (let r = from; r <= to + 1e-9; r += 0.1) list.push(Math.round(r * 100) / 100);
+                    patch("slRatiosByRange", { ...overlay.slRatiosByRange, [rg]: list });
+                  };
+                  return (
+                    <div key={rg} className="grid grid-cols-2 gap-2">
+                      <Num label={`${rg} SL min`} value={lo} min={0.1} max={2} step={0.1} onChange={(v) => setRange(v, hi)} />
+                      <Num label={`${rg} SL max`} value={hi} min={0.1} max={2} step={0.1} onChange={(v) => setRange(lo, v)} />
+                    </div>
+                  );
+                })}
+                <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={0.25} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
                   label="Pos-count vol ratio"
@@ -2481,6 +2509,23 @@ function PfWindowControls({
         step={10}
         hint="admitted orders (one per distinct Set tape) a floor needs before Auto can choose it; with too few on a step Auto uses its direction's pooled floor, and only without any the manual value"
         onChange={(v) => patch("minPfStepAutoMin", v)}
+      />
+      <label className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={overlay.minPfStepAutoScope === "set"}
+          onChange={(e) => patch("minPfStepAutoScope", e.target.checked ? "set" : "step")}
+        />
+        Auto floor per config Set (each Set learns its own floor; with too few orders it uses the step, pooled, then manual floor)
+      </label>
+      <Slider
+        label="Auto per Set: orders a Set needs"
+        value={overlay.minPfSetAutoMin}
+        min={1}
+        max={200}
+        step={1}
+        hint="admitted orders of the Set itself before its own floor is used; fewer = the defaults"
+        onChange={(v) => patch("minPfSetAutoMin", v)}
       />
       <Slider
         label="Auto: tolerance to the best PF (%)"

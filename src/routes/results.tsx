@@ -15,6 +15,7 @@ import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import { formatPf } from "@/lib/sets-view";
 import { evidencePfText } from "@/lib/evidence-view";
 import { CostEvidencePanel, StageEvidencePanel } from "@/components/evidence-panel";
+import { InsightsBoard } from "@/components/insights-board";
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
 
@@ -64,6 +65,7 @@ function ResultsPage() {
         {stats?.connType || conn} · {stats?.connection || conn} · {stats?.unit || ""} · {stats?.openCount ?? 0} open · {closed.length} closed
       </p>
       <StatsOverview data={overview} live={stats} />
+      <InsightsBoard stats={stats} />
       <BaseValidationPanel live={stats} minPf={stats?.sets?.minPf ?? GATE_MIN_PF_DEFAULT} />
       <StageEvidencePanel stats={stats} />
       <CostEvidencePanel stats={stats} />

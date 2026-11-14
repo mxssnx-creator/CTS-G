@@ -315,6 +315,53 @@ def window_figures_pool_exactly_the_orders_each_window_reads():
     return ok, f"{len(b.by_idx)} Sets, {len(base_only)} past Base; windows (Sets / orders / PF): { {k: got[k] for k in want} }; mismatches {bad or 0}; populations {pops}; shares {shares}; chosen short windows add up {chosen}"
 
 
+def every_config_set_is_independent_with_its_own_floor_and_execution_window():
+    """Owner 2026-11-14 ("for EACH config Set independent"): with the last check before execution on (execGateN), lane rank on and the Auto floor learned per Set
+    (minPfStepAutoScope "set"), replacing every other Set's tape by noise leaves a probe Set's stage verdicts, windows, lane, execution window and its OWN learned
+    floor identical. Relational on purpose (not covered here): the group gate, Block relations, relation lanes and the step / pooled Auto fallback of a Set with too
+    few own orders (the defaults)."""
+    b = _scored_book(min_pf=1.1, execGateN=6, rankByLane=True)
+    probe = [b.by_idx[0], b.by_idx[len(b.by_idx) // 2], b.by_idx[-1]]
+    keys = ("gate_pf", "gate_n", "base_long_ok", "base_short_ok", "main_pf", "main_n", "main_short_win", "exe_pf", "neg_pf", "proc_total", "exe_total")
+    snap = lambda: [({k: getattr(st, k) for k in keys}, b.gate_reason(st), dict(st.stage), b.lane_of(st)) for st in probe]
+    before = snap()
+    used_exec = any("exec" in dict(st.stage) for st in probe)
+    rng = random.Random(5)
+    cf = b.cost_pct / 100.0
+    for st in b.by_idx:
+        if st in probe:
+            continue
+        st.hist = [{"t": 1000.0 + 60.0 * i, "pnl": x, "pnl_pct": x + cf, "hold_s": 60.0, "reason": "tp", "symbol": "X", "side": "LONG"}
+                   for i, x in enumerate(rng.choice((0.02, -0.02)) for _ in range(80))]
+        st.proc_replayed = False
+        b._score_one(st)
+    after = snap()
+    # the own Auto floor: learned from injected replay rows; the probe's floor must not move when every other tape changes
+    import set_engine as se
+    a = SetBook()
+    a.load(overlay(**{**SMALL, "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoScope": "set", "minPfSetAutoMin": 5, "minPfStepAutoN": 5}))
+    sets = [st for st in a.by_idx if st.kind == "base"][:6]
+
+    from step_pf import _rows, BOUNDARY
+
+    def learn(tapes):
+        real = a._tape_rows
+        a._tape_rows = lambda key, order, cutoff, until=None: [r for r in tapes.get(key, ()) if cutoff <= r[0] <= (float("inf") if until is None else until)]
+        try:
+            a._learn_step_floors(["S0-USDT"], BOUNDARY)
+        finally:
+            a._tape_rows = real
+        return dict(a.set_floor_auto)
+
+    probe_tape = _rows(100, 1500)                                       # a tape with a real relation: its own floor is learned above 1
+    first = learn({st.id: (probe_tape if i == 0 else _rows(200 + i, 1500)) for i, st in enumerate(sets)})
+    second = learn({st.id: (probe_tape if i == 0 else _rows(700 + i, 1500, signal=False)) for i, st in enumerate(sets)})
+    own_same = sets[0].id in first and first.get(sets[0].id) == second.get(sets[0].id) and first[sets[0].id] > 1.0
+    ok = before == after and used_exec and own_same
+    return ok, (f"{len(probe)} probe Sets equal after {len(b.by_idx) - len(probe)} others became noise: {before == after}; execution window in the verdict: {used_exec}; "
+                f"own floor of {sets[0].id} {first.get(sets[0].id)} -> {second.get(sets[0].id)} with every other tape replaced")
+
+
 def a_set_verdict_ignores_every_other_set():
     """A Set's verdict, windows and chain depend on its own tape only: with every other Set's tape replaced by noise, the Set's fields are identical."""
     b = _scored_book(min_pf=1.1, mainMinN=1)
@@ -790,7 +837,24 @@ def effective_window_statistics_follow_range_settings():
     return ok, str(expected)
 
 
+def the_execution_window_is_the_last_step_of_real():
+    """execGateN (10 .. 35 step 5): after Base, Main and the Real window, the newest N results of the lane's Real Set must pass the same floor again; 0 is off.
+    Real window 30 passes on a long good run, the newest 10 are all losses: the exec window stops it and the Real window alone does not."""
+    from set_engine import StageParams, stage_verdicts
+    base = dict(base_long=5, base_short=0, gate_min=1, floor=1.25, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=False, main_n=8, short_on=False,
+                short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5,), real_on=True, real_n=30)
+    real = [1.0] * 20 + [-0.5] * 10               # window 30: gains 20, losses 5 -> PF 4; newest 10: PF 0; newest 15: 1.0; newest 20: 2.0
+    off = stage_verdicts([], real, [], 0, StageParams(**base))
+    out = {n: stage_verdicts([], real, [], 0, StageParams(**base, exec_n=n)) for n in (10, 15, 20, 25, 30, 35)}
+    good = [1.0] * 30 + [1.0] * 5
+    ok_all = stage_verdicts([], good, [], 0, StageParams(**base, exec_n=35))
+    ok = off["pos"] and not out[10]["pos"] and not out[10]["exec"] and out[10]["exec_pf"] == 0.0 and out[10]["real"] is False and not out[15]["pos"]
+    ok = ok and out[20]["pos"] and ok_all["pos"] and ok_all["exec"] and out[35]["exec_n"] == 30
+    return ok, f"off pos={off['pos']}; exec 10 pos={out[10]['pos']} pf={out[10]['exec_pf']}; exec 15 pos={out[15]['pos']}; exec 20/25/30/35 pos={[out[n]['pos'] for n in (20, 25, 30, 35)]}"
+
+
 CHECKS = [
+    ("stages.the-execution-window-is-the-last-step-of-real", the_execution_window_is_the_last_step_of_real),
     ("stages.effective-window-statistics-follow-range-settings", effective_window_statistics_follow_range_settings),
     ("stages.last-n-windows-are-independent-per-tp-range", last_n_windows_are_independent_per_tp_range),
     ("stages.independent-all-range-oracle", independent_all_range_stage_oracle),
@@ -815,6 +879,7 @@ CHECKS = [
     ("stages.a-negative-window-of-cancelling-results-is-not-negative", a_negative_window_of_cancelling_results_is_not_negative),
     ("stages.the-chain-is-neutral-without-persistence-and-lifts-it-with", the_chain_is_neutral_without_persistence_and_lifts_it_with),
     ("stages.a-set-verdict-ignores-every-other-set", a_set_verdict_ignores_every_other_set),
+    ("stages.every-config-set-is-independent-with-its-own-floor-and-execution-window", every_config_set_is_independent_with_its_own_floor_and_execution_window),
     ("stages.the-statistics-relations-hold", the_statistics_relations_hold),
     ("stages.set-and-lane-ids-never-collide", set_and_lane_ids_never_collide),
     ("stages.costs-are-applied-once-and-lanes-sit-at-their-distances", costs_are_applied_once_and_lanes_sit_at_their_distances),

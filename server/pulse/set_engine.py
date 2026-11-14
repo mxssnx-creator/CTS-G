@@ -10,6 +10,8 @@ keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
 import copy
+import os
+import sys
 
 import re
 import bisect
@@ -88,6 +90,7 @@ from indication_engine import (
 from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
 from risk_variants import parse_trail, trail_grid
 from indication_config import source_name, expand as expand_indication_configs
+import signal_packs
 
 PACKS = ("indications", "general")
 EXTRA_INDICATOR_PREFIX = "extra."
@@ -122,7 +125,7 @@ GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 4320          # 72 h of 1m bars: three days of pre-history (owner 2026-11-02; was 1920 = 32 h, before that 960)
+LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (owner 2026-11-12, defaults-20261112.json: 32 h; 2026-11-02 was 72 h = 4320, before that 1920): the stage context a cold rebuild must replay is 3 x this
 LOOKBACK_MAX = 4320              # three days of completed 1m bars
 LOOKBACK_SAMPLE_TARGET = 12      # collection target, not an extra admission gate
 # dedupe keys kept for live closes: a close re-delivered after this many newer closes is counted again
@@ -214,9 +217,14 @@ _GROUP_ST = re.compile(r":st(\d+)")
 _GROUP_TR = re.compile(r":tr([0-9.]+):([0-9.]+)(?::ts[0-9.]+)?$")
 
 
-def set_group(set_id: str, lane: str = "pos") -> str:
-    """The group key of a Set id and lane: "group:<pack>:<kind>:<range>:<lane>". An id that names no step or arm keeps the range "?" (its own group)."""
+def set_group(set_id: str, lane: str = "pos", side: Any = False) -> str:
+    """The group key of a Set id and lane: "group:<pack>:<kind>:<range>:<lane>". An id that names no step or arm keeps the range "?" (its own group). With `side`
+    (groupGateSide, the rally / falling direction acceptance ported from CTS-A-O: type x range x SIDE) the Set's direction ":L" / ":S" is part of the key, so a losing
+    long group closes only longs while the short group of the same pack / kind / range keeps its own record; a combined Set (no side marker) keeps ":B"."""
     sid = str(set_id or "")
+    if side == "pooled":       # groupGateScope "side" (CTS-A-O's engine direction acceptance): every executed result of one direction is ONE record, whatever the pack, kind, range or lane
+        m_side = re.search(r":([LS]):", sid)
+        return "side:" + (m_side.group(1) if m_side else "B")
     pack = sid.split(":", 1)[0] or "-"
     tr = _GROUP_TR.search(sid)
     if sid.endswith(":" + EXIT_TAG):
@@ -232,7 +240,11 @@ def set_group(set_id: str, lane: str = "pos") -> str:
         m = _GROUP_ST.search(sid)
         if m:
             rng = tp_range_of(int(m.group(1)))
-    return f"group:{pack}:{kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+    key = f"group:{pack}:{kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+    if side:
+        m = re.search(r":([LS]):", sid)
+        key += ":" + (m.group(1) if m else "B")
+    return key
 
 
 def group_verdict(rows, now: float, n: int = 10, floor: float = 1.0, hours: float = 12.0, min_n: int = 1) -> Tuple[bool, Optional[float], int]:
@@ -511,6 +523,7 @@ class StageParams:
     long_floor: float = 0.0         # the minimum PF of a window longer than the last bound
     real_neg_n: int = 0             # Real Negative lane: its own last N (lastNByRange realNegN); 0 = the Real window real_n
     negative_filter: Optional[Dict[str, Any]] = None  # own Main / Real recent-loss veto, never inverted PnL
+    exec_n: int = 0                 # execGateN: the last step before execution -- the newest exec_n results of the lane's Real Set at the same floor (0 = off)
 
     def floor_for(self, n: int) -> float:
         """The minimum PF a window of n orders asks (minPfBySize: Micro / Minimal / Short / Medium / Long), or the one floor."""
@@ -856,12 +869,17 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
     r_ok, r_pf, r_n = last_ok(real, P.real_n)
     real_loss_ok = negative_filter_ok(real, P.negative_filter)
     r_ok = r_ok and real_loss_ok
+    x_ok, x_pf, x_n = last_ok(real, P.exec_n) if P.exec_n else (True, 0.0, 0)
+    r_ok = r_ok and x_ok
     q_ok, q_pf, q_n = last_ok(realneg, P.real_neg_n or P.real_n)
     realneg_loss_ok = negative_filter_ok(realneg, P.negative_filter)
     q_ok = q_ok and realneg_loss_ok
+    xq_ok, xq_pf, xq_n = last_ok(realneg, P.exec_n) if P.exec_n else (True, 0.0, 0)
+    q_ok = q_ok and xq_ok
     main_pass = (m_ok and s_ok and k_ok) if P.main_on else True
     return {"main": m_ok, "main_pf": m_pf, "main_n": m_n, "short": s_ok, "short_pf": s_pf, "short_n": s_n, "short_win": short_n,
             "minimal": k_ok, "minimal_n": k_n, "neg": neg, "mainLossFilter": main_loss_ok, "realLossFilter": real_loss_ok, "realNegLossFilter": realneg_loss_ok,
+            "exec": x_ok, "exec_pf": x_pf, "exec_n": x_n, "execneg": xq_ok, "execneg_pf": xq_pf, "execneg_n": xq_n,
             "real": r_ok, "real_pf": r_pf, "real_n": r_n, "realneg": q_ok, "realneg_pf": q_pf, "realneg_n": q_n,
             "pos": main_pass and (r_ok if P.real_on else True), "negl": neg and (q_ok if P.real_on else True)}
 
@@ -1032,6 +1050,10 @@ def _variant_signal(rows: Sequence[Sequence[float]], names: Sequence[str]) -> Tu
     return (1 if longs else -1), max(v[1] for v in side), "+".join(v[2] for v in side)
 
 
+# Signals default when stratSignals is on without signalConfigs: every source and range on 5m and 15m, TP steps 5 .. 12, SL ratios 0.5 / 0.75 / 1.0, base and trailing Sets
+SIGNAL_CONFIGS_DEFAULT = [{"label": "signals default", "timeframes": [5, 15], "stepMin": 5, "stepMax": 12, "slRatios": [0.5, 0.75, 1.0], "types": ["base", "trail"]}]
+
+
 def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
     """The most closed 1m bars any pack reads for one bar's signal: the indication pack's window, or the longest window of
     the indicators named in extraIndicators and in the Short Range and extra packs' variant lists (a 15m name reads 900).
@@ -1043,7 +1065,8 @@ def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
         if pk in packs:
             names += list(ind_settings.get(vkey) or default)
     w = IND_WINDOW_BARS if "indications" in packs else GENERAL_WINDOW_BARS
-    return max([w, EXTRA_WINDOW if names else 0] + [window_of(source_name(str(n))) for n in names])
+    sig = [signal_packs.window_minutes(p) for p in packs if p.startswith(signal_packs.PREFIX)]
+    return max([w, EXTRA_WINDOW if names else 0] + [window_of(source_name(str(n))) for n in names] + sig)
 
 
 def _ported_pack_sources(packs):
@@ -1092,7 +1115,57 @@ def bar_signal(
     for pk in packs:
         if pk.startswith(EXTRA_INDICATOR_PREFIX) and pk not in imported:
             row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
+        elif pk.startswith(signal_packs.PREFIX):
+            row[pk] = signal_packs.signal(bars, i, ts, pk)
     return row
+
+
+def stable_salt(settings_json: str, packs: Sequence[str]) -> int:
+    """The memo salt of a settings + packs pair, the same in every process (hash() of a str is randomised per process, which made a saved memo unreadable after a restart)."""
+    import hashlib
+    h = hashlib.blake2b(digest_size=8)
+    h.update(settings_json.encode("utf-8", "replace"))
+    h.update(b"\0" + "|".join(packs).encode("utf-8", "replace"))
+    return int.from_bytes(h.digest(), "big", signed=True)
+
+
+SIG_CACHE_VERSION = 1
+
+
+def save_signal_cache(path: str, salt: int, caches: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]]) -> int:
+    """Write the signal memo atomically ({symbol: {window key: {pack: (direction, confidence, why)}}} for one salt). Returns the entries written; any failure writes nothing."""
+    import pickle
+    import tempfile
+    try:
+        blob = {"v": SIG_CACHE_VERSION, "salt": salt, "symbols": {sym: dict(c) for sym, c in caches.items() if c}}
+        d = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".sigcache-", dir=d)
+        with os.fdopen(fd, "wb") as fh:
+            pickle.dump(blob, fh, protocol=5)
+        os.replace(tmp, path)
+        return sum(len(c) for c in blob["symbols"].values())
+    except Exception:
+        return 0
+
+
+def load_signal_cache(path: str, salt: int) -> Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]]:
+    """The saved memo when its version and salt match the current settings and packs, else {} (a different configuration never reads another's signals)."""
+    import pickle
+    try:
+        with open(path, "rb") as fh:
+            blob = pickle.load(fh)
+        if not isinstance(blob, dict) or blob.get("v") != SIG_CACHE_VERSION or blob.get("salt") != salt:
+            return {}
+        out = {}
+        for sym, c in (blob.get("symbols") or {}).items():
+            if isinstance(sym, str) and isinstance(c, dict):
+                out[sym] = c
+        return out
+    except Exception:
+        return {}
+
+
+_NO_SIGNAL: Tuple[int, float, str] = (0, 0.0, "")
 
 
 def pack_signals(
@@ -1104,6 +1177,7 @@ def pack_signals(
     on_step: Optional[Callable[[], None]] = None,
     cache: Optional[Dict[int, Dict[str, Tuple[int, float, str]]]] = None,
     salt: int = 0,
+    workers: int = 0,
 ) -> Dict[str, List[Tuple[int, float, str]]]:
     """Causal signal per bar and pack: (direction, confidence, why). The only signal loop: the engine
     replay and the streaming simulator both call it, so a bar gets the same signal in both places.
@@ -1115,7 +1189,7 @@ def pack_signals(
     imported = _ported_pack_sources(packs)
     if imported:
         from ported_indications import batch
-        native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt) if len(imported)<len(packs) else {}
+        native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt) if len(imported)<len(packs) else {}   # workers stay 0 here: ported packs read the whole history
         calculated=batch(bars,list(imported.values()),base_ts,str(ind_settings.get("portedSymbol") or "ASSET-USDT"),ind_settings.get("portedPeers") or ())
         native.update({p:[(0,0.0,"")]*min(warmup,len(bars))+calculated[name][warmup:] for p,name in imported.items()})
         return native
@@ -1124,6 +1198,21 @@ def pack_signals(
     hs = [hash(tuple(b)) for b in bars] if cache is not None else None
     used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
     sig_w = signal_window(packs, ind_settings)      # the memo key covers every bar a pack reads
+    pre: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    if workers and n - warmup >= 96:
+        # opt-in worker processes (overlay replayWorkers): the bars no memo entry covers are computed in parallel, window by window, exactly as bar_signal reads them
+        # below; every other bar, and every bar the pool could not do, takes the loop's own path
+        seen = set()
+        todo = []
+        for i in range(warmup, n):
+            if cache is not None:
+                k = hash((salt, tuple(hs[max(0, i + 1 - sig_w) : i + 1])))
+                if k in used or k in cache or k in seen:
+                    continue
+                seen.add(k)
+            todo.append(i)
+        from signal_pool import compute as _pool_compute
+        pre = _pool_compute(bars, todo, packs, ind_settings, base_ts, sig_w, workers, on_step) or {}
     for i in range(warmup, n):
         key = None
         if cache is not None:
@@ -1135,15 +1224,17 @@ def pack_signals(
             if hit is not None:
                 used[key] = hit
                 for p in packs:
-                    signals[p][i] = hit[p]
+                    signals[p][i] = hit.get(p, _NO_SIGNAL)      # a memo row keeps only the packs that signalled
                 if on_step and i % 50 == 0:
                     on_step()
                 continue
-        row = bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
+        row = pre.get(i) or bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
         for p in packs:
-            signals[p][i] = row.get(p, (0, 0.0, ""))
+            signals[p][i] = row.get(p, _NO_SIGNAL)
         if key is not None:
-            used[key] = row
+            # memory (2026-11-14): most packs do not signal on most bars; the memo row keeps only those that did (x02: about 7,000 bars x 100 symbols x
+            # 44 packs were held as full dicts and the engine grew past 1.7 GB); the reasons are interned so equal texts share one string
+            used[key] = {p: (v if not v[2] else (v[0], v[1], sys.intern(v[2]))) for p, v in row.items() if v != _NO_SIGNAL}
         if on_step and i % 50 == 0:
             on_step()
     if cache is not None:
@@ -2067,6 +2158,9 @@ class SetBook:
         self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
         self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
+        self.pf_set_auto = False
+        self.pf_set_auto_min = 10
+        self.set_floor_auto: Dict[str, float] = {}             # Set id -> its own learned Auto floor (minPfStepAutoScope "set"); absent = the defaults
         self.pf_step_auto_tol = STEP_PF_AUTO_TOL_DEFAULT
         self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
         self.step_floor_report: List[Dict[str, Any]] = []
@@ -2080,6 +2174,7 @@ class SetBook:
         self.pause_off: set = set()                   # packs an indicationConfigs entry set to no pause (0)
         self.pack_ranges: Dict[str, Dict[str, Any]] = {}      # pack -> {"lo", "hi", "ratios", "kinds"}: the Sets of an indication built from indicationConfigs
         self.config_report: Dict[str, Any] = {"entries": [], "dropped": [], "names": 0}
+        self.signal_report: Dict[str, Any] = {"enabled": False, "packs": 0, "entries": [], "dropped": []}
         self.pause_now: Dict[Tuple[str, str, int], int] = {}    # (pack, symbol, side) -> minutes the Auto Mode chose at the end of the last replay
         self.entry_conf = 0.58
         self.retry_s = 30.0
@@ -2103,6 +2198,8 @@ class SetBook:
         self.relation_at = 0.0                                  # the event clock of that pass (0 = none yet)
         self.relation_ms = 0.0                                  # what the last pass spent on the relation lanes
         self.window_basis = "time"           # lastNBasis: "time" (windows inside the lookback) or "count" (the newest N orders of the configuration, whatever their age)
+        self.replay_workers = 0              # replayWorkers: worker processes for the per-bar signals of a replay (0 = off, the engine's own process computes them)
+        self.group_gate_side = False         # groupGateSide: the group key also carries the Set's direction (long / short groups judged apart)
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
@@ -2113,6 +2210,12 @@ class SetBook:
         self.steps: List[int] = list(range(STEP_MIN, STEP_DEFAULT_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
+        self.exec_n = 0
+        self.sl_by_range: Dict[str, List[float]] = {}
+        self.sl_grid_all: List[float] = list(SL_RATIOS)
+        self.sl_min_ratio = 0.0
+        self.sl_max_ratio = 0.0
+        self.exit_set_hold_bars = 0
         self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
         self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
         self.trail_step_max = TRAIL_STEP_MAX                  # trailStepMax: the largest trailing arm in TP steps (22 = 2.2 %, up to TRAIL_STEP_CEIL)
@@ -2122,6 +2225,8 @@ class SetBook:
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
         self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
+        self.sig_cache_path = ""             # signalCachePath: where the signal memo is kept between restarts ("" = memory only)
+        self._sig_meta = {"loaded": False, "saved_at": 0.0, "salt": 0}   # shared with the replay copies (copy.copy keeps the reference): flags set during a replay reach the book
         # shared Set state is touched by the replay thread and the trading thread: one re-entrant lock
         self._lock = threading.RLock()
         self._replay_local = threading.local()
@@ -2280,6 +2385,7 @@ class SetBook:
         self.neg_on = self.stages_on and bool(ov.get("mainNegEnabled", True))
         self.neg_windows = parse_windows(ov.get("mainNegWindows"), MAIN_NEG_WINDOWS)
         self.realst_on = self.stages_on and bool(ov.get("realGateEnabled", True))
+        self.exec_n = max(0, min(200, int(num(ov, "execGateN", 0))))      # the last-N check at the end of Real, right before execution / mirroring (0 = off)
         self.realst_n = max(1, min(200, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))     # 1..200: the ongoing window may be a single result
         self.last_n_by_range = last_n_by_range_of(ov.get("lastNByRange"))
         self.gate_window_max = max([self.gate_window] + [int(o["baseLong"]) for o in self.last_n_by_range.values() if "baseLong" in o])
@@ -2385,6 +2491,13 @@ class SetBook:
         self._config_pause = {EXTRA_INDICATOR_PREFIX + n: int(m) for n, m in expanded["pause"].items()}
         self.config_report = {"entries": expanded["entries"], "dropped": expanded["dropped"][:200], "names": len(expanded["names"])}
         packs.extend(EXTRA_INDICATOR_PREFIX + name for name in extra_names)
+        # Signals (owner 2026-11-14): every (source, range, timeframe) of signal_sources is its own pack sig-<source>-<range>-t<tf> with its own Set grid
+        self.signal_report = {"enabled": False, "packs": 0, "entries": [], "dropped": []}
+        if bool(ov.get("stratSignals", False)):
+            sig = signal_packs.expand(ov.get("signalConfigs") or SIGNAL_CONFIGS_DEFAULT, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
+            packs.extend(sig["packs"])
+            self.pack_ranges.update(sig["ranges"])
+            self.signal_report = {"enabled": True, "packs": len(sig["packs"]), "entries": sig["entries"], "dropped": sig["dropped"][:200]}
         self.packs = packs       # an explicitly empty strategy selection stays empty
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
@@ -2413,7 +2526,29 @@ class SetBook:
         self.sl_low = bool(ov.get("setSlLow", False))
         if self.sl_low:
             ratios.extend(SL_RATIOS_LOW)
-        self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
+        # setSlMinRatio (0 = off): no Set is built under this SL ratio (x TP); the grid keeps what is left, never an empty grid
+        self.sl_min_ratio = max(0.0, min(5.0, finite(ov.get("setSlMinRatio"), 0.0)))
+        # maxStopLossRatio (0 / absent = no cap): no base or Exit Set is built with an SL ratio above it; the per-range lists (slRatiosByRange) carry their own
+        # bounds and the per-range ceilings (slMaxByRange) still apply on top
+        self.sl_max_ratio = max(0.0, min(5.0, finite(ov.get("maxStopLossRatio"), 0.0)))
+        kept = [r for r in ratios if r + 1e-9 >= self.sl_min_ratio and (not self.sl_max_ratio or r <= self.sl_max_ratio + 1e-9)]
+        self.sl_ratios = sorted(set(kept)) or sorted(set(ratios)) or list(SL_RATIOS)
+        # slRatiosByRange {range: [ratios]}: a TP range with its own SL ratios (e.g. long / wide 0.2 .. 0.8 step 0.1); it replaces the global list and the
+        # minimum ratio for the cells of that range only, every other range is unchanged
+        by_range: Dict[str, List[float]] = {}
+        raw_by = ov.get("slRatiosByRange")
+        if isinstance(raw_by, dict):
+            for rk, vals in raw_by.items():
+                try:
+                    lst = sorted({round(float(x), 2) for x in (vals or []) if 0.05 <= float(x) <= 5.0})
+                except (TypeError, ValueError):
+                    continue
+                if lst:
+                    by_range[str(rk)] = lst
+        self.sl_by_range = by_range
+        self.sl_grid_all = sorted(set(self.sl_ratios) | {r for lst in by_range.values() for r in lst})
+        # exitSetHoldBars (0 = the global time stop): Exit Sets (no TP) hold this many minutes before the time exit
+        self.exit_set_hold_bars = int(max(0, min(720, finite(ov.get("exitSetHoldBars"), 0.0))))
         self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
         try:
             self.trail_step_max = int(max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_CEIL, int(float(ov.get("trailStepMax") or TRAIL_STEP_MAX)))))
@@ -2500,6 +2635,12 @@ class SetBook:
         self.relation_cfg = rel_cfg
         # the profit group gate (entry-time only: it changes no tape, so it is not part of the evaluation signature)
         self.group_gate = bool(ov.get("groupGate", False))
+        self.sig_cache_path = str(ov.get("signalCachePath") or "")
+        self.group_gate_side = "pooled" if str(ov.get("groupGateScope") or "group").lower() == "side" else bool(ov.get("groupGateSide", False))   # "pooled": one record per direction
+        try:
+            self.replay_workers = max(0, min(6, int(float(ov.get("replayWorkers") or 0))))
+        except (TypeError, ValueError):
+            self.replay_workers = 0
         def _num(key, default, lo, hi):
             try:
                 x = float(ov.get(key) if ov.get(key) is not None else default)
@@ -2539,6 +2680,10 @@ class SetBook:
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
         self.pf_step_auto_min = int(max(1, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))     # no minimum-orders gate (owner 2026-11-04): down to 1
+        # minPfStepAutoScope "set" (owner 2026-11-14): every config Set learns its OWN Auto floor from its own causal pairs; a Set with fewer than
+        # minPfSetAutoMin admitted orders uses the defaults (its TP step's floor, then the direction's pooled floor, then the manual floor)
+        self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "step").lower() == "set"
+        self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", 10))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
@@ -2669,7 +2814,7 @@ class SetBook:
             pack_i = self.packs.index(pack)
             pack_steps = self.short_steps if pack == SHORT_PACK else self.steps
             pr = self.pack_ranges.get(pack)
-            pack_ratios = self.sl_ratios
+            pack_ratios = self.sl_grid_all
             pack_kinds = SET_KINDS
             if pr:
                 # an indicationConfigs entry: its own TP-step range, SL ratios and Set types for this indication
@@ -2708,8 +2853,17 @@ class SetBook:
 
             sl_cap = self.sl_max_by_range
 
+            sl_by = self.sl_by_range
+
             def sl_allowed(r: float, k: int) -> bool:
-                lim = sl_cap.get(tp_range_of(k))
+                rng = tp_range_of(k)
+                own = None if pr else sl_by.get(rng)
+                if own is not None:
+                    if not any(abs(r - o) < 1e-9 for o in own):
+                        return False
+                elif not pr and not any(abs(r - o) < 1e-9 for o in self.sl_ratios):
+                    return False            # a ratio only another range asked for (slRatiosByRange) is not built here
+                lim = sl_cap.get(rng)
                 return lim is None or r <= lim + 1e-9
 
             for sl_i, sl in enumerate(pack_ratios if "base" in pack_kinds else ()):
@@ -2941,7 +3095,7 @@ class SetBook:
         depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
         manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
         automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
-        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic)
+        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0))
         return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
@@ -3469,6 +3623,22 @@ class SetBook:
             self.last_run = time.time()
             self._running = False
             self._after_pass()
+            self._save_sig_cache_maybe()
+
+    def _save_sig_cache_maybe(self, force: bool = False) -> None:
+        """Keep the signal memo on disk (overlay signalCachePath) so a restart replays only the bars it has not seen: at most every 10 minutes (the first save 2 minutes after
+        the first complete pass), in a background thread over a shallow copy, never in the replay's way. Nothing here can change a signal: the memo is keyed by the window's content."""
+        path = self.sig_cache_path
+        if not path or not self._sig_cache:
+            return
+        now = time.time()
+        meta = self._sig_meta
+        if not force and now - meta["saved_at"] < (600.0 if meta["saved_at"] else 120.0):
+            return
+        meta["saved_at"] = now
+        snap = {sym: dict(c) for sym, c in self._sig_cache.items() if c}
+        salt = meta["salt"]
+        threading.Thread(target=save_signal_cache, args=(path, salt, snap), name="sigcache-save", daemon=True).start()
 
     def _replay_market(self):
         return getattr(self._replay_local, 'market', (self.bars, self.bar_t))
@@ -3483,14 +3653,19 @@ class SetBook:
         if latest_close > now + 1e-6:
             raise ValueError("completed bar ends after replay time")
         base_ts = latest_close - (n - 1) * BAR_S
-        salt = hash((json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs))))   # a memo entry holds only its packs
+        salt = stable_salt(json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs)))   # a memo entry holds only its packs; the same value in every process
+        self._sig_meta["salt"] = salt
+        if self.sig_cache_path and not self._sig_meta["loaded"]:
+            self._sig_meta["loaded"] = True
+            for sym, c in load_signal_cache(self.sig_cache_path, salt).items():
+                self._sig_cache.setdefault(sym, c)        # a saved window answers exactly what the same window answered before the restart
         cache = self._sig_cache.setdefault(symbol, {})
         settings=dict(self.ind_settings)
         settings["portedSymbol"]=symbol
         if _ported_pack_sources(self.packs):
             peer_symbols=_ported_peer_symbols(self.packs)
             settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<latest_close]} for s,rs in market.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=dated.get(s)) is not None]
-        signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt)
+        signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt, workers=self.replay_workers)
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
@@ -3666,8 +3841,10 @@ class SetBook:
         minPfStepAutoTol of the best one (independent of the manual ratio); a step without enough orders takes its direction's pooled floor, only a
         direction without any the manual floor (1 + TP% x ratio). Writes step_floor_auto and step_floor_report (with the source of each floor)."""
         if not (self.pf_by_step and self.pf_step_auto):
-            self.step_floor_auto, self.step_floor_report = {}, []
+            self.step_floor_auto, self.step_floor_report, self.set_floor_auto = {}, [], {}
             return
+        own_by_sig: Dict[int, List[Tuple[float, float]]] = {}
+        own_of: Dict[str, int] = {}
         cf = cost_as_frac(self.cost_pct)
         n_win = self.pf_step_auto_n
         until = math.nextafter(float(learn_before), float("-inf"))
@@ -3680,6 +3857,7 @@ class SetBook:
             sig = 0
             for r in rows:
                 sig = hash((sig, auto_evidence_key(r[0], r[1], r[4], float(r[0]) - float(r[5]), st.side)))
+            own_of[st.id] = sig
             if sig in seen:
                 continue                       # a copy of a Set already read (same orders): its pairs would only be counted again
             seen.add(sig)
@@ -3687,6 +3865,7 @@ class SetBook:
             nets = [finite(r[4]) - cf for r in rows]
             gains, losses = prefix_sums(nets)
             out = pairs.setdefault((self.auto_step_bucket(st), st.side), [])
+            first = len(out)
             for k, r in enumerate(rows):
                 e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
                 if e < n_win:
@@ -3696,6 +3875,17 @@ class SetBook:
                     out.append((gp / gl, nets[k]))
                 elif gp > 0:
                     out.append((99.0, nets[k]))
+            own_by_sig[sig] = out[first:]
+        own_floor: Dict[str, float] = {}
+        if self.pf_set_auto:
+            memo: Dict[int, Optional[float]] = {}
+            for sid, sig in own_of.items():
+                if sig not in memo:
+                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
+                    memo[sig] = got["floor"] if got else None
+                if memo[sig] is not None:
+                    own_floor[sid] = float(memo[sig])
+        self.set_floor_auto = own_floor
         learned: Dict[Tuple[int, int], float] = {}
         report: List[Dict[str, Any]] = []
         for side in ((1, -1) if self.direction_split else (0,)):
@@ -3799,6 +3989,9 @@ class SetBook:
                 return ranged
         high = self.pf_step_auto_high
         if self.pf_step_auto:
+            own = self.set_floor_auto.get(st.id) if self.pf_set_auto else None
+            if own is not None:
+                return min(float(own), high)          # the Set's own learned floor (minPfStepAutoScope "set")
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
                 return min(float(learned), high)
@@ -3874,7 +4067,7 @@ class SetBook:
                            full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive,
                            negative_filter=policy.get("negativeFilter"),
                            base_min_both=self.base_min_both, main_min_both=self.main_min_both,
-                           base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
+                           base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg, exec_n=self.exec_n)
 
     def _chain_of(self, st: SetState, full: Sequence[tuple], capture_evidence: bool = False,
                   now: Optional[float] = None, relation_rows: bool = False) -> Dict[str, Any]:
@@ -4356,7 +4549,7 @@ class SetBook:
             "effectiveMinSlPct": self.cost_pct + self.min_sl_distance_pct,
             "minSteps": {"trail": self.trail_min_steps},
             "trailMinLockPct": self.trail_min_lock,
-            "groupGate": {"on": self.group_gate, "n": self.group_gate_n, "pf": self.group_gate_pf, "hours": self.group_gate_hours, "min": self.group_gate_min},
+            "groupGate": {"on": self.group_gate, "side": self.group_gate_side, "n": self.group_gate_n, "pf": self.group_gate_pf, "hours": self.group_gate_hours, "min": self.group_gate_min},
             "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
             "product": len(self.by_idx),
             "indexed": True,
@@ -4488,7 +4681,10 @@ class SetBook:
     def hold_bars_for(self, st: "SetState") -> int:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
         table = getattr(self, "step_hold", None) or {}
-        return int(table.get(self.step_of(st), 0)) if table else 0
+        manual = int(table.get(self.step_of(st), 0)) if table else 0
+        if not manual and st.kind == "exit":
+            return int(getattr(self, "exit_set_hold_bars", 0) or 0)
+        return manual
 
     def auto_holds(self, st: "SetState") -> Tuple[int, ...]:
         """The hold candidates (minutes) the Auto Mode tries on this Set; empty when auto is off or its step has a manual hold.
@@ -5159,6 +5355,10 @@ class SetBook:
             "stepPf": {"on": self.pf_by_step, "auto": self.pf_step_auto, "ratio": self.pf_step_ratio, "autoN": self.pf_step_auto_n,
                        "autoMin": self.pf_step_auto_min, "steps": list(self.step_floor_report)},
             "indicationConfigs": dict(self.config_report),
+            "signalConfigs": dict(getattr(self, "signal_report", {}) or {}),
+            "setFloors": {"scope": "set" if getattr(self, "pf_set_auto", False) else "step", "learned": len(getattr(self, "set_floor_auto", {}) or {}),
+                          "defaults": max(0, len(self.by_idx) - len(getattr(self, "set_floor_auto", {}) or {})) if getattr(self, "pf_set_auto", False) else len(self.by_idx),
+                          "minAdmitted": int(getattr(self, "pf_set_auto_min", 10))},
             "coverage": cover,
             "index": index,
             "minStep": self.min_step,
@@ -5586,7 +5786,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("gate-boundary-1.10", okb and abs(pfb - 1.10) < 1e-6, f"pf={pfb} eligible={okb}"))
     okf, pff, nf = _gate(_pf_rows(29, 1.50))
     out.append(("gate-min-30-orders", (not okf) and nf == 29, f"pf={pff} n={nf} eligible={okf}"))
-    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 4320 and SetBook().lookback == 4320)
+    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 1920 and SetBook().lookback == 1920)
     out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
     # R1: a live close is stored on the replay unit (net fraction), not USDT
     lv = SetBook(); lv.load({**_SELFTEST_PIN, "positionCostPct": 0.15, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})

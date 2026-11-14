@@ -233,11 +233,17 @@ export type Execution = {
   /** The Real stage's overall strategies per scope ("overall", "lane:pos|neg", "pack:<pack>"), each judged on its own paper stream. */
   overall?: { scopes: Record<string, OverallScope>; blocked: number };
   open: { positions: number; setPositions: number; noSet: number; sets: number; underInvalidSet: number; setRetired: number; byPack: Record<string, { open: number; underInvalidSet: number }> };
-  closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number; blockAddFills?: number };
+  closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number; blockAddFills?: number; downtimeCloses?: number };
   /** The settled Set parents once without and once with each stack type (server: pulse_trader.lift_report), returns on the original base notional. */
   lift?: ExecutionLift;
   /** The replay's result next to the exchange's result of the same settled Set closes (server: sim_diff.diff_report). */
   simDiff?: SimDiff;
+  /** Profit group gate: settings and per group (pack x type x range x lane x side) the newest executed results it judges. */
+  groups?: { enabled: boolean; n: number; pf: number; hours: number; min: number; scopes: Record<string, { orders: number; pf: number | null; allow: boolean }> };
+  /** Entries never sent: thin venue book, or a Real scope blocked. */
+  entriesSkipped?: { thinBook: number; scopeBlocked: number };
+  /** Block rounds procedures (block_rounds snapshot). */
+  blockRounds?: unknown;
 };
 export type SimDiffRow = { n: number; livePf: number | null; simPf: number | null; liveNoLoss?: boolean; simNoLoss?: boolean; liveNetPct: number; simNetPct: number; fillGapPct: number; costGapPct: number; netGapPct: number; netGapPerClosePct: number | null };
 export type SimDiff = {
@@ -738,6 +744,12 @@ export type LiveStats = {
       off?: string[];
       chosen?: Record<string, { symbols: number; withPause: number; median: number; max: number }>;
     };
+    /** Signals packs (signal_packs.expand): packs built per entry and the combinations dropped. */
+    signalConfigs?: { enabled?: boolean; packs?: number; entries?: Array<{ label: string; packs: number; stepMin: number; stepMax: number; ratios: number; types: string[] }>;
+      dropped?: Array<{ entry: string; name: string; reason: string }> };
+    /** The Auto floor per config Set (minPfStepAutoScope "set"): Sets with their own learned floor, Sets on the defaults. */
+    setFloors?: { scope?: string; learned?: number; defaults?: number; minAdmitted?: number };
+    minPfSignals?: number;
     /** The engine's expansion of `indicationConfigs`: names built per entry and the combinations it dropped (with the reason). */
     indicationConfigs?: {
       names?: number;

@@ -2,6 +2,62 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-14 (later), owner: "Stop x1 and run x02", "min SL ratio 0.5", "max SL ratios 1.4", "long, wide 0.2 to 0.8 step 0.1", "Exit ... close later", "Real ... last N 20",
+  "at the end of Real before executing a last-N check, try 10 to 35 step 5", "auto PF for each config Set, defaults when not enough samples", "for EACH config Set independent".**
+  (a) **x01 is stopped by the owner**: marker `/var/lib/cts-g/x01-stopped-by-owner` (ensure_x01.sh, the hook and the watchdog start nothing while it exists; delete it to
+  resume the always-restart rule). x01 ended at 0.0702 USDT with its drawdown halt tripped; the halt, start equity and EQ_MIN were not touched. The hourly keep-alive
+  (`trig_01DQGiSTjKpZzVN8vdoxuLsu`) now watches x02. **x02 (VST demo) runs 100 symbols** at volume factor 0.05 (`scripts/ensure_x02.sh` restores its credentials from
+  `/var/lib/cts-g/cred-bingx-x02.json`, starts Redis and the engine; the SessionStart hook runs it), replay workers 3, signal memo, fixed lookback.
+  (b) **New engine keys** (absent = earlier behaviour; fixtures pin them off in `common.overlay`): `setSlMinRatio` (no Set under that SL ratio), `maxStopLossRatio` now
+  CAPS the base / Exit grid (it was only reported before), `slRatiosByRange` {range: [ratios]} (shipped long / wide 0.2 .. 0.8 step 0.1, they replace the global list for
+  that range only), `exitSetHoldBars` (Exit Sets' own time exit, shipped 720 min), `execGateN` (the newest N results of the lane's Real Set must pass the floor again
+  right before execution; shipped 0 until the sweep shows a winner), `minPfStepAutoScope` "set" + `minPfSetAutoMin` 10 (every Set learns its own Auto floor from its own
+  causal pairs; fewer admitted orders = the step floor, then the pooled direction floor, then the manual floor; engine and simulator equal, check
+  `step-pf.every-set-learns-its-own-floor-in-engine-and-simulator`). Shipped x01 / x02: grid 0.5 / 0.75 / 1.0 / 1.25, max 1.4, Real window `realGateN` 20, step-floor
+  ratio 0.2 with cap 1.3 (x01).
+  (c) **Independence.** Every Set's tape, stage chain, last-N windows, lane, execution window and (with scope "set") Auto floor are its own. Pooled on purpose
+  (relational): the group gate (pack x type x range x lane), Block relations, relation lanes (off), the step / direction Auto fallback.
+  (d) **Measured, not an edge.** x02 82 settled Set closes: live PF 0.53 against the simulated 0.38 (stops 59, targets 17); stops fill 1.58 x the plan under 0.5 %, 1.20 x at
+  0.5 - 1 %, 1.09 x at 1 %+ (7 / 23 / 30 stops), so x02 runs `minSlDistancePct` 0.3 as a test (was 0.1). Trend / break tactics (`trendpb`, `trendflag`, `brkvol`,
+  `brkretest`, `rangebrk`, groups `microtrend` / `microbreak`): 0 of 756 cells above PF 1 on both windows (40 symbols, 3 days; `docs/verification/trend-break-tactics-20261114.md`),
+  none wired into a pack. Execution window sweep (5 symbols): off 0.467 dev / 0.668 sealed, N 10 0.467 / 0.651, N 20 identical to off (it equals the Real window).
+  (e) **Owner's expectation, recorded as asked ("note this for later and projects"):** only validated high-PF Sets should process, so the executed PF should be higher
+  than the pool's. The measurements in this file (selection PF 1.7 - 25 against delivered 0.2 - 0.9; persistence sign flips between regimes) say it is not on these signals:
+  a gate selects the end of a lucky stretch. Keep reporting executed PF next to the selection PF; do not read a higher gate as a higher executed PF.
+  (f) **"Run always all ... the evals decide" (x02 demo only):** DCA on behind its own Axis gate (`dcaEnabled`, `stratDca`, `dcaOnAxis` true, `dcaOnSets` false) and every
+  pack's Exit Sets (`exitSetsByPack` {}); every pack, range, type and both directions already run. x01 and the Bybit overlays / presets keep the earlier values (checks
+  `logistics.dca-off-by-default-...` and `grid.shipped-overlays-switch-off-the-indications-exit-sets` name x02 as the exception). Independence is pinned by
+  `stages.every-config-set-is-independent-with-its-own-floor-and-execution-window` (40 other Sets turned to noise: the probe Sets' verdicts, windows, lane, execution
+  window and own Auto floor 1.72 unchanged) and the mutant `set auto: a Set's own floor is learned from the pooled pairs of its step`.
+  (h) **Signals are Set-engine packs** (owner "Signals ... for each source, symbol, type, range independent ... through the stages like the other"): `server/pulse/signal_packs.py`,
+  overlay `stratSignals` + `signalConfigs` (entries: sources, ranges, timeframes, stepMin / stepMax, slRatios, types; each source x range x timeframe of the CTS-A-O ports in
+  `signal_sources.py` becomes pack `sig-<source>-<range>-t<tf>` with its own Sets, stage chain, last-N windows, lanes and execution; floor `minPfSignals` 2.2 in every window).
+  The signal on a 1m bar is the source state's onset on the timeframe bar that bar completes, read from the pack's own window (6 warm-ups, at most 1,920 rows; agrees with
+  `signal_sources.onsets` on the full history on 3,637 of 3,638 onsets after one window). Checks `signals-pack.*` (4), mutants `signals pack:` (3). Desk: Settings "Signals"
+  toggle + editor (`src/components/signal-config-editor.tsx`). x02 runs the default entry (5 / 15 min, steps 5 - 12, SL 0.5 / 0.75 / 1.0, base + trailing); fixtures pin it off.
+  Not measured yet: the offline Signals research (`signal_replay.py`) never reached PF 1.
+  (i) **Desk insight sections** (`/results`, `src/components/insights-board.tsx`, helpers `src/lib/insights.ts` + tests): Indications (effective PF / validated share per pass,
+  per-pack table), Strategies (executed by pack and exit, group-gate scopes), Stages (funnel with each population's PF next to the executed PF, last-N windows, step floors),
+  Live (lanes, skipped entries, downtime closes, simulated vs live), Signals (source x range x timeframe grid, executed). `step-pf-view.test.ts` was never run by `npm test`; it is now.
+  (j) **Floors above 1 everywhere** (owner "Real PF over 1"): live x02 had three Sets valid with a Real window PF of exactly 1.00 at a learned Auto floor of 1.00;
+  x01 / x02 / desk now ship `minPfStepAutoLow` 1.02 (fixtures keep 1.0), check `step-pf.shipped-floors-are-all-above-one` (lowest floor any window can ask: 1.01, the Micro range).
+  (k) **Speed and memory, measured** (one symbol, x02 grid, 11,228 Sets): 255 of 262 s of a replay is signal computation, 218 s of it the extra packs' group votes
+  (`indication_lib`, about 2 million single indicators per symbol, rolling higher-timeframe windows recomputed every minute); Signals packs 31 s. Bit-identical fixes
+  (golden unchanged): Signals aggregation by slices (`signal_packs._blocks`, check `signals-pack.blocks-equal-completed-bars`), closes of an aggregated series built once,
+  `_wma` memoised, an exact byte key for `indication_extra._agg`: the signal pass 28.4 -> 25.5 s. **Memory:** the signal memo held one dict of all 44 packs per bar and
+  symbol (x02 grew 1.51 -> 1.60 -> 1.77 GB over three passes); a memo row now keeps only the packs that signalled (8 of 44 on SOL), answers identical (check
+  `signals-pack.the-signal-memo-keeps-only-signalling-packs-and-answers-the-same`, mutant `signal memo:`). The Python heap of repeated passes stays flat (25 MB, no
+  leak found); `malloc_trim` freed nothing measurable. **Not done:** streaming (O(1) per bar) indicators would cut the 218 s most (talipp / Hexital-style
+  updates) but change the floating-point order of every indicator, so every signal and the golden fingerprint: the owner's decision.
+  (g) **Engine stop:** SIGTERM ended only the main thread and worker threads kept trading (seen on x01 and x02); `_term` now ends the process (`os._exit(0)`), state files
+  and venue-side stops / targets stay.
+
+- **2026-11-14, owner (series of instructions): x01 live on 40 symbols at the minimum volume factor 0.05, max SL ratio 0.8, every TP range and every signal pack open, leverage always the exchange maximum, "rally" direction acceptance.**
+  Shipped in `overlay-bingx-x01.json` / `-x02.json` (x01 symbolCap 40; both: `setSlRatios` [0.25, 0.5, 0.75], `maxStopLossRatio` 0.8, `slMaxByRange` 0.8, Normal range on, trend / reversion / flow / multi on, `groupGate` + `groupGateSide`
+  with the newest 3 results over 6 h). The engine reads `/opt/grok-x01-pulse/overlay-<conn>.json`, NOT the repo copy: copy the repo overlay there to apply it. Measured: `docs/verification/live-vs-sim-20261114.md` (sim executed PF 0.874 dev / 0.443
+  sealed, flow + multi removal worse on both, live stops fill 1.4 x the plan): none of this is evidence of profit. New: `groupGateSide` (direction-aware group gate, default off in the engine), `replayWorkers` (opt-in signal worker processes, default 0,
+  bit-identical), `scripts/live_cash_audit.py`, `scripts/live_sim_diff.py`, `scripts/monitor_files.py`, `execution.simDiff` in the statistics. Fixtures (`common.overlay`) pin the earlier packs / gate / SL grid so the checks stay independent of the shipped x01.
+
 - **2026-11-11, owner: "Frage 1 JA ... prozessiere alle block counts unabhängig, keine restrictions" / "Liste welche block besser als ohne und stelle default settings so das diese in wirkung" /
   "Teste selbst welche [Axis] funktionieren" / "Axis ergebnisse müssen auf jeden fall hohen PF haben".** Record: `docs/verification/block-coordinations-20261111.md` sections 6 and 7. No connection started.
   (a) **Block rounds are in the engine** (`server/pulse/block_rounds.py`, overlay `blockRounds`, desk Settings "Block rounds", state `block-state-<conn>.json.rounds.json`, stats `execution.blockRounds`):
