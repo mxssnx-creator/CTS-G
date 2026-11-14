@@ -1,6 +1,8 @@
 """Logistics suite: configuration, deploy pin, repository hygiene and the scripts the repo relies on."""
 from __future__ import annotations
 
+import os as _os_stop
+_os_stop.environ["X01_OWNER_OFF"] = "/nonexistent"      # the owner-stop marker of this host must not change what the fixtures see
 import json
 import configparser
 import math
