@@ -62,7 +62,8 @@ def main() -> int:
         unknown = sum(1 for r in rows if float(r.get(n_key) or 0) > 0 and not float(r.get(pf_key) or 0))
         (bad if below else notes).append(f"{'BAD' if below else 'ok '} {label}: {len(below)} Sets with PF <= 1 on their window {below[:3]}; {unknown} with orders but no finite PF (no loss in the window)")
     over_one("Base window PF over 1 (Sets passing Base)", base, "gn", "pf")
-    over_one("Main window PF over 1 (Sets on a lane)", valid, "mainWindowN", "mainPf")
+    # the negative lane is defined by a Main DIP (the newest 5 / 10 Main orders below zero), so only the positive lane needs a Main window above the floor
+    over_one("Main window PF over 1 (positive lane)", on_pos, "mainWindowN", "mainPf")
     over_one("Real window PF over 1 (positive lane)", on_pos, "realWindowN", "realPf")
     over_one("Real Negative window PF over 1 (negative lane)", on_neg, "realNegWindowN", "realNegPf")
     gp = sum(float(r.get("gp") or 0) for r in base)
