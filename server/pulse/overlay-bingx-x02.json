@@ -416,5 +416,26 @@
   "replayWorkers": 3,
   "signalCachePath": "/opt/grok-x01-pulse/signal-cache-bingx-x02.pkl",
   "minPfStepAutoScope": "set",
-  "minPfSetAutoMin": 10
+  "minPfSetAutoMin": 10,
+  "stratSignals": true,
+  "signalConfigs": [
+    {
+      "label": "signals default",
+      "timeframes": [
+        5,
+        15
+      ],
+      "stepMin": 5,
+      "stepMax": 12,
+      "slRatios": [
+        0.5,
+        0.75,
+        1.0
+      ],
+      "types": [
+        "base",
+        "trail"
+      ]
+    }
+  ]
 }

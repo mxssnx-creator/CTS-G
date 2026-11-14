@@ -29,6 +29,16 @@
   `logistics.dca-off-by-default-...` and `grid.shipped-overlays-switch-off-the-indications-exit-sets` name x02 as the exception). Independence is pinned by
   `stages.every-config-set-is-independent-with-its-own-floor-and-execution-window` (40 other Sets turned to noise: the probe Sets' verdicts, windows, lane, execution
   window and own Auto floor 1.72 unchanged) and the mutant `set auto: a Set's own floor is learned from the pooled pairs of its step`.
+  (h) **Signals are Set-engine packs** (owner "Signals ... for each source, symbol, type, range independent ... through the stages like the other"): `server/pulse/signal_packs.py`,
+  overlay `stratSignals` + `signalConfigs` (entries: sources, ranges, timeframes, stepMin / stepMax, slRatios, types; each source x range x timeframe of the CTS-A-O ports in
+  `signal_sources.py` becomes pack `sig-<source>-<range>-t<tf>` with its own Sets, stage chain, last-N windows, lanes and execution; floor `minPfSignals` 2.2 in every window).
+  The signal on a 1m bar is the source state's onset on the timeframe bar that bar completes, read from the pack's own window (6 warm-ups, at most 1,920 rows; agrees with
+  `signal_sources.onsets` on the full history on 3,637 of 3,638 onsets after one window). Checks `signals-pack.*` (4), mutants `signals pack:` (3). Desk: Settings "Signals"
+  toggle + editor (`src/components/signal-config-editor.tsx`). x02 runs the default entry (5 / 15 min, steps 5 - 12, SL 0.5 / 0.75 / 1.0, base + trailing); fixtures pin it off.
+  Not measured yet: the offline Signals research (`signal_replay.py`) never reached PF 1.
+  (i) **Desk insight sections** (`/results`, `src/components/insights-board.tsx`, helpers `src/lib/insights.ts` + tests): Indications (effective PF / validated share per pass,
+  per-pack table), Strategies (executed by pack and exit, group-gate scopes), Stages (funnel with each population's PF next to the executed PF, last-N windows, step floors),
+  Live (lanes, skipped entries, downtime closes, simulated vs live), Signals (source x range x timeframe grid, executed). `step-pf-view.test.ts` was never run by `npm test`; it is now.
   (g) **Engine stop:** SIGTERM ended only the main thread and worker threads kept trading (seen on x01 and x02); `_term` now ends the process (`os._exit(0)`), state files
   and venue-side stops / targets stay.
 
