@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 70,
+  "symbolCap": 100,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -51,7 +51,11 @@
   "volWeight": 0.3,
   "minStep": 10,
   "maxStopLossRatio": 0.8,
-  "setSlRatios": [0.25, 0.5, 0.75],
+  "setSlRatios": [
+    0.25,
+    0.5,
+    0.75
+  ],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
