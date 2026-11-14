@@ -2,6 +2,12 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-14, owner (series of instructions): x01 live on 40 symbols at the minimum volume factor 0.05, max SL ratio 0.8, every TP range and every signal pack open, leverage always the exchange maximum, "rally" direction acceptance.**
+  Shipped in `overlay-bingx-x01.json` / `-x02.json` (x01 symbolCap 40; both: `setSlRatios` [0.25, 0.5, 0.75], `maxStopLossRatio` 0.8, `slMaxByRange` 0.8, Normal range on, trend / reversion / flow / multi on, `groupGate` + `groupGateSide`
+  with the newest 3 results over 6 h). The engine reads `/opt/grok-x01-pulse/overlay-<conn>.json`, NOT the repo copy: copy the repo overlay there to apply it. Measured: `docs/verification/live-vs-sim-20261114.md` (sim executed PF 0.874 dev / 0.443
+  sealed, flow + multi removal worse on both, live stops fill 1.4 x the plan): none of this is evidence of profit. New: `groupGateSide` (direction-aware group gate, default off in the engine), `replayWorkers` (opt-in signal worker processes, default 0,
+  bit-identical), `scripts/live_cash_audit.py`, `scripts/live_sim_diff.py`, `scripts/monitor_files.py`, `execution.simDiff` in the statistics. Fixtures (`common.overlay`) pin the earlier packs / gate / SL grid so the checks stay independent of the shipped x01.
+
 - **2026-11-11, owner: "Frage 1 JA ... prozessiere alle block counts unabhängig, keine restrictions" / "Liste welche block besser als ohne und stelle default settings so das diese in wirkung" /
   "Teste selbst welche [Axis] funktionieren" / "Axis ergebnisse müssen auf jeden fall hohen PF haben".** Record: `docs/verification/block-coordinations-20261111.md` sections 6 and 7. No connection started.
   (a) **Block rounds are in the engine** (`server/pulse/block_rounds.py`, overlay `blockRounds`, desk Settings "Block rounds", state `block-state-<conn>.json.rounds.json`, stats `execution.blockRounds`):
