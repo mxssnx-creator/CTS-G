@@ -5639,7 +5639,7 @@
              },
              "recon": {"ok": self.recon_ok, "detail": self.recon_detail},
              "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
-@@ -4522,6 +7495,126 @@
+@@ -4522,6 +7495,128 @@
              },
          }
  
@@ -5684,7 +5684,9 @@
 +                if callable(prev_term):
 +                    prev_term(signum, frame)
 +                else:
-+                    raise SystemExit(0)
++                    # SystemExit in the main thread left the worker threads trading (found 2026-11-14: x01 and x02 kept opening after SIGTERM); state files are
++                    # written as the engine runs and every position keeps its venue-side stop / target, so the process ends here
++                    os._exit(0)
 +            _signal.signal(_signal.SIGTERM, _term)
 +        except Exception:
 +            pass
@@ -5766,7 +5768,7 @@
      def write_stats(self, force: bool = False) -> None:
          now = time.monotonic()
          if not force and not self._stats_force and now - self._stats_ts < 0.95:
-@@ -4529,6 +7622,9 @@
+@@ -4529,6 +7624,9 @@
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -5776,7 +5778,7 @@
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4560,8 +7656,8 @@
+@@ -4560,8 +7658,8 @@
                  "gp": round(gp, 6),
                  "gl": round(gl, 6),
                  "net": round(gp - gl, 6),
@@ -5787,7 +5789,7 @@
                  "avgR": cost["avgR"],
                  "wr": round(100.0 * wins / max(1, wins + losses), 1),
                  "scale": "1.00=neutral 1.10=+1×cost",
-@@ -4602,7 +7698,7 @@
+@@ -4602,7 +7700,7 @@
                  "wins": sum(1 for x in pnls if x > 0),
                  "losses": sum(1 for x in pnls if x < 0),
                  "net": round(sum(pnls), 6),
@@ -5796,7 +5798,7 @@
                  "maxDdS": d.get("maxS"),
                  "avgDdS": d.get("avgS"),
              })
-@@ -4643,13 +7739,19 @@
+@@ -4643,13 +7741,19 @@
          self.record_test("qa-trail-indep", self.variants.trail_arm >= 0.3, f"{self.variants.trail_key}")
          self.record_test("qa-hot-budget", self.last_scan_ms <= (SCAN_S * 1000.0 + 40.0) or self.last_scan_io or self.hist_busy or self.cycle < 40, f"{self.last_scan_ms:.0f}ms budget={SCAN_S*1000:.0f} io={int(self.last_scan_io)} hist={int(self.hist_busy)}")
          rss = rss_mb()
@@ -5818,7 +5820,7 @@
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4657,7 +7759,7 @@
+@@ -4657,7 +7761,7 @@
          for p in self.open.values():
              if (time.time() - p.opened_at) <= 90.0:
                  continue
@@ -5827,7 +5829,7 @@
                  overall_ok = False
          range_ok = True
          for p in self.open.values():
-@@ -4731,7 +7833,7 @@
+@@ -4731,7 +7835,7 @@
          snap_ind = self.indications.snapshot()
          self.record_test("qa-ind-on", bool(snap_ind.get("enabled")), f"syms={snap_ind.get('symbols')} lanes={len(snap_ind.get('primary') or [])}")
          have = set(s for s, rows in (getattr(self.indications, "last", {}) or {}).items() if rows)
@@ -5836,7 +5838,7 @@
          miss = [s for s in scored if s not in have][:4]
          warm_ind = self.cycle < max(80, len(SYMBOLS))
          need = max(8, min(len(scored), max(8, len(scored) // 8))) if scored else 8
-@@ -4753,15 +7855,11 @@
+@@ -4753,15 +7857,11 @@
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -5855,7 +5857,7 @@
              intern_m: Dict[str, Any] = {"pf": 0.0, "n": 0}
              stg = None
              try:
-@@ -4769,7 +7867,7 @@
+@@ -4769,7 +7869,7 @@
              except Exception:
                  stg = None
              if stg:
@@ -5864,7 +5866,7 @@
              self.coord.gate(rows_g, consec_g, intern=intern_m)
          except Exception:
              pass
-@@ -4786,81 +7884,226 @@
+@@ -4786,81 +7886,226 @@
              bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
              f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
          )
@@ -6153,7 +6155,7 @@
              except Exception:
                  self.hist_busy = False
                  self.sets.progress.phase = "error"
-@@ -4876,6 +8119,7 @@
+@@ -4876,6 +8121,7 @@
          while not self._warm_stop:
              t0 = time.time()
              try:
@@ -6161,7 +6163,7 @@
                  if time.time() - self.last_bal > BALANCE_EVERY:
                      self.refresh_balance()
                  self.refresh_klines()
-@@ -4888,11 +8132,26 @@
+@@ -4888,11 +8134,26 @@
                  if hasattr(self.api, "err"):
                      self.api.err.write("warm", msg=self.last_error[:220])
              self.warm_ms = (time.time() - t0) * 1000
@@ -6189,7 +6191,7 @@
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4902,9 +8161,13 @@
+@@ -4902,9 +8163,13 @@
                  self._pre_pause_halt = self.halt_reason
              self.halted = True
              self.halt_reason = "stopped"
@@ -6204,7 +6206,7 @@
              return
          if paused:
              self.halted = True
-@@ -4916,18 +8179,24 @@
+@@ -4916,18 +8181,24 @@
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -6231,7 +6233,7 @@
                  self.halted = True
                  self.halt_reason = "drawdown halt"
              else:
-@@ -4965,12 +8234,14 @@
+@@ -4965,12 +8236,14 @@
  
      def run(self) -> None:
          log(f"pulse start {CONN_SHORT} {BASE}")
@@ -6246,7 +6248,7 @@
          sd_notify("WATCHDOG=1")
          self.refresh_tickers()
          sd_notify("WATCHDOG=1")
-@@ -4984,6 +8255,14 @@
+@@ -4984,6 +8257,14 @@
          except Exception:
              pass
          sd_notify("WATCHDOG=1")
@@ -6261,7 +6263,7 @@
          self.adopt_exchange_positions()
          sd_notify("WATCHDOG=1")
          try:
-@@ -5001,6 +8280,8 @@
+@@ -5001,6 +8282,8 @@
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -6270,7 +6272,7 @@
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
-@@ -5029,17 +8310,30 @@
+@@ -5029,17 +8312,30 @@
                  pass
              sd_notify("WATCHDOG=1")
              wall = time.perf_counter() - t0
@@ -6306,7 +6308,7 @@
      url = BASE + "/openApi/swap/v2/quote/contracts"
      with urllib.request.urlopen(url, timeout=15) as r:
          data = json.loads(r.read().decode()).get("data") or []
-@@ -5070,6 +8364,7 @@
+@@ -5070,6 +8366,7 @@
              int(c.get("pricePrecision") or 4),
              float(c.get("tradeMinUSDT") or 2),
              int(c.get("maxLongLeverage") or c.get("maxLeverage") or c.get("maxleverage") or 150),
@@ -6314,7 +6316,7 @@
          )
      return out
  
-@@ -5086,20 +8381,27 @@
+@@ -5086,20 +8383,27 @@
              pass
  
  

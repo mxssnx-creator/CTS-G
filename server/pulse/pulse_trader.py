@@ -7536,7 +7536,9 @@ class Pulse:
                 if callable(prev_term):
                     prev_term(signum, frame)
                 else:
-                    raise SystemExit(0)
+                    # SystemExit in the main thread left the worker threads trading (found 2026-11-14: x01 and x02 kept opening after SIGTERM); state files are
+                    # written as the engine runs and every position keeps its venue-side stop / target, so the process ends here
+                    os._exit(0)
             _signal.signal(_signal.SIGTERM, _term)
         except Exception:
             pass
