@@ -116,6 +116,46 @@ def the_signal_memo_keeps_only_signalling_packs_and_answers_the_same():
     return ok, f"identical {plain == first == again}; {width:.2f} of {len(packs)} packs per memo row; empty entries kept: {not no_empty}"
 
 
+def the_signal_memo_preserves_utc_alignment():
+    """Equal OHLCV under another UTC close phase is not the same input. Warm,
+    saved/restored and worker-backed memos must match a cold causal calculation."""
+    import os
+    import pickle
+    import tempfile
+    import signal_pool
+    bars = synth_bars(17, 420, drift=0.0003, vol=0.003)
+    packs = [sp.pack_name("ema-cross", "short", 5)]
+    base = float(int(T0 // 1800) * 1800)
+    cache = {}
+    first = se.pack_signals(bars, packs, {}, base, 40, cache=cache, salt=3)
+    want = se.pack_signals(bars, packs, {}, base + 60, 40)
+    shifted = sum(x != y for x, y in zip(first[packs[0]], want[packs[0]]))
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "memo.bin")
+            se.save_signal_cache(path, 3, {"A": cache})
+            restored = se.load_signal_cache(path, 3)["A"]
+            warm = se.pack_signals(bars, packs, {}, base + 60, 40, cache=restored, salt=3)
+            worker = se.pack_signals(bars, packs, {}, base + 60, 40, cache=cache, salt=3, workers=2)
+            # An unchanged timestamp/window remains a cache hit; the fix does
+            # not discard memoization just to make the cold comparison pass.
+            real = se.bar_signal
+            def unexpected(*args, **kwargs):
+                raise AssertionError("unchanged UTC window was recomputed")
+            se.bar_signal = unexpected
+            try:
+                again = se.pack_signals(bars, packs, {}, base + 60, 40, cache=cache, salt=3)
+            finally:
+                se.bar_signal = real
+            with open(path, "wb") as stream:
+                pickle.dump({"v": 1, "salt": 3, "symbols": {"A": cache}}, stream)
+            old = se.load_signal_cache(path, 3)
+    finally:
+        signal_pool.shutdown()
+    ok = shifted > 0 and want == warm == worker == again and old == {}
+    return ok, f"different UTC phase changes {shifted} onsets; cold/warm/restored/worker equal {want == warm == worker == again}; old memo rejected {old == {}}"
+
+
 def slow_timeframes_read_two_warm_ups():
     """Owner 2026-11-14 ("make also 15, 30 min work"): every Signals pack reads at least two warm-ups of its own timeframe bars, so a 30 min EMA of 55 is warm
     when it signals (the 1,920-row window gave a 30 min pack 64 bars)."""
@@ -130,6 +170,7 @@ def slow_timeframes_read_two_warm_ups():
 
 
 CHECKS = [
+    ("signals-pack.the-signal-memo-preserves-utc-alignment", the_signal_memo_preserves_utc_alignment),
     ("signals-pack.slow-timeframes-read-two-warm-ups", slow_timeframes_read_two_warm_ups),
     ("signals-pack.the-signal-memo-keeps-only-signalling-packs-and-answers-the-same", the_signal_memo_keeps_only_signalling_packs_and_answers_the_same),
     ("signals-pack.blocks-equal-completed-bars", blocks_equal_completed_bars),
