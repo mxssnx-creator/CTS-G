@@ -56,6 +56,15 @@ def main() -> int:
         bad.append(f"BAD lane values outside pos/neg/both/'': {sorted({r.get('lane') for r in unknown})} on {len(unknown)} Sets")
     off_base = [r["id"] for r in valid if not r.get("baseV")]
     (bad if off_base else notes).append(f"{'BAD' if off_base else 'ok '} every Set on a lane passed Base: {len(off_base)} that did not {off_base[:3]}")
+    # post-Base PF must clear more than 1 on every stage a Set is valid through (owner 2026-11-14): Base (gate window), Main (its Main Set window), Real (positive lane), Real Negative (negative lane)
+    def over_one(label, rows, n_key, pf_key):
+        below = [r["id"] for r in rows if float(r.get(n_key) or 0) > 0 and 0 < float(r.get(pf_key) or 0) <= 1.0]
+        unknown = sum(1 for r in rows if float(r.get(n_key) or 0) > 0 and not float(r.get(pf_key) or 0))
+        (bad if below else notes).append(f"{'BAD' if below else 'ok '} {label}: {len(below)} Sets with PF <= 1 on their window {below[:3]}; {unknown} with orders but no finite PF (no loss in the window)")
+    over_one("Base window PF over 1 (Sets passing Base)", base, "gn", "pf")
+    over_one("Main window PF over 1 (Sets on a lane)", valid, "mainWindowN", "mainPf")
+    over_one("Real window PF over 1 (positive lane)", on_pos, "realWindowN", "realPf")
+    over_one("Real Negative window PF over 1 (negative lane)", on_neg, "realNegWindowN", "realNegPf")
     gp = sum(float(r.get("gp") or 0) for r in base)
     gl = sum(float(r.get("gl") or 0) for r in base)
     pf_pub = (st.get("base") or {}).get("pf")
