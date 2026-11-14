@@ -3,7 +3,12 @@
 # Never touches x01. Idempotent.
 set -u
 REPO="${REPO:-/home/user/CTS-G}"; CRED=/var/lib/cts-g/cred-bingx-x02.json; DIR=/opt/grok-x01-pulse
-redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1 || { bash "$REPO/scripts/ensure_x01.sh" >/dev/null 2>&1; }
+if ! redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
+  mkdir -p /var/lib/cts-g/redis /var/log/cts-g
+  redis-server --daemonize yes --bind 127.0.0.1 --port 6379 --dir /var/lib/cts-g/redis --save "" --appendonly no --logfile /var/log/cts-g/redis.log >/dev/null 2>&1
+  sleep 1
+fi
+python3 -c "import websocket" 2>/dev/null || python3 -m pip install --quiet --break-system-packages websocket-client
 if [ -r "$CRED" ] && [ -z "$(redis-cli -h 127.0.0.1 -p 6379 HGET connection:bingx-x02 api_key 2>/dev/null)" ]; then
 python3 - "$CRED" <<'PY' 2>/dev/null
 import json, subprocess, sys
