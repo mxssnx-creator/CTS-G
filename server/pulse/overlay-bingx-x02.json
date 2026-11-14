@@ -420,10 +420,10 @@
   "stratSignals": true,
   "signalConfigs": [
     {
-      "label": "signals default",
+      "label": "signals 1/5m",
       "timeframes": [
-        5,
-        15
+        1,
+        5
       ],
       "stepMin": 5,
       "stepMax": 12,
