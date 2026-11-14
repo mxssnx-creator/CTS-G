@@ -50,11 +50,12 @@
   "noise": 0.05,
   "volWeight": 0.3,
   "minStep": 10,
-  "maxStopLossRatio": 0.8,
+  "maxStopLossRatio": 1.4,
   "setSlRatios": [
-    0.25,
     0.5,
-    0.75
+    0.75,
+    1.0,
+    1.25
   ],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
@@ -281,8 +282,8 @@
   "minPfMediumN": 35,
   "volumeByPackKind": {},
   "slMaxByRange": {
-    "long": 0.8,
-    "wide": 0.8
+    "long": 1.4,
+    "wide": 1.4
   },
   "leverageStopCap": false,
   "groupGate": true,
@@ -391,5 +392,7 @@
   "minSlDistancePct": 0.1,
   "minPfByRange": {
     "micro": 1.01
-  }
+  },
+  "setSlMinRatio": 0.5,
+  "exitSetHoldBars": 720
 }

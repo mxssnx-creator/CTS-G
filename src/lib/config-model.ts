@@ -550,6 +550,8 @@ export type PulseOverlay = {
   exitOptSlMin: number;
   exitOptSlMax: number;
   exitMinHoldS: number;
+  setSlMinRatio: number;
+  exitSetHoldBars: number;
   exitPfWindow: number;
   exitDeactN: number;
   exitMinPf: number;
@@ -723,7 +725,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   noise: 0.05,
   volWeight: 0.3,
   minStep: 10,
-  maxStopLossRatio: 0.8,
+  maxStopLossRatio: 1.4,
   trailingMinStep: 6,
   posCountsVolumeRatio: 0.05,
   rearrange: true,
@@ -839,6 +841,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
+  setSlMinRatio: 0.5,
+  exitSetHoldBars: 720,
   exitPfWindow: 8,
   exitDeactN: 25,
   exitMinPf: 1.25,
@@ -1107,6 +1111,8 @@ export type CtsSettings = {
   exitOptSlMin?: number;
   exitOptSlMax?: number;
   exitMinHoldS?: number;
+  setSlMinRatio?: number;
+  exitSetHoldBars?: number;
   exitPfWindow?: number;
   exitDeactN?: number;
   exitMinPf?: number;
@@ -1625,6 +1631,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitOptSlMin: num(cts.exitOptSlMin, 0.1),
     exitOptSlMax: num(cts.exitOptSlMax, 0.9),
     exitMinHoldS: num(cts.exitMinHoldS, 45),
+    setSlMinRatio: num(cts.setSlMinRatio, 0.5),
+    exitSetHoldBars: num(cts.exitSetHoldBars, 720),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
     exitMinPf: pfFloor(num(cts.exitMinPf, GATE_MIN_PF_DEFAULT)),

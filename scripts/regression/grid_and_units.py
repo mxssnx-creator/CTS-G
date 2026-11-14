@@ -16,6 +16,19 @@ def _book(**extra):
     return b
 
 
+def min_sl_ratio_and_exit_hold():
+    full = _book(setSlRatios=[0.25, 0.5, 0.75])
+    cut = _book(setSlRatios=[0.25, 0.5, 0.75], setSlMinRatio=0.5, exitSetHoldBars=600)
+    allcut = _book(setSlRatios=[0.25], setSlMinRatio=0.5)
+    ex = [st for st in cut.by_idx if st.kind == "exit"]
+    base = [st for st in cut.by_idx if st.kind == "base"]
+    ok = full.sl_ratios == [0.25, 0.5, 0.75] and cut.sl_ratios == [0.5, 0.75] and allcut.sl_ratios == [0.25]
+    ok = ok and all(st.sl_ratio >= 0.5 - 1e-9 for st in cut.by_idx if st.kind != "trail")
+    ok = ok and ex and all(cut.hold_bars_for(st) == 600 for st in ex) and all(cut.hold_bars_for(st) == 0 for st in base)
+    ok = ok and all(full.hold_bars_for(st) == 0 for st in full.by_idx)
+    return ok, f"full={full.sl_ratios} min0.5={cut.sl_ratios} exit sets={len(ex)} hold={sorted({cut.hold_bars_for(s) for s in ex})}"
+
+
 def tp_steps():
     steps = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1))
     tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
@@ -291,7 +304,7 @@ def long_and_wide_ranges_stop_at_sl_ratio_one_and_the_minimum_step_stays_two():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     ship = {_o.path.basename(f): (lambda d: (d.get("slMaxByRange"), d.get("setMinStep"), d.get("setStepAdapt")))(_j.load(open(f))) for f in files}
-    ship_ok = all(v[1:] == (2, False) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}) for v in ship.values())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13)
+    ship_ok = all(v[1:] == (2, False) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for v in ship.values())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
     plain = SetBook()
     plain.load({"histEnabled": True})
     eng_ok = plain.step_adapt is False and plain.sl_max_by_range == {"long": 1.0, "wide": 1.0} and plain.min_step == 2
@@ -363,13 +376,14 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     # their counterfactual numbers stay the evidence they were. Still true: Micro Sets exist, no trailing pair is dropped for its lock, the pack set below is complete.
     all_packs = {"shortrange", "general", "indications", "trend", "reversion", "flow", "multi", "breakout"}
     ok = (any(st.kind != "trail" and st.step <= 3 for st in b.by_idx) and all_packs <= {st.pack for st in b.by_idx}
-          and ratios == {0.25, 0.5, 0.75} and locks and min(locks) < 0.1 and any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
+          and ratios == {0.5, 0.75, 1.0, 1.25} and locks and min(locks) < 0.1 and any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
     return ok, f"x01 {len(b.by_idx)} Sets, packs {sorted({st.pack for st in b.by_idx})}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
 
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.25-2.5", sl_ratios),
+    ("grid.min-sl-ratio-drops-lower-stops-and-exit-sets-hold-later", min_sl_ratio_and_exit_hold),
     ("grid.default-grid-follows-its-rules", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),
     ("grid.trail-give-le-arm-and-floor", trail_rules_default),

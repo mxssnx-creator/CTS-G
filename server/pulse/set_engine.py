@@ -2488,7 +2488,12 @@ class SetBook:
         self.sl_low = bool(ov.get("setSlLow", False))
         if self.sl_low:
             ratios.extend(SL_RATIOS_LOW)
-        self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
+        # setSlMinRatio (0 = off): no Set is built under this SL ratio (x TP); the grid keeps what is left, never an empty grid
+        self.sl_min_ratio = max(0.0, min(5.0, finite(ov.get("setSlMinRatio"), 0.0)))
+        kept = [r for r in ratios if r + 1e-9 >= self.sl_min_ratio]
+        self.sl_ratios = sorted(set(kept)) or sorted(set(ratios)) or list(SL_RATIOS)
+        # exitSetHoldBars (0 = the global time stop): Exit Sets (no TP) hold this many minutes before the time exit
+        self.exit_set_hold_bars = int(max(0, min(720, finite(ov.get("exitSetHoldBars"), 0.0))))
         self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
         try:
             self.trail_step_max = int(max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_CEIL, int(float(ov.get("trailStepMax") or TRAIL_STEP_MAX)))))
@@ -3022,7 +3027,7 @@ class SetBook:
         depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
         manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
         automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
-        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic)
+        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0))
         return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
@@ -4590,7 +4595,10 @@ class SetBook:
     def hold_bars_for(self, st: "SetState") -> int:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
         table = getattr(self, "step_hold", None) or {}
-        return int(table.get(self.step_of(st), 0)) if table else 0
+        manual = int(table.get(self.step_of(st), 0)) if table else 0
+        if not manual and st.kind == "exit":
+            return int(getattr(self, "exit_set_hold_bars", 0) or 0)
+        return manual
 
     def auto_holds(self, st: "SetState") -> Tuple[int, ...]:
         """The hold candidates (minutes) the Auto Mode tries on this Set; empty when auto is off or its step has a manual hold.

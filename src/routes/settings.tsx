@@ -2016,6 +2016,8 @@ function SettingsPage() {
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
+                <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
+                <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
