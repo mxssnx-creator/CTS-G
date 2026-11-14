@@ -488,6 +488,23 @@ def ratio_midpoints_match_desk_half_up_normalization():
     return True,"28 midpoint ratios snap half-up identically to desk; extreme finite inputs remain bounded"
 
 
+def shipped_floors_are_all_above_one():
+    """Owner 2026-11-14 ("only if stage Real has PF over 1 ... mirrored to live"): on the shipped x01 / x02 overlays every floor a window can ask is above 1 -- the
+    manual step floors, the Auto candidates (minPfStepAutoLow 1.02; live x02 had three Sets valid with a Real window PF of exactly 1.00 at a learned floor of 1.00),
+    the explicit range floors and the Signals floor."""
+    import json as _j, os as _o
+    from common import PULSE
+    rows = {}
+    for c in ("x01", "x02"):
+        b = se.SetBook()
+        b.load(_j.load(open(_o.path.join(PULSE, f"overlay-bingx-{c}.json"))))
+        lows = [min(b.step_auto_candidates())] if b.pf_step_auto else []
+        manual = [b.step_floor(st) for st in b.by_idx[:400]]
+        ranged = list((b.pf_range_floor or {}).values())
+        rows[c] = min(lows + manual + ranged + [b.signal_min_pf])
+    return all(v > 1.0 for v in rows.values()), f"lowest floor any window can ask: {rows}"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     ratio_midpoints_match_desk_half_up_normalization,
     auto_wide_steps_use_the_last_table_bucket_but_keep_policy_identity,
@@ -497,4 +514,5 @@ CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,
-    auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors, the_simulator_learns_the_engines_own_floor_of_every_set)]
+    auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors, the_simulator_learns_the_engines_own_floor_of_every_set,
+    shipped_floors_are_all_above_one)]

@@ -88,6 +88,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["execGateN"] = 0
     ov["minPfStepAutoScope"] = "step"
     ov["stratSignals"] = False
+    ov["minPfStepAutoLow"] = 1.0           # fixtures keep the earlier lowest Auto floor (shipped x01 / x02: 1.02, so a window at PF 1.00 never passes)
     ov["setSlMinRatio"], ov["exitSetHoldBars"] = 0, 0        # fixtures pin the earlier grid and the global time exit (shipped x01: min SL ratio 0.5, Exit Sets hold 720 min)
     ov["realGateN"] = 15           # the shipped x01 / x02 ask the last 8 Real orders per lane (owner 2026-11-14); fixtures keep the window their counts were pinned with
     ov["histLookbackBars"], ov["histLookbackMax"] = 4320, 4320

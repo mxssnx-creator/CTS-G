@@ -421,5 +421,6 @@
     ]
   },
   "minPfStepAutoScope": "set",
-  "minPfSetAutoMin": 10
+  "minPfSetAutoMin": 10,
+  "minPfStepAutoLow": 1.02
 }

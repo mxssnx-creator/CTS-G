@@ -437,5 +437,6 @@
         "trail"
       ]
     }
-  ]
+  ],
+  "minPfStepAutoLow": 1.02
 }
