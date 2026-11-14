@@ -285,6 +285,7 @@
     "wide": 0.8
   },
   "leverageStopCap": false,
+  "replayWorkers": 3,
   "groupGate": true,
   "groupGateSide": true,
   "groupGateN": 3,
