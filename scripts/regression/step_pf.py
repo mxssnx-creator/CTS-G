@@ -290,6 +290,60 @@ def the_simulator_learns_the_engines_floors():
     diff = {k: (sim.get(k), eng.get(k)) for k in set(sim) | set(eng) if sim.get(k) != eng.get(k)}
     return ok, f"{len(sim)} (step, direction) floors learned by the simulator, {len(eng)} by the engine at the same hour; differences {diff or 'none'}; values {sorted(set(sim.values()))}"
 
+def the_simulator_learns_the_engines_own_floor_of_every_set():
+    """minPfStepAutoScope "set" (owner 2026-11-14): every config Set learns its own Auto floor from its own orders closed before the hour; a Set with too few
+    admitted orders keeps the defaults (step -> pooled -> manual). The simulator and the engine learn the same floor for every Set."""
+    import json as _json
+    import os as _os
+    import stage_eval as sg
+    from common import SMALL, T0, synth_bars
+    names = ["S0-USDT", "S1-USDT"]
+    bars = {s_: synth_bars(41 + i, 1500, drift=0.0005 if i % 2 == 0 else -0.0005, vol=0.003) for i, s_ in enumerate(names)}
+    times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
+    patch = {**SMALL, "holdEnabled": False, "histLookbackBars": 600, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+             "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoMin": 30, "minPfStepAutoN": 5, "minPfStepAutoScope": "set", "minPfSetAutoMin": 10, "directionMode": "split", "pauseMode": "off",
+             "setScratchEnabled": True}
+    saved = _os.environ.get("STAGE_OVERLAY_PATCH")
+    try:
+        _os.environ["STAGE_OVERLAY_PATCH"] = _json.dumps(patch)
+        shadow = {}
+        for s_ in names:
+            _, warm, dirs, confs, out = sg._symbol_job((s_, bars[s_], times[s_][0]))
+            shadow[s_] = (warm, dirs, confs, out)
+        book = sg.make_book()
+        tapes = sg.Tapes(book, names, times, shadow)
+        hour = float(int((times[names[0]][0] + 1100 * 60) // 3600) * 3600)
+        auto = sg.AutoFloors(book, tapes)
+        auto.apply(book, hour)
+        sim = dict(book.set_floor_auto)
+        sim_floor = {st.id: book.step_floor(st) for st in book.by_idx}
+        # the engine on the same tapes: the simulator's orders handed to the learning pass as the replay's rows
+        rows = {}
+        for st in book.by_idx:
+            tx, te, pp = tapes.by_set[st.idx]
+            rows[st.id] = [(float(a), symbol, "LONG", 0.0, float(x), float(a - b), "x", st.id)
+                           for a, b, x, symbol in zip(tx, te, pp, tapes.symbols_by_set[st.idx])]
+        real = book._tape_rows
+        book._tape_rows = lambda key, order, cutoff, until=None: [r for r in rows.get(key, ()) if cutoff <= r[0] <= (float("inf") if until is None else until)]
+        try:
+            book._learn_step_floors(names, hour - book.lookback * se.BAR_S)
+        finally:
+            book._tape_rows = real
+        eng = dict(book.set_floor_auto)
+        eng_floor = {st.id: book.step_floor(st) for st in book.by_idx}
+        fallback = sum(1 for st in book.by_idx if st.id not in eng)
+        from position_cost import tp_range_of as _rng
+        ranged = {st.id for st in book.by_idx if (book.pf_range_floor or {}).get(_rng(book.step_bucket(st))) is not None}   # an explicit range floor (minPfByRange) wins
+        uses_own = all(abs(eng_floor[k] - min(v, book.pf_step_auto_high)) < 1e-12 for k, v in eng.items() if k not in ranged) and any(k not in ranged for k in eng)
+    finally:
+        if saved is None:
+            _os.environ.pop("STAGE_OVERLAY_PATCH", None)
+        else:
+            _os.environ["STAGE_OVERLAY_PATCH"] = saved
+    ok = bool(sim) and sim == eng and sim_floor == eng_floor and uses_own and fallback > 0
+    diff = [k for k in set(sim) | set(eng) if sim.get(k) != eng.get(k)][:3]
+    return ok, f"[same {sim == eng} floors {sim_floor == eng_floor} own {uses_own}] {len(sim)} Sets with their own floor (simulator), {len(eng)} (engine), {fallback} on the defaults; differences {diff or 'none'}; own floors {sorted(set(sim.values()))[:8]}"
+
 def auto_floor_never_under_its_lower_bound():
     """minPfStepAutoLow bounds the Auto floor from below: on pairs where every floor delivers the same PF the rule picks its lowest candidate, which is
     1.00 by default and the first candidate at or above the bound otherwise (live x02 2026-11-03: Auto sat at 1.00, under MIN_PF_FLOOR, for most steps)."""
@@ -443,4 +497,4 @@ CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,
-    auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors)]
+    auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors, the_simulator_learns_the_engines_own_floor_of_every_set)]

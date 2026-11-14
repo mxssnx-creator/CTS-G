@@ -2,6 +2,29 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-14 (later), owner: "Stop x1 and run x02", "min SL ratio 0.5", "max SL ratios 1.4", "long, wide 0.2 to 0.8 step 0.1", "Exit ... close later", "Real ... last N 20",
+  "at the end of Real before executing a last-N check, try 10 to 35 step 5", "auto PF for each config Set, defaults when not enough samples", "for EACH config Set independent".**
+  (a) **x01 is stopped by the owner**: marker `/var/lib/cts-g/x01-stopped-by-owner` (ensure_x01.sh, the hook and the watchdog start nothing while it exists; delete it to
+  resume the always-restart rule). x01 ended at 0.0702 USDT with its drawdown halt tripped; the halt, start equity and EQ_MIN were not touched. The hourly keep-alive
+  (`trig_01DQGiSTjKpZzVN8vdoxuLsu`) now watches x02. **x02 (VST demo) runs 100 symbols** at volume factor 0.05 (`scripts/ensure_x02.sh` restores its credentials from
+  `/var/lib/cts-g/cred-bingx-x02.json`, starts Redis and the engine; the SessionStart hook runs it), replay workers 3, signal memo, fixed lookback.
+  (b) **New engine keys** (absent = earlier behaviour; fixtures pin them off in `common.overlay`): `setSlMinRatio` (no Set under that SL ratio), `maxStopLossRatio` now
+  CAPS the base / Exit grid (it was only reported before), `slRatiosByRange` {range: [ratios]} (shipped long / wide 0.2 .. 0.8 step 0.1, they replace the global list for
+  that range only), `exitSetHoldBars` (Exit Sets' own time exit, shipped 720 min), `execGateN` (the newest N results of the lane's Real Set must pass the floor again
+  right before execution; shipped 0 until the sweep shows a winner), `minPfStepAutoScope` "set" + `minPfSetAutoMin` 10 (every Set learns its own Auto floor from its own
+  causal pairs; fewer admitted orders = the step floor, then the pooled direction floor, then the manual floor; engine and simulator equal, check
+  `step-pf.every-set-learns-its-own-floor-in-engine-and-simulator`). Shipped x01 / x02: grid 0.5 / 0.75 / 1.0 / 1.25, max 1.4, Real window `realGateN` 20, step-floor
+  ratio 0.2 with cap 1.3 (x01).
+  (c) **Independence.** Every Set's tape, stage chain, last-N windows, lane, execution window and (with scope "set") Auto floor are its own. Pooled on purpose
+  (relational): the group gate (pack x type x range x lane), Block relations, relation lanes (off), the step / direction Auto fallback.
+  (d) **Measured, not an edge.** x02 82 settled Set closes: live PF 0.53 against the simulated 0.38 (stops 59, targets 17); stops fill 1.58 x the plan under 0.5 %, 1.20 x at
+  0.5 - 1 %, 1.09 x at 1 %+ (7 / 23 / 30 stops), so x02 runs `minSlDistancePct` 0.3 as a test (was 0.1). Trend / break tactics (`trendpb`, `trendflag`, `brkvol`,
+  `brkretest`, `rangebrk`, groups `microtrend` / `microbreak`): 0 of 756 cells above PF 1 on both windows (40 symbols, 3 days; `docs/verification/trend-break-tactics-20261114.md`),
+  none wired into a pack. Execution window sweep (5 symbols): off 0.467 dev / 0.668 sealed, N 10 0.467 / 0.651, N 20 identical to off (it equals the Real window).
+  (e) **Owner's expectation, recorded as asked ("note this for later and projects"):** only validated high-PF Sets should process, so the executed PF should be higher
+  than the pool's. The measurements in this file (selection PF 1.7 - 25 against delivered 0.2 - 0.9; persistence sign flips between regimes) say it is not on these signals:
+  a gate selects the end of a lucky stretch. Keep reporting executed PF next to the selection PF; do not read a higher gate as a higher executed PF.
+
 - **2026-11-14, owner (series of instructions): x01 live on 40 symbols at the minimum volume factor 0.05, max SL ratio 0.8, every TP range and every signal pack open, leverage always the exchange maximum, "rally" direction acceptance.**
   Shipped in `overlay-bingx-x01.json` / `-x02.json` (x01 symbolCap 40; both: `setSlRatios` [0.25, 0.5, 0.75], `maxStopLossRatio` 0.8, `slMaxByRange` 0.8, Normal range on, trend / reversion / flow / multi on, `groupGate` + `groupGateSide`
   with the newest 3 results over 6 h). The engine reads `/opt/grok-x01-pulse/overlay-<conn>.json`, NOT the repo copy: copy the repo overlay there to apply it. Measured: `docs/verification/live-vs-sim-20261114.md` (sim executed PF 0.874 dev / 0.443

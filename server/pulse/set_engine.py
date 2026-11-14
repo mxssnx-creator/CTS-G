@@ -2144,6 +2144,9 @@ class SetBook:
         self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
         self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
+        self.pf_set_auto = False
+        self.pf_set_auto_min = 10
+        self.set_floor_auto: Dict[str, float] = {}             # Set id -> its own learned Auto floor (minPfStepAutoScope "set"); absent = the defaults
         self.pf_step_auto_tol = STEP_PF_AUTO_TOL_DEFAULT
         self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
         self.step_floor_report: List[Dict[str, Any]] = []
@@ -2196,6 +2199,7 @@ class SetBook:
         self.sl_by_range: Dict[str, List[float]] = {}
         self.sl_grid_all: List[float] = list(SL_RATIOS)
         self.sl_min_ratio = 0.0
+        self.sl_max_ratio = 0.0
         self.exit_set_hold_bars = 0
         self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
         self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
@@ -2502,7 +2506,10 @@ class SetBook:
             ratios.extend(SL_RATIOS_LOW)
         # setSlMinRatio (0 = off): no Set is built under this SL ratio (x TP); the grid keeps what is left, never an empty grid
         self.sl_min_ratio = max(0.0, min(5.0, finite(ov.get("setSlMinRatio"), 0.0)))
-        kept = [r for r in ratios if r + 1e-9 >= self.sl_min_ratio]
+        # maxStopLossRatio (0 / absent = no cap): no base or Exit Set is built with an SL ratio above it; the per-range lists (slRatiosByRange) carry their own
+        # bounds and the per-range ceilings (slMaxByRange) still apply on top
+        self.sl_max_ratio = max(0.0, min(5.0, finite(ov.get("maxStopLossRatio"), 0.0)))
+        kept = [r for r in ratios if r + 1e-9 >= self.sl_min_ratio and (not self.sl_max_ratio or r <= self.sl_max_ratio + 1e-9)]
         self.sl_ratios = sorted(set(kept)) or sorted(set(ratios)) or list(SL_RATIOS)
         # slRatiosByRange {range: [ratios]}: a TP range with its own SL ratios (e.g. long / wide 0.2 .. 0.8 step 0.1); it replaces the global list and the
         # minimum ratio for the cells of that range only, every other range is unchanged
@@ -2651,6 +2658,10 @@ class SetBook:
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
         self.pf_step_auto_min = int(max(1, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))     # no minimum-orders gate (owner 2026-11-04): down to 1
+        # minPfStepAutoScope "set" (owner 2026-11-14): every config Set learns its OWN Auto floor from its own causal pairs; a Set with fewer than
+        # minPfSetAutoMin admitted orders uses the defaults (its TP step's floor, then the direction's pooled floor, then the manual floor)
+        self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "step").lower() == "set"
+        self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", 10))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
@@ -3808,8 +3819,10 @@ class SetBook:
         minPfStepAutoTol of the best one (independent of the manual ratio); a step without enough orders takes its direction's pooled floor, only a
         direction without any the manual floor (1 + TP% x ratio). Writes step_floor_auto and step_floor_report (with the source of each floor)."""
         if not (self.pf_by_step and self.pf_step_auto):
-            self.step_floor_auto, self.step_floor_report = {}, []
+            self.step_floor_auto, self.step_floor_report, self.set_floor_auto = {}, [], {}
             return
+        own_by_sig: Dict[int, List[Tuple[float, float]]] = {}
+        own_of: Dict[str, int] = {}
         cf = cost_as_frac(self.cost_pct)
         n_win = self.pf_step_auto_n
         until = math.nextafter(float(learn_before), float("-inf"))
@@ -3822,6 +3835,7 @@ class SetBook:
             sig = 0
             for r in rows:
                 sig = hash((sig, auto_evidence_key(r[0], r[1], r[4], float(r[0]) - float(r[5]), st.side)))
+            own_of[st.id] = sig
             if sig in seen:
                 continue                       # a copy of a Set already read (same orders): its pairs would only be counted again
             seen.add(sig)
@@ -3829,6 +3843,7 @@ class SetBook:
             nets = [finite(r[4]) - cf for r in rows]
             gains, losses = prefix_sums(nets)
             out = pairs.setdefault((self.auto_step_bucket(st), st.side), [])
+            first = len(out)
             for k, r in enumerate(rows):
                 e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
                 if e < n_win:
@@ -3838,6 +3853,17 @@ class SetBook:
                     out.append((gp / gl, nets[k]))
                 elif gp > 0:
                     out.append((99.0, nets[k]))
+            own_by_sig[sig] = out[first:]
+        own_floor: Dict[str, float] = {}
+        if self.pf_set_auto:
+            memo: Dict[int, Optional[float]] = {}
+            for sid, sig in own_of.items():
+                if sig not in memo:
+                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
+                    memo[sig] = got["floor"] if got else None
+                if memo[sig] is not None:
+                    own_floor[sid] = float(memo[sig])
+        self.set_floor_auto = own_floor
         learned: Dict[Tuple[int, int], float] = {}
         report: List[Dict[str, Any]] = []
         for side in ((1, -1) if self.direction_split else (0,)):
@@ -3941,6 +3967,9 @@ class SetBook:
                 return ranged
         high = self.pf_step_auto_high
         if self.pf_step_auto:
+            own = self.set_floor_auto.get(st.id) if self.pf_set_auto else None
+            if own is not None:
+                return min(float(own), high)          # the Set's own learned floor (minPfStepAutoScope "set")
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
                 return min(float(learned), high)

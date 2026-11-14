@@ -43,6 +43,19 @@ def sl_ratios_by_range():
     return ok, f"by range { {k: sorted(v) for k, v in seen.items()} }"
 
 
+def max_sl_ratio_caps_the_grid():
+    """maxStopLossRatio was only reported (coord_engine) and capped nothing; now no base / Exit Set is built above it, per-range lists keep their own bounds."""
+    from position_cost import tp_range_of
+    cap = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], maxStopLossRatio=1.4)
+    free = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], maxStopLossRatio=0)
+    L = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    rng = _book(setSlRatios=[0.5, 1.0, 1.5], maxStopLossRatio=1.4, slRatiosByRange={"long": L}, setStepMax=32)
+    top = max(st.sl_ratio for st in cap.by_idx if st.kind != "trail")
+    longs = {round(st.sl_ratio, 2) for st in rng.by_idx if st.kind != "trail" and tp_range_of(st.step) == "long"}
+    ok = cap.sl_ratios == [0.5, 0.75, 1.0, 1.25] and top <= 1.4 and free.sl_ratios == [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] and longs == set(L)
+    return ok, f"cap 1.4 -> {cap.sl_ratios} (largest built {top}); no cap -> {free.sl_ratios}; long range {sorted(longs)}"
+
+
 def tp_steps():
     steps = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1))
     tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
@@ -398,6 +411,7 @@ CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.25-2.5", sl_ratios),
     ("grid.long-and-wide-have-their-own-sl-ratios", sl_ratios_by_range),
+    ("grid.max-sl-ratio-caps-the-grid", max_sl_ratio_caps_the_grid),
     ("grid.min-sl-ratio-drops-lower-stops-and-exit-sets-hold-later", min_sl_ratio_and_exit_hold),
     ("grid.default-grid-follows-its-rules", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),

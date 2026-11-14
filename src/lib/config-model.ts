@@ -517,6 +517,8 @@ export type PulseOverlay = {
   minPfStepRatio: number;
   minPfStepAutoN: number;
   minPfStepAutoMin: number;
+  minPfStepAutoScope: "step" | "set";
+  minPfSetAutoMin: number;
   minPfStepAutoTol: number;
   /** The lowest floor Auto may choose (1.00 .. 2.00). */
   minPfStepAutoLow: number;
@@ -813,6 +815,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
   minPfStepAutoMin: 1,
+  minPfStepAutoScope: "set",
+  minPfSetAutoMin: 10,
   minPfStepAutoTol: 5,
   minPfStepAutoLow: 1,
   minPfStepAutoHigh: 2,
@@ -1085,6 +1089,8 @@ export type CtsSettings = {
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
   minPfStepAutoMin?: number;
+  minPfStepAutoScope?: string;
+  minPfSetAutoMin?: number;
   minPfStepAutoTol?: number;
   minPfStepAutoLow?: number;
   minPfStepAutoHigh?: number;
@@ -1608,6 +1614,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),
     minPfStepAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfStepAutoMin, 1)))),
+    minPfStepAutoScope: cts.minPfStepAutoScope === "step" ? "step" : "set",
+    minPfSetAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfSetAutoMin, 10)))),
     minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
     minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1) * 100) / 100)),
     minPfStepAutoHigh: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoHigh, 2) * 100) / 100)),

@@ -389,7 +389,7 @@
   "makerFeeRate": 0.0002,
   "takerFeeRate": 0.0005,
   "slippageFeeRatio": 0.1,
-  "minSlDistancePct": 0.1,
+  "minSlDistancePct": 0.3,
   "minPfByRange": {
     "micro": 1.01
   },
@@ -416,5 +416,7 @@
     ]
   },
   "replayWorkers": 3,
-  "signalCachePath": "/opt/grok-x01-pulse/signal-cache-bingx-x02.pkl"
+  "signalCachePath": "/opt/grok-x01-pulse/signal-cache-bingx-x02.pkl",
+  "minPfStepAutoScope": "set",
+  "minPfSetAutoMin": 10
 }

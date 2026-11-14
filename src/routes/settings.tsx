@@ -2036,7 +2036,7 @@ function SettingsPage() {
                     </div>
                   );
                 })}
-                <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
+                <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={0.25} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
                   label="Pos-count vol ratio"
@@ -2501,6 +2501,23 @@ function PfWindowControls({
         step={10}
         hint="admitted orders (one per distinct Set tape) a floor needs before Auto can choose it; with too few on a step Auto uses its direction's pooled floor, and only without any the manual value"
         onChange={(v) => patch("minPfStepAutoMin", v)}
+      />
+      <label className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={overlay.minPfStepAutoScope === "set"}
+          onChange={(e) => patch("minPfStepAutoScope", e.target.checked ? "set" : "step")}
+        />
+        Auto floor per config Set (each Set learns its own floor; with too few orders it uses the step, pooled, then manual floor)
+      </label>
+      <Slider
+        label="Auto per Set: orders a Set needs"
+        value={overlay.minPfSetAutoMin}
+        min={1}
+        max={200}
+        step={1}
+        hint="admitted orders of the Set itself before its own floor is used; fewer = the defaults"
+        onChange={(v) => patch("minPfSetAutoMin", v)}
       />
       <Slider
         label="Auto: tolerance to the best PF (%)"

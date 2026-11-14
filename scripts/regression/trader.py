@@ -3156,7 +3156,7 @@ def max_leverage_is_the_default_everywhere():
     ov = {n: json.load(open(os.path.join(PULSE, f"overlay-{n}.json"))) for n in ("bingx-x01", "bingx-x02", "bybit-x01", "bybit-x02")}
     on = {n: (o.get("useMaxLeverage") is True and o.get("leverageStopCap") is False) for n, o in ov.items()}
     engine_default = pt.leverage_settings({})[0] is True
-    desk = open(os.path.join(PULSE, "..", "..", "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    desk = open(os.path.join(__import__("common").ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
     desk_default = "  useMaxLeverage: true,\n" in desk
     return all(on.values()) and engine_default and desk_default, f"overlays {on}, engine default {engine_default}, desk default {desk_default}"
 

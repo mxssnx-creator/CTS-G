@@ -740,7 +740,7 @@ class AutoFloors:
             for t_, e_, x_, symbol in zip(tx, te, pp, symbols):
                 run = hash((run, se.auto_evidence_key(t_, symbol, x_, e_, st.side)))
                 sig.append(run)
-            self.sets.append(((book.auto_step_bucket(st), st.side), list(tx), sig, pairs))
+            self.sets.append(((book.auto_step_bucket(st), st.side), list(tx), sig, pairs, st.id))
 
     def apply(self, book, now: float) -> bool:
         """Learn before the evaluation window, matching native replay; refresh hourly."""
@@ -755,10 +755,17 @@ class AutoFloors:
         n_win = int(book.pf_step_auto_n)
         before: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
         seen: set = set()
-        for key, tx, sig, pairs in self.sets:
+        own: Dict[str, float] = {}
+        set_scope = bool(getattr(book, "pf_set_auto", False))
+        for key, tx, sig, pairs, sid in self.sets:
             cut = bisect.bisect_left(tx, boundary)        # native now - lookback; strict close boundary
             if cut <= n_win:
                 continue
+            if set_scope:
+                got_own = se.learn_step_floor([(p_, n_) for (t_, p_, n_) in pairs if t_ < boundary], book.pf_set_auto_min, book.pf_step_auto_tol,
+                                              book.step_auto_candidates())
+                if got_own:
+                    own[sid] = float(got_own["floor"])
             if sig[cut - 1] in seen:
                 continue                                  # a copy of a Set already read, on the orders the engine can see at this hour
             seen.add(sig[cut - 1])
@@ -775,6 +782,7 @@ class AutoFloors:
                 if got:
                     learned[(bucket, side)] = got["floor"]
         book.step_floor_auto = learned
+        book.set_floor_auto = own
         return True
 
 

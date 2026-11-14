@@ -419,5 +419,7 @@
       0.7,
       0.8
     ]
-  }
+  },
+  "minPfStepAutoScope": "set",
+  "minPfSetAutoMin": 10
 }
