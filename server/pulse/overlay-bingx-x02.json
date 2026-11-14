@@ -30,10 +30,10 @@
   "blockPauseCountRatio": 1,
   "blockActiveLive": true,
   "blockActiveReal": true,
-  "dcaEnabled": false,
+  "dcaEnabled": true,
   "dcaAuto": true,
   "dcaOnSets": false,
-  "dcaOnAxis": false,
+  "dcaOnAxis": true,
   "dcaMaxExposureX": 0,
   "symbols": [
     "*"
@@ -165,7 +165,7 @@
   ],
   "dcaAutoDeact": true,
   "dcaMinPf": 1.25,
-  "stratDca": false,
+  "stratDca": true,
   "indTypeState": true,
   "indTypeDirection": true,
   "indTypeMove": true,
@@ -206,9 +206,7 @@
   "volumeByPack": {},
   "volumeByKind": {},
   "volumeByRange": {},
-  "exitSetsByPack": {
-    "indications": false
-  },
+  "exitSetsByPack": {},
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,

@@ -348,7 +348,8 @@ def shipped_overlays_switch_off_the_indications_exit_sets():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     got = {_o.path.basename(f): _j.load(open(f)).get("exitSetsByPack") for f in files}
-    ok = all(v == {"indications": False} for v in got.values())
+    # owner 2026-11-14 ("run always all"): the x02 demo builds every pack's Exit Sets and lets the evals decide; every other overlay and preset keeps them off
+    ok = all(v == ({} if k == "overlay-bingx-x02.json" else {"indications": False}) for k, v in got.items())
     return ok, f"{got}"
 
 

@@ -225,10 +225,16 @@ def dca_is_off_by_default_with_set_and_axis_options_off_everywhere():
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
     hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
     ok_all, detail = hard, [f"kill_switch_not_thrown={hard}"]
+    # owner 2026-11-14 ("run always all ... the evals decide"): the x02 demo runs DCA behind its own Axis gate (dcaOnAxis), never unconditionally on Sets;
+    # x01 keeps it off
     for path in (X01, X02):
         ov = json.load(open(path))
-        good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
-                and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
+        if path == X02:
+            good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
+                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is True)
+        else:
+            good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
+                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
         ok_all = ok_all and good
         detail.append(f"{os.path.basename(path)}: enabled={ov.get('dcaEnabled')} auto={ov.get('dcaAuto')} onSets={ov.get('dcaOnSets')} onAxis={ov.get('dcaOnAxis')}")
     return ok_all, " ".join(detail)

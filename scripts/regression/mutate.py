@@ -91,6 +91,8 @@ MUTATIONS = [
      "set_engine.py", "            return int(getattr(self, \"exit_set_hold_bars\", 0) or 0)", "            return 0"),
     ("set auto: a Set's own floor is never used",
      "set_engine.py", "            own = self.set_floor_auto.get(st.id) if self.pf_set_auto else None", "            own = None"),
+    ("set auto: a Set's own floor is learned from the pooled pairs of its step",
+     "set_engine.py", "            own_by_sig[sig] = out[first:]", "            own_by_sig[sig] = list(out)"),
     ("exec gate: the last check before execution never blocks",
      "set_engine.py", "    r_ok = r_ok and x_ok", "    r_ok = r_ok"),
     ("block guard: adds are sent while the book's executed adds are in deficit",
