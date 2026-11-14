@@ -436,6 +436,23 @@
         "base",
         "trail"
       ]
+    },
+    {
+      "label": "signals 15/30m trailing",
+      "timeframes": [
+        15,
+        30
+      ],
+      "stepMin": 6,
+      "stepMax": 15,
+      "slRatios": [
+        0.5,
+        0.75,
+        1.0
+      ],
+      "types": [
+        "trail"
+      ]
     }
   ],
   "minPfStepAutoLow": 1.02

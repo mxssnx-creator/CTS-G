@@ -17,3 +17,16 @@ setting as shipped; development window first, the sealed window read once for th
 Both finalists beat the shipped default on both windows; x02 now runs the 1 / 5 min entry (more orders, better development figure). Neither is above 1 on the
 development window, the samples are 43-88 orders per window, and the effective (selection) PF read 3.4-5.2 in every arm: this is a better arm, not proof of an edge.
 Dev results were reproduced to the digit after the engine's memo change (the signals are bit-identical).
+
+## 15 / 30 min (later the same day)
+
+The 15 / 30 min packs read three days of 1m rows (`WINDOW_CAP_SLOW` 4,320; at 1,920 a 30 min pack had 64 bars, under two warm-ups of the 55-bar EMA). Every onset after one
+window agrees with `signal_sources.onsets` on the full history (158 of 158, ETH, 3 days; 381 signals over 36 packs). Same 8 symbols and windows as above:
+
+| arm (15 / 30 min) | development | sealed |
+|---|---|---|
+| steps 5-12, base + trailing | 0.852 / 69 / -4.28 % / 9 of 23 | 1.252 / 29 / +2.86 % / 8 of 12 |
+| steps 8-20, base + trailing | 1.175 / 77 / +7.22 % / 9 of 24 | 1.032 / 35 / +0.60 % / 7 of 11 |
+| **trailing only, steps 6-15** | **1.081 / 74 / +2.32 % / 12 of 24** | **1.332 / 33 / +3.14 % / 6 of 13** |
+
+Trailing-only 15 / 30 min is above 1 on both windows with the higher minimum: x02 runs it as a second entry next to the 1 / 5 min one. 29-77 orders per window: a small sample.

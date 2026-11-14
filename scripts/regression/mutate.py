@@ -99,6 +99,8 @@ MUTATIONS = [
      "signal_packs.py", "            for k, r in enumerate(bars[lo:i + 1])]", "            for k, r in enumerate(bars[lo:i + 2])]"),
     ("signal memo: a memo row drops the short signals",
      "set_engine.py", "for p, v in row.items() if v != _NO_SIGNAL}", "for p, v in row.items() if v != _NO_SIGNAL and v[0] > 0}"),
+    ("signals pack: 15 / 30 min read only the short window",
+     "signal_packs.py", "    return int(min(WINDOW_CAP_SLOW if tf >= 15 else WINDOW_CAP,", "    return int(min(WINDOW_CAP,"),
     ("signals pack: the fast aggregation drops the first minute's volume",
      "signal_packs.py", "min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk)])", "min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk[1:])])"),
     ("signals pack: an entry's step range and ratios are ignored",
