@@ -22,7 +22,8 @@ PREFIX = "sig-"
 KINDS = ("base", "exit", "trail")
 MAX_ENTRIES = 32
 MAX_PACKS = 72                 # 9 sources x 2 ranges x 4 timeframes
-WINDOW_CAP = 1920              # 1m rows a Signals pack reads at most (the Set history's default lookback)
+WINDOW_CAP = 1920              # 1m rows a Signals pack reads at most on the 1 / 5 min timeframes (the Set history's default lookback)
+WINDOW_CAP_SLOW = 4320         # on 15 / 30 min: three days, so the slow EMAs warm up (64 bars of 30 min starved them; owner 2026-11-14 "make also 15, 30 min work")
 CONF = 0.6
 
 
@@ -51,7 +52,7 @@ def window_minutes(pack: str) -> int:
     if p is None:
         return 0
     source, rng, tf = p
-    return int(min(WINDOW_CAP, (6 * warmup_bars(source, rng) + 2) * tf))
+    return int(min(WINDOW_CAP_SLOW if tf >= 15 else WINDOW_CAP, (6 * warmup_bars(source, rng) + 2) * tf))
 
 
 def _blocks(rows: Sequence[Tuple[float, ...]], tf: int) -> List[List[float]]:

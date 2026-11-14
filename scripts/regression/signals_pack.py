@@ -116,7 +116,21 @@ def the_signal_memo_keeps_only_signalling_packs_and_answers_the_same():
     return ok, f"identical {plain == first == again}; {width:.2f} of {len(packs)} packs per memo row; empty entries kept: {not no_empty}"
 
 
+def slow_timeframes_read_two_warm_ups():
+    """Owner 2026-11-14 ("make also 15, 30 min work"): every Signals pack reads at least two warm-ups of its own timeframe bars, so a 30 min EMA of 55 is warm
+    when it signals (the 1,920-row window gave a 30 min pack 64 bars)."""
+    short = []
+    for src in ss.SOURCES:
+        for rng in ss.RANGES:
+            for tf in ss.TIMEFRAMES:
+                pk = sp.pack_name(src, rng, tf)
+                if sp.window_minutes(pk) // tf < 2 * ss.warmup_bars(src, rng) + 2:
+                    short.append(pk)
+    return not short, f"packs under two warm-ups: {short[:5]}"
+
+
 CHECKS = [
+    ("signals-pack.slow-timeframes-read-two-warm-ups", slow_timeframes_read_two_warm_ups),
     ("signals-pack.the-signal-memo-keeps-only-signalling-packs-and-answers-the-same", the_signal_memo_keeps_only_signalling_packs_and_answers_the_same),
     ("signals-pack.blocks-equal-completed-bars", blocks_equal_completed_bars),
     ("signals-pack.the-signal-is-the-sources-onset-on-its-own-window", the_signal_is_the_sources_onset_on_its_own_window),
