@@ -51,7 +51,11 @@
   "volWeight": 0.3,
   "minStep": 10,
   "maxStopLossRatio": 0.8,
-  "setSlRatios": [0.25, 0.5, 0.75],
+  "setSlRatios": [
+    0.25,
+    0.5,
+    0.75
+  ],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
@@ -205,7 +209,7 @@
     "indications": false
   },
   "minPfStepAuto": false,
-  "minPfStepRatio": 0.1,
+  "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
   "minPfStepAutoTol": 5,
@@ -384,7 +388,7 @@
   "stratMulti": true,
   "stratBreakout": true,
   "manualCloseRestMin": 240,
-  "minPfStepAutoHigh": 1.15,
+  "minPfStepAutoHigh": 1.3,
   "trailMinLockPct": 0,
   "makerFeeRate": 0.0002,
   "takerFeeRate": 0.0005,
