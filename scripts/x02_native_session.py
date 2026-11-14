@@ -43,7 +43,7 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
-def frozen_overlay(raw, symbols, history_hours=18, symbol_count=50):
+def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50):
     if not isinstance(symbol_count, int) or not 1 <= symbol_count <= 50 or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
         not isinstance(s, str) or not s.endswith("-USDT") or not s.replace("-", "").isalnum() for s in symbols
     ):
@@ -381,7 +381,7 @@ def context_requirement(overlay):
     book.load(overlay)
     count = book.history_bars()
     if count > 72 * 60:
-        raise ValueError("test history including earlier stage context and warmup exceeds 72 hours")
+        raise ValueError(f"test history requires {count} minutes including earlier stage context and warmup; exceeds 72 hours")
     return count
 
 
@@ -625,7 +625,7 @@ def main(argv=None):
     ap.add_argument("--warmup-minutes", type=float, default=30)
     ap.add_argument("--cleanup-seconds", type=float, default=180)
     ap.add_argument("--heartbeat-seconds", type=float, default=60)
-    ap.add_argument("--history-hours", type=int, default=18,
+    ap.add_argument("--history-hours", type=int, default=12,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
     ap.add_argument("--execute", action="store_true")
     ap.add_argument('--admission',choices=('native','full-universe'),default='native')
