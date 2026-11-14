@@ -790,7 +790,24 @@ def effective_window_statistics_follow_range_settings():
     return ok, str(expected)
 
 
+def the_execution_window_is_the_last_step_of_real():
+    """execGateN (10 .. 35 step 5): after Base, Main and the Real window, the newest N results of the lane's Real Set must pass the same floor again; 0 is off.
+    Real window 30 passes on a long good run, the newest 10 are all losses: the exec window stops it and the Real window alone does not."""
+    from set_engine import StageParams, stage_verdicts
+    base = dict(base_long=5, base_short=0, gate_min=1, floor=1.25, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=False, main_n=8, short_on=False,
+                short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5,), real_on=True, real_n=30)
+    real = [1.0] * 20 + [-0.5] * 10               # window 30: gains 20, losses 5 -> PF 4; newest 10: PF 0; newest 15: 1.0; newest 20: 2.0
+    off = stage_verdicts([], real, [], 0, StageParams(**base))
+    out = {n: stage_verdicts([], real, [], 0, StageParams(**base, exec_n=n)) for n in (10, 15, 20, 25, 30, 35)}
+    good = [1.0] * 30 + [1.0] * 5
+    ok_all = stage_verdicts([], good, [], 0, StageParams(**base, exec_n=35))
+    ok = off["pos"] and not out[10]["pos"] and not out[10]["exec"] and out[10]["exec_pf"] == 0.0 and out[10]["real"] is False and not out[15]["pos"]
+    ok = ok and out[20]["pos"] and ok_all["pos"] and ok_all["exec"] and out[35]["exec_n"] == 30
+    return ok, f"off pos={off['pos']}; exec 10 pos={out[10]['pos']} pf={out[10]['exec_pf']}; exec 15 pos={out[15]['pos']}; exec 20/25/30/35 pos={[out[n]['pos'] for n in (20, 25, 30, 35)]}"
+
+
 CHECKS = [
+    ("stages.the-execution-window-is-the-last-step-of-real", the_execution_window_is_the_last_step_of_real),
     ("stages.effective-window-statistics-follow-range-settings", effective_window_statistics_follow_range_settings),
     ("stages.last-n-windows-are-independent-per-tp-range", last_n_windows_are_independent_per_tp_range),
     ("stages.independent-all-range-oracle", independent_all_range_stage_oracle),

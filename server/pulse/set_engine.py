@@ -521,6 +521,7 @@ class StageParams:
     long_floor: float = 0.0         # the minimum PF of a window longer than the last bound
     real_neg_n: int = 0             # Real Negative lane: its own last N (lastNByRange realNegN); 0 = the Real window real_n
     negative_filter: Optional[Dict[str, Any]] = None  # own Main / Real recent-loss veto, never inverted PnL
+    exec_n: int = 0                 # execGateN: the last step before execution -- the newest exec_n results of the lane's Real Set at the same floor (0 = off)
 
     def floor_for(self, n: int) -> float:
         """The minimum PF a window of n orders asks (minPfBySize: Micro / Minimal / Short / Medium / Long), or the one floor."""
@@ -866,12 +867,17 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
     r_ok, r_pf, r_n = last_ok(real, P.real_n)
     real_loss_ok = negative_filter_ok(real, P.negative_filter)
     r_ok = r_ok and real_loss_ok
+    x_ok, x_pf, x_n = last_ok(real, P.exec_n) if P.exec_n else (True, 0.0, 0)
+    r_ok = r_ok and x_ok
     q_ok, q_pf, q_n = last_ok(realneg, P.real_neg_n or P.real_n)
     realneg_loss_ok = negative_filter_ok(realneg, P.negative_filter)
     q_ok = q_ok and realneg_loss_ok
+    xq_ok, xq_pf, xq_n = last_ok(realneg, P.exec_n) if P.exec_n else (True, 0.0, 0)
+    q_ok = q_ok and xq_ok
     main_pass = (m_ok and s_ok and k_ok) if P.main_on else True
     return {"main": m_ok, "main_pf": m_pf, "main_n": m_n, "short": s_ok, "short_pf": s_pf, "short_n": s_n, "short_win": short_n,
             "minimal": k_ok, "minimal_n": k_n, "neg": neg, "mainLossFilter": main_loss_ok, "realLossFilter": real_loss_ok, "realNegLossFilter": realneg_loss_ok,
+            "exec": x_ok, "exec_pf": x_pf, "exec_n": x_n, "execneg": xq_ok, "execneg_pf": xq_pf, "execneg_n": xq_n,
             "real": r_ok, "real_pf": r_pf, "real_n": r_n, "realneg": q_ok, "realneg_pf": q_pf, "realneg_n": q_n,
             "pos": main_pass and (r_ok if P.real_on else True), "negl": neg and (q_ok if P.real_on else True)}
 
@@ -2186,6 +2192,7 @@ class SetBook:
         self.steps: List[int] = list(range(STEP_MIN, STEP_DEFAULT_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
+        self.exec_n = 0
         self.sl_by_range: Dict[str, List[float]] = {}
         self.sl_grid_all: List[float] = list(SL_RATIOS)
         self.sl_min_ratio = 0.0
@@ -2359,6 +2366,7 @@ class SetBook:
         self.neg_on = self.stages_on and bool(ov.get("mainNegEnabled", True))
         self.neg_windows = parse_windows(ov.get("mainNegWindows"), MAIN_NEG_WINDOWS)
         self.realst_on = self.stages_on and bool(ov.get("realGateEnabled", True))
+        self.exec_n = max(0, min(200, int(num(ov, "execGateN", 0))))      # the last-N check at the end of Real, right before execution / mirroring (0 = off)
         self.realst_n = max(1, min(200, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))     # 1..200: the ongoing window may be a single result
         self.last_n_by_range = last_n_by_range_of(ov.get("lastNByRange"))
         self.gate_window_max = max([self.gate_window] + [int(o["baseLong"]) for o in self.last_n_by_range.values() if "baseLong" in o])
@@ -4008,7 +4016,7 @@ class SetBook:
                            full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive,
                            negative_filter=policy.get("negativeFilter"),
                            base_min_both=self.base_min_both, main_min_both=self.main_min_both,
-                           base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
+                           base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg, exec_n=self.exec_n)
 
     def _chain_of(self, st: SetState, full: Sequence[tuple], capture_evidence: bool = False,
                   now: Optional[float] = None, relation_rows: bool = False) -> Dict[str, Any]:
