@@ -39,6 +39,16 @@
   (i) **Desk insight sections** (`/results`, `src/components/insights-board.tsx`, helpers `src/lib/insights.ts` + tests): Indications (effective PF / validated share per pass,
   per-pack table), Strategies (executed by pack and exit, group-gate scopes), Stages (funnel with each population's PF next to the executed PF, last-N windows, step floors),
   Live (lanes, skipped entries, downtime closes, simulated vs live), Signals (source x range x timeframe grid, executed). `step-pf-view.test.ts` was never run by `npm test`; it is now.
+  (j) **Floors above 1 everywhere** (owner "Real PF over 1"): live x02 had three Sets valid with a Real window PF of exactly 1.00 at a learned Auto floor of 1.00;
+  x01 / x02 / desk now ship `minPfStepAutoLow` 1.02 (fixtures keep 1.0), check `step-pf.shipped-floors-are-all-above-one` (lowest floor any window can ask: 1.01, the Micro range).
+  (k) **Speed and memory, measured** (one symbol, x02 grid, 11,228 Sets): 255 of 262 s of a replay is signal computation, 218 s of it the extra packs' group votes
+  (`indication_lib`, about 2 million single indicators per symbol, rolling higher-timeframe windows recomputed every minute); Signals packs 31 s. Bit-identical fixes
+  (golden unchanged): Signals aggregation by slices (`signal_packs._blocks`, check `signals-pack.blocks-equal-completed-bars`), closes of an aggregated series built once,
+  `_wma` memoised, an exact byte key for `indication_extra._agg`: the signal pass 28.4 -> 25.5 s. **Memory:** the signal memo held one dict of all 44 packs per bar and
+  symbol (x02 grew 1.51 -> 1.60 -> 1.77 GB over three passes); a memo row now keeps only the packs that signalled (8 of 44 on SOL), answers identical (check
+  `signals-pack.the-signal-memo-keeps-only-signalling-packs-and-answers-the-same`, mutant `signal memo:`). The Python heap of repeated passes stays flat (25 MB, no
+  leak found); `malloc_trim` freed nothing measurable. **Not done:** streaming (O(1) per bar) indicators would cut the 218 s most (talipp / Hexital-style
+  updates) but change the floating-point order of every indicator, so every signal and the golden fingerprint: the owner's decision.
   (g) **Engine stop:** SIGTERM ended only the main thread and worker threads kept trading (seen on x01 and x02); `_term` now ends the process (`os._exit(0)`), state files
   and venue-side stops / targets stay.
 
