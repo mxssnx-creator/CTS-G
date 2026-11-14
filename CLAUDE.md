@@ -34,8 +34,9 @@
   `signal_sources.py` becomes pack `sig-<source>-<range>-t<tf>` with its own Sets, stage chain, last-N windows, lanes and execution; floor `minPfSignals` 2.2 in every window).
   The signal on a 1m bar is the source state's onset on the timeframe bar that bar completes, read from the pack's own window (6 warm-ups, at most 1,920 rows; agrees with
   `signal_sources.onsets` on the full history on 3,637 of 3,638 onsets after one window). Checks `signals-pack.*` (4), mutants `signals pack:` (3). Desk: Settings "Signals"
-  toggle + editor (`src/components/signal-config-editor.tsx`). x02 runs the default entry (5 / 15 min, steps 5 - 12, SL 0.5 / 0.75 / 1.0, base + trailing); fixtures pin it off.
-  Not measured yet: the offline Signals research (`signal_replay.py`) never reached PF 1.
+  toggle + editor (`src/components/signal-config-editor.tsx`). x02 runs the 1 / 5 min entry (steps 5 - 12, SL 0.5 / 0.75 / 1.0, base + trailing); fixtures pin it off. Sweep (`docs/verification/signals-pack-20261114.md`, 8 symbols,
+  executed PF dev / sealed): default 5 / 15 min 0.663 / 0.650, 1 / 5 min 0.909 / 1.224 (88 / 71 orders), trailing only 0.863 / 1.370, steps 2 - 6 1.875 / 0.178 (7 / 19 orders):
+  1 / 5 min and trailing-only beat the default on both windows; neither is above 1 on development.
   (i) **Desk insight sections** (`/results`, `src/components/insights-board.tsx`, helpers `src/lib/insights.ts` + tests): Indications (effective PF / validated share per pass,
   per-pack table), Strategies (executed by pack and exit, group-gate scopes), Stages (funnel with each population's PF next to the executed PF, last-N windows, step floors),
   Live (lanes, skipped entries, downtime closes, simulated vs live), Signals (source x range x timeframe grid, executed). `step-pf-view.test.ts` was never run by `npm test`; it is now.
