@@ -30,4 +30,49 @@ def parallel_signals_equal_sequential():
     return ok, f"equal (plain, cache first, cache second) for n=60 and n=220: {results}; pool rows {None if direct is None else len(direct)}, off {off}, below minimum {small}"
 
 
-CHECKS = [("signalpool.parallel-signals-equal-sequential", parallel_signals_equal_sequential)]
+def memo_survives_a_restart():
+    """The signal memo kept on disk (overlay signalCachePath) answers exactly what a cold replay computes: a second process-equivalent SetBook with the same settings reads the saved
+    windows and computes only the bars that are new, a book with other settings (another salt) reads nothing, and the Sets' rows are identical with and without the file."""
+    import os, tempfile, time
+    import set_engine as se
+    from correctness import SMALL, T0
+    calls = {"n": 0}
+    real = se.bar_signal
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    def run(path, extra_bars=0, **kw):
+        b = SetBook()
+        b.load(overlay(**{**SMALL, "holdEnabled": False, "setStepAdapt": False, **SMALL_PACKS, "signalCachePath": path, **kw}))
+        for i in range(2):
+            sym = f"M{i}-USDT"
+            b.bars[sym] = synth_bars(i, 360 + extra_bars, drift=.0004)
+            b.bar_t[sym] = T0 - 60
+        calls["n"] = 0
+        b.replay_all(now=T0)
+        rows = {st.id: len(st.hist) for st in b.by_idx[:60]}
+        return b, calls["n"], rows
+    se.bar_signal = counting
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "sig.pkl")
+            cold, n_cold, rows_cold = run(path)
+            cold._save_sig_cache_maybe(force=True)
+            for _ in range(100):
+                if os.path.exists(path):
+                    break
+                time.sleep(0.05)
+            time.sleep(0.3)
+            warm, n_warm, rows_warm = run(path)
+            other, n_other, _ = run(path, stratMulti=False)          # other packs, other salt: the file must not be read (a gate setting such as setMinPf is not part of a signal and rightly keeps the memo)
+            plain, n_plain, rows_plain = run("")
+    finally:
+        se.bar_signal = real
+    ok = n_cold > 0 and n_warm == 0 and n_other == n_cold and n_plain == n_cold and rows_warm == rows_cold == rows_plain
+    return ok, f"bar signals computed: cold {n_cold}, warm from the file {n_warm}, other settings {n_other}, no file {n_plain}; Set rows equal {rows_warm == rows_cold == rows_plain}"
+
+
+CHECKS = [("signalpool.parallel-signals-equal-sequential", parallel_signals_equal_sequential),
+          ("signalpool.signal-memo-survives-a-restart", memo_survives_a_restart)]

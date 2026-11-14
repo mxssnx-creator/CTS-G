@@ -10,6 +10,7 @@ keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
 import copy
+import os
 
 import re
 import bisect
@@ -122,7 +123,7 @@ GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 4320          # 72 h of 1m bars: three days of pre-history (owner 2026-11-02; was 1920 = 32 h, before that 960)
+LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (owner 2026-11-12, defaults-20261112.json: 32 h; 2026-11-02 was 72 h = 4320, before that 1920): the stage context a cold rebuild must replay is 3 x this
 LOOKBACK_MAX = 4320              # three days of completed 1m bars
 LOOKBACK_SAMPLE_TARGET = 12      # collection target, not an extra admission gate
 # dedupe keys kept for live closes: a close re-delivered after this many newer closes is counted again
@@ -1102,6 +1103,51 @@ def bar_signal(
         if pk.startswith(EXTRA_INDICATOR_PREFIX) and pk not in imported:
             row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
     return row
+
+
+def stable_salt(settings_json: str, packs: Sequence[str]) -> int:
+    """The memo salt of a settings + packs pair, the same in every process (hash() of a str is randomised per process, which made a saved memo unreadable after a restart)."""
+    import hashlib
+    h = hashlib.blake2b(digest_size=8)
+    h.update(settings_json.encode("utf-8", "replace"))
+    h.update(b"\0" + "|".join(packs).encode("utf-8", "replace"))
+    return int.from_bytes(h.digest(), "big", signed=True)
+
+
+SIG_CACHE_VERSION = 1
+
+
+def save_signal_cache(path: str, salt: int, caches: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]]) -> int:
+    """Write the signal memo atomically ({symbol: {window key: {pack: (direction, confidence, why)}}} for one salt). Returns the entries written; any failure writes nothing."""
+    import pickle
+    import tempfile
+    try:
+        blob = {"v": SIG_CACHE_VERSION, "salt": salt, "symbols": {sym: dict(c) for sym, c in caches.items() if c}}
+        d = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".sigcache-", dir=d)
+        with os.fdopen(fd, "wb") as fh:
+            pickle.dump(blob, fh, protocol=5)
+        os.replace(tmp, path)
+        return sum(len(c) for c in blob["symbols"].values())
+    except Exception:
+        return 0
+
+
+def load_signal_cache(path: str, salt: int) -> Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]]:
+    """The saved memo when its version and salt match the current settings and packs, else {} (a different configuration never reads another's signals)."""
+    import pickle
+    try:
+        with open(path, "rb") as fh:
+            blob = pickle.load(fh)
+        if not isinstance(blob, dict) or blob.get("v") != SIG_CACHE_VERSION or blob.get("salt") != salt:
+            return {}
+        out = {}
+        for sym, c in (blob.get("symbols") or {}).items():
+            if isinstance(sym, str) and isinstance(c, dict):
+                out[sym] = c
+        return out
+    except Exception:
+        return {}
 
 
 def pack_signals(
@@ -2149,6 +2195,8 @@ class SetBook:
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
         self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
+        self.sig_cache_path = ""             # signalCachePath: where the signal memo is kept between restarts ("" = memory only)
+        self._sig_meta = {"loaded": False, "saved_at": 0.0, "salt": 0}   # shared with the replay copies (copy.copy keeps the reference): flags set during a replay reach the book
         # shared Set state is touched by the replay thread and the trading thread: one re-entrant lock
         self._lock = threading.RLock()
         self._replay_local = threading.local()
@@ -2527,6 +2575,7 @@ class SetBook:
         self.relation_cfg = rel_cfg
         # the profit group gate (entry-time only: it changes no tape, so it is not part of the evaluation signature)
         self.group_gate = bool(ov.get("groupGate", False))
+        self.sig_cache_path = str(ov.get("signalCachePath") or "")
         self.group_gate_side = "pooled" if str(ov.get("groupGateScope") or "group").lower() == "side" else bool(ov.get("groupGateSide", False))   # "pooled": one record per direction
         try:
             self.replay_workers = max(0, min(6, int(float(ov.get("replayWorkers") or 0))))
@@ -3501,6 +3550,22 @@ class SetBook:
             self.last_run = time.time()
             self._running = False
             self._after_pass()
+            self._save_sig_cache_maybe()
+
+    def _save_sig_cache_maybe(self, force: bool = False) -> None:
+        """Keep the signal memo on disk (overlay signalCachePath) so a restart replays only the bars it has not seen: at most every 10 minutes (the first save 2 minutes after
+        the first complete pass), in a background thread over a shallow copy, never in the replay's way. Nothing here can change a signal: the memo is keyed by the window's content."""
+        path = self.sig_cache_path
+        if not path or not self._sig_cache:
+            return
+        now = time.time()
+        meta = self._sig_meta
+        if not force and now - meta["saved_at"] < (600.0 if meta["saved_at"] else 120.0):
+            return
+        meta["saved_at"] = now
+        snap = {sym: dict(c) for sym, c in self._sig_cache.items() if c}
+        salt = meta["salt"]
+        threading.Thread(target=save_signal_cache, args=(path, salt, snap), name="sigcache-save", daemon=True).start()
 
     def _replay_market(self):
         return getattr(self._replay_local, 'market', (self.bars, self.bar_t))
@@ -3515,7 +3580,12 @@ class SetBook:
         if latest_close > now + 1e-6:
             raise ValueError("completed bar ends after replay time")
         base_ts = latest_close - (n - 1) * BAR_S
-        salt = hash((json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs))))   # a memo entry holds only its packs
+        salt = stable_salt(json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs)))   # a memo entry holds only its packs; the same value in every process
+        self._sig_meta["salt"] = salt
+        if self.sig_cache_path and not self._sig_meta["loaded"]:
+            self._sig_meta["loaded"] = True
+            for sym, c in load_signal_cache(self.sig_cache_path, salt).items():
+                self._sig_cache.setdefault(sym, c)        # a saved window answers exactly what the same window answered before the restart
         cache = self._sig_cache.setdefault(symbol, {})
         settings=dict(self.ind_settings)
         settings["portedSymbol"]=symbol
@@ -5618,7 +5688,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("gate-boundary-1.10", okb and abs(pfb - 1.10) < 1e-6, f"pf={pfb} eligible={okb}"))
     okf, pff, nf = _gate(_pf_rows(29, 1.50))
     out.append(("gate-min-30-orders", (not okf) and nf == 29, f"pf={pff} n={nf} eligible={okf}"))
-    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 4320 and SetBook().lookback == 4320)
+    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 1920 and SetBook().lookback == 1920)
     out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
     # R1: a live close is stored on the replay unit (net fraction), not USDT
     lv = SetBook(); lv.load({**_SELFTEST_PIN, "positionCostPct": 0.15, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})

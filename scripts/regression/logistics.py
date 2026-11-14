@@ -24,7 +24,7 @@ def overlays_share_grid_contract():
     detail = []
     for path in (X01, X02):
         ov = json.load(open(path))
-        want = {"setMinStep": 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 4320,
+        want = {"setMinStep": 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.25, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
@@ -35,7 +35,7 @@ def overlays_share_grid_contract():
 
 def desk_defaults_match_engine():
     src = open(CONFIG_MODEL, encoding="utf-8").read()
-    need = [r"setMinStep: 2,", r"setStepMax: TP_STEP_DEFAULT_MAX,", r"export const TP_STEP_DEFAULT_MAX = 32;", r"export const TP_STEP_MAX = 50;", r"trailMinStep: 3,", r"histLookbackBars: 4320",
+    need = [r"setMinStep: 2,", r"setStepMax: TP_STEP_DEFAULT_MAX,", r"export const TP_STEP_DEFAULT_MAX = 32;", r"export const TP_STEP_MAX = 50;", r"trailMinStep: 3,", r"histLookbackBars: 1920",
             r"setMinPf: GATE_MIN_PF_DEFAULT,", r"export const SL_SET_RATIOS"]
     missing = [p for p in need if not re.search(p, src)]
     # the desk fallback and the engine gate default are one number kept in two files

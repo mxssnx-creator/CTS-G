@@ -84,6 +84,10 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["stratReversion"], ov["stratFlow"], ov["stratMulti"] = False, False, False
     ov["groupGate"], ov["groupGateSide"], ov["groupGateN"], ov["groupGateHours"], ov["groupGatePf"], ov["groupGateMin"] = False, False, 10, 12, 1.0, 1
     ov["maxStopLossRatio"] = 2.5
+    ov["realGateN"] = 15           # the shipped x01 / x02 ask the last 8 Real orders per lane (owner 2026-11-14); fixtures keep the window their counts were pinned with
+    ov["histLookbackBars"], ov["histLookbackMax"] = 4320, 4320
+    ov["histLookbackAuto"] = True   # x01 holds its 32 h lookback (no automatic growth); the growth checks and the fixtures keep it on   # likewise the earlier 3-day lookback (the shipped x01 / x02: 32 h, 1920 bars)
+    ov["replayWorkers"], ov["signalCachePath"] = 0, ""   # fixtures compute their signals in the test process and keep no memo file (the shipped x01 runs worker processes and a memo file)
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov
