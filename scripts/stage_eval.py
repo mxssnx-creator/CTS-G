@@ -857,10 +857,12 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     ghist: Dict[str, List[Tuple[float, float]]] = {}
     gside = getattr(book, "group_gate_side", False)
 
+    cg = bool(getattr(book, "config_gate", False))      # the config gate: one configuration Set's own executed results (se.config_key), the same rule
+
     def group_ok(st_, lane_: str, now_: float) -> bool:
-        if gg is None:
+        if gg is None and not cg:
             return True
-        return se.group_verdict(ghist.get(se.set_group(st_.id, lane_, gside), ()), now_, gg[0], gg[1], gg[2], gg[3])[0]
+        return se.exec_gates_allow(book, lambda k: ghist.get(k, ()), st_.id, lane_, now_)[0]
 
     # with a per-candidate rule (Axis) a Set open on both lanes is a candidate of each, as the engine lists it; without one the first lane always takes it
     both_lanes = axis_coord is not None or axis_pick is not None
@@ -963,7 +965,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # SetBook.pick_sequence_for (trailPick / trailPickByPack: lanes outside, or kinds outside for first-any)
                         pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
                                                        key=lambda r: r[0], reverse=True)]
-                        if gg is not None:
+                        if gg is not None or cg:
                             pool = [st_ for st_ in pool if group_ok(st_, lane_, entry_t)]
                         if pool:
                             lane_pick = lane_
@@ -1032,6 +1034,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 opened.append((rec["t"], st.id, lane_pick))
                 if gg is not None:
                     ghist.setdefault(se.set_group(st.id, lane_pick, gside), []).append((rec["t"], rec["net"]))
+                if cg:
+                    ghist.setdefault(se.config_key(st.id, lane_pick), []).append((rec["t"], rec["net"]))
     return executed
 
 

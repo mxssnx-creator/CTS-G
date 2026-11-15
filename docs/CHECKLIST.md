@@ -50,6 +50,11 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
       (after the 15 / 30 min x relation screen on 25 symbols; same rule: four windows where data exists, then trade_sim dev + sealed against the shipped setting).
 - [ ] Trend and break indications calculated over longer distances and timeframes (owner, "later"): longer lookbacks (n 30 .. 120) and 15 / 30 / 60 min series for the
       trend / break families, for the Normal / Long / Wide targets (the CTS-A-O trend tactics on 5 min are the first lead).
+- [ ] Axis like the projects where it works (owner): every position-window calculation (prev, last, ongoing / next, pause) and every configuration of them as its own
+      independent processing, with a volume ratio relative to the base config Set, fully working and fast. Other projects' records: no Axis above 1 anywhere
+      (CTS-C 0 - 28 closes per family at 0.44 - 0.56; CTS-A-O / CTS-X "Axis" is a funded-leg ladder, PF 0.065 - 0.22); here prev-only 1.227 / 1.084 is the best measured.
+- [ ] Block strategy as in the projects where it works positively (owner, "later"): CTS-C's 50-symbol run shows Block below Normal for most families; read CTS-A-O / CTS-K-N
+      Block records, port the logistic of any positive one, measure dev + sealed.
 - [ ] Axis as in the other projects where it works (owner, "later"): re-read CTS-C / CTS-A-O / CTS-X / CTS-K-N Axis code and records, build the working form here
       with its full progression, measure against no Axis and the current Axis on both windows. Current grid: shipped all four 1.000 / 0.783, prev 4 alone 1.227 / 1.084,
       no Axis 1.054 / 1.082 (sealed cont / Block v2 arms rerunning).
@@ -62,6 +67,11 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 ## Tactics / coordinations (chain10, corrected base)
 - [~] Trailing first (`trailPick` first-any), trailing + fixed together, Real Negative lane first, Base minimal window "newest negative",
       group gate off, Auto floor low 1.2, execution last-10 check, flow pack off, multi pack off.
+
+## Gates
+- [x] Config gate (`configGate`, `configGateN` / `Pf` / `Hours` / `Min`, default off): the group gate's rule on one configuration Set's own executed results (Set x lane);
+      live (both entry paths) and simulator share `set_engine.exec_gates_allow`. Check `trader.config-gate-blocks-a-losing-config-and-only-that-config`, mutant `config gate:`.
+- [~] Measured on 4 symbols, dev + sealed (N 3 / 5 / 10, floor 1.0 / 1.2, with and without the group gate): running (chain16).
 
 ## Axis
 - [x] x02 runs all four Axis controls (prev 12, last 4, cont 8, pause 8).

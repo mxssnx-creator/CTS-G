@@ -261,6 +261,28 @@ def group_verdict(rows, now: float, n: int = 10, floor: float = 1.0, hours: floa
         return True, None, len(window)
     pf = gain / loss
     return pf + 1e-12 >= float(floor), pf, len(window)
+def config_key(set_id: str, lane: str = "pos") -> str:
+    """The key of one configuration Set's own executed results for the config gate (configGate, owner 2026-11-15 "create also config gates not only group gates"): the
+    exact Set id and lane, so a losing configuration closes only itself while its siblings of the same group keep opening."""
+    return f"cfg:{set_id}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+
+
+def exec_gates_allow(book: Any, rows_of: Callable[[str], Any], set_id: str, lane: str, now: float) -> Tuple[bool, str, Optional[float], int]:
+    """The executed-results gates of one candidate: the group gate (groupGate) and the config gate (configGate), each on the results its own key holds
+    (group_verdict). Returns (allow, the blocking key or "", its PF, its count); both off = allow."""
+    if getattr(book, "group_gate", False):
+        key = set_group(set_id, lane, getattr(book, "group_gate_side", False))
+        ok, pf, k = group_verdict(rows_of(key) or (), now, book.group_gate_n, book.group_gate_pf, book.group_gate_hours, book.group_gate_min)
+        if not ok:
+            return False, key, pf, k
+    if getattr(book, "config_gate", False):
+        key = config_key(set_id, lane)
+        ok, pf, k = group_verdict(rows_of(key) or (), now, book.config_gate_n, book.config_gate_pf, book.config_gate_hours, book.config_gate_min)
+        if not ok:
+            return False, key, pf, k
+    return True, "", None, 0
+
+
 SET_KINDS = ("base", "exit", "trail")
 RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
 RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
@@ -2432,6 +2454,7 @@ class SetBook:
         self.replay_workers = 0              # replayWorkers: worker processes for the per-bar signals of a replay (0 = off, the engine's own process computes them)
         self.group_gate_side = False         # groupGateSide: the group key also carries the Set's direction (long / short groups judged apart)
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
+        self.config_gate, self.config_gate_n, self.config_gate_pf, self.config_gate_hours, self.config_gate_min = False, 5, 1.0, 24.0, 1   # configGate (config_key)
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
         self.hist_honor_tp = True
@@ -2898,6 +2921,12 @@ class SetBook:
         self.group_gate_pf = _num("groupGatePf", 1.0, 0.5, 3.0)
         self.group_gate_hours = _num("groupGateHours", 12.0, 1.0, 72.0)
         self.group_gate_min = int(_num("groupGateMin", 1, 1, 50))
+        # the config gate: the same rule on one configuration Set's own executed results (config_key), next to the group gate (default off)
+        self.config_gate = bool(ov.get("configGate", False))
+        self.config_gate_n = int(_num("configGateN", 5, 1, 200))
+        self.config_gate_pf = _num("configGatePf", 1.0, 0.5, 3.0)
+        self.config_gate_hours = _num("configGateHours", 24.0, 1.0, 72.0)
+        self.config_gate_min = int(_num("configGateMin", 1, 1, 50))
         self.trails = [t for t in self.trails if trailing_enabled(ov, tp_range_of(int(round(t[1] / TP_UNIT_PCT))))]
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))

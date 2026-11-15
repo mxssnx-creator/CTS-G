@@ -3220,7 +3220,10 @@ def the_side_aware_group_gate_judges_long_and_short_groups_apart():
     default_book = SetBook()
     default_book.load({"groupGate": True})
     src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
-    wired = src.count("group_gate_side") >= 4
+    import inspect as _insp
+    import set_engine as _se
+    # the live paths read the side through set_engine.exec_gates_allow (shared with the config gate, 2026-11-15) and record it in _exec_note
+    wired = (src.count("group_gate_side") >= 1 and "exec_gates_allow(" in src and "group_gate_side" in _insp.getsource(_se.exec_gates_allow))
     # pooled scope (groupGateScope "side", CTS-A-O's engine direction acceptance): one record per direction, whatever the pack, kind, range or lane
     pooled_rec = {set_group(long_id, "pos", "pooled"): list(losses)}
     other_long, other_short = "flow:L:1m:tr0.80:0.70", "flow:S:1m:tr0.80:0.70"
@@ -3733,12 +3736,68 @@ def a_dca_add_learns_the_venues_minimum_order():
     return bool(sent) and after == 45.77 and before < 45.77, f"sent {sent}; contract minimum {before} -> {after}"
 
 
+def the_config_gate_blocks_a_losing_config_and_only_that_config():
+    """configGate (owner 2026-11-15 "create also config gates not only group gates"): the group gate's rule on ONE configuration Set's own executed results
+    (config_key = Set id x lane). Two Sets of the same group: the losing one stops opening, its sibling of the same group keeps opening (the group gate would close both);
+    with the Axis on and off; off by default; the simulator reads the same exec_gates_allow."""
+    from coord_engine import Coordinator
+    from set_engine import SetBook, config_key, exec_gates_allow, set_group
+    from position_cost import tp_range_of
+    import time as _t
+
+    def build(cfg_gate, grp_gate, axes):
+        book = SetBook()
+        book.load({"stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0, "minPfBySize": False, "minPfByStep": False, "directionMode": "both", "pauseMode": "off",
+                   "setMinPf": 1.1, "setMinStep": 2, "setStepMax": 3, "setSlRatios": [0.5], "trailVariants": ["0.3:0.1"], "stratGeneral": True, "stratIndications": False,
+                   "groupGate": grp_gate, "groupGateN": 5, "groupGatePf": 1.0, "groupGateHours": 12,
+                   "configGate": cfg_gate, "configGateN": 5, "configGatePf": 1.0, "configGateHours": 12})
+        rows = [st for st in book.by_idx if st.pack == "general" and st.kind == "base" and tp_range_of(st.step) == "micro"]
+        a, b = rows[0], rows[1]
+        book.by_idx = [a, b]
+        book.sets = {st.id: st for st in book.by_idx}
+        now = _t.time()
+        for st, score in ((a, 2.0), (b, 1.5)):
+            st.active, st.locked, st.last_error = True, False, ""
+            st.gate_n, st.gate_pf, st.n = 20, score, 20
+            st.max_dd_s, st.score_at = 0, now
+            st.exe = [(now - 60 * i, 0.004) for i in range(4, 0, -1)]
+        coord = Coordinator()
+        coord.load({}, {"axisLastEnabled": axes, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": False, "minPf": 1.1})
+        p = _bare_pulse()
+        p.sets, p.coord, p.open, p.position_cost_pct = book, coord, {}, 0.12
+        return p, a, b, now
+
+    def close(p, st, net, t_):
+        p._exec_note(pt.Closed(t_, "A-USDT", "LONG", 1.0, 1.0, 1.0, net, 0.0, "sl" if net < 0 else "tp", 60.0, set_id=st.id, pack="general", lane="pos", net_pnl_pct=net))
+    out = {}
+    for axes in (True, False):
+        res = {}
+        for name, cfg_gate, grp_gate in (("config", True, False), ("group", False, True), ("off", False, False)):
+            p, a, b, now = build(cfg_gate, grp_gate, axes)
+            same_group = set_group(a.id) == set_group(b.id)
+            for i in range(3):
+                close(p, a, -0.02, now - 600 + i)
+            res[name] = (same_group, getattr(p._scope_choice("general")[0], "id", None) == b.id, p._scope_choice("general")[0] is None,
+                         getattr(p._scope_choice("general")[0], "id", None) == a.id)
+        out[axes] = res
+    book = SetBook()
+    book.load({"configGate": True, "configGateN": 3})
+    store = {config_key("x:1", "pos"): [(100.0, -0.01), (110.0, -0.02)]}
+    sim_block = exec_gates_allow(book, store.get, "x:1", "pos", 120.0)
+    sim_other = exec_gates_allow(book, store.get, "x:2", "pos", 120.0)
+    default_off = SetBook().config_gate is False
+    ok = (all(r["config"][0] and r["config"][1] and r["group"][2] and r["off"][3] for r in out.values())
+          and not sim_block[0] and sim_block[1] == config_key("x:1", "pos") and sim_other[0] and default_off)
+    return ok, f"(same group, sibling runs / none runs / losing runs): {out}; simulator rule block {sim_block[:2]}, other {sim_other[0]}; off by default {default_off}"
+
+
 CHECKS = [
     ("trader.alternate-lane-keeps-the-executed-group-gate", alternate_lane_keeps_the_executed_group_gate),
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
     ("trader.closes-made-while-the-engine-was-down-are-recorded-but-not-scored", closes_made_while_the_engine_was_down_are_recorded_but_not_scored),
     ("trader.live-executed-pf-equals-the-plain-reading-of-the-trades-file", live_executed_pf_equals_the_plain_reading_of_the_trades_file),
     ("trader.group-gate-blocks-a-losing-group-and-only-that-group", the_group_gate_blocks_a_losing_group_and_only_that_group),
+    ("trader.config-gate-blocks-a-losing-config-and-only-that-config", the_config_gate_blocks_a_losing_config_and_only_that_config),
     ("trader.side-aware-group-gate-judges-long-and-short-groups-apart", the_side_aware_group_gate_judges_long_and_short_groups_apart),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),

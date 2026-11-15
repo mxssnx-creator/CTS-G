@@ -39,7 +39,7 @@ from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
+from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, config_key, exec_gates_allow, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -3837,13 +3837,12 @@ class Pulse:
         if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and any(ax.enabled for ax in self.coord.axes.values()):
             blocked = []
             def allows(st, lane):
-                if self.sets.group_gate:
-                    gkey = set_group(st.id, lane, getattr(self.sets, "group_gate_side", False))
-                    g_ok, g_pf, g_k = group_verdict(self.__dict__.get("group_exec", {}).get(gkey, ()), time.time(), self.sets.group_gate_n,
-                                                    self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)
-                    self.coord.scopes[gkey] = {"allow": g_ok, "orders": g_k, "pf": g_pf, "source": "executed", "minPf": self.sets.group_gate_pf,
-                                               "reasons": [] if g_ok else [f"group newest {g_k} PF {g_pf:.2f}<{self.sets.group_gate_pf:g}"]}
+                if self.sets.group_gate or getattr(self.sets, "config_gate", False):
+                    g_ok, gkey, g_pf, g_k = exec_gates_allow(self.sets, self.__dict__.get("group_exec", {}).get, st.id, lane, time.time())
                     if not g_ok:
+                        floor_g = self.sets.config_gate_pf if gkey.startswith("cfg:") else self.sets.group_gate_pf
+                        self.coord.scopes[gkey] = {"allow": False, "orders": g_k, "pf": g_pf, "source": "executed", "minPf": floor_g,
+                                                   "reasons": [f"{'config' if gkey.startswith('cfg:') else 'group'} newest {g_k} PF {g_pf:.2f}<{floor_g:g}"]}
                         blocked.append(gkey)
                         return False
                 source = st.neg if lane == "neg" else st.exe
@@ -3872,14 +3871,15 @@ class Pulse:
         group_blocked = ""
         try:
             chosen = self.sets.pick_any(pack, side=side)
-            if chosen is not None and getattr(self.sets, "group_gate", False):
-                # the profit group gate: skip the Sets whose group is losing, the next-ranked Set of another group runs instead
+            if chosen is not None and (getattr(self.sets, "group_gate", False) or getattr(self.sets, "config_gate", False)):
+                # the profit group gate and the config gate: skip the Sets whose group (or own configuration) is losing, the next-ranked Set runs instead
                 now_g = time.time()
+                rows_of = self.__dict__.get("group_exec", {}).get
                 def group_open(st_):
-                    return group_verdict(self.__dict__.get("group_exec", {}).get(set_group(st_.id, self.sets.lane_of(st_) or "pos", getattr(self.sets, "group_gate_side", False)), ()), now_g,
-                                         self.sets.group_gate_n, self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)[0]
-                if not group_open(chosen):
-                    group_blocked = set_group(chosen.id, self.sets.lane_of(chosen) or "pos", getattr(self.sets, "group_gate_side", False))
+                    return exec_gates_allow(self.sets, rows_of, st_.id, self.sets.lane_of(st_) or "pos", now_g)[0]
+                first = exec_gates_allow(self.sets, rows_of, chosen.id, self.sets.lane_of(chosen) or "pos", now_g)
+                if not first[0]:
+                    group_blocked = first[1]
                     chosen = self.sets.pick_any(pack, side=side, predicate=group_open)
         except Exception:
             return None, "", ""
@@ -5296,6 +5296,11 @@ class Pulse:
                     if gq is None:
                         gq = gx[set_group(rec.set_id, lane, gside)] = collections.deque(maxlen=200)
                     gq.append((float(rec.t), float(net_return)))
+                    # the config gate reads one configuration Set's own executed results (config_key: the exact Set and lane)
+                    cq = gx.get(config_key(rec.set_id, lane))
+                    if cq is None:
+                        cq = gx[config_key(rec.set_id, lane)] = collections.deque(maxlen=50)
+                    cq.append((float(rec.t), float(net_return)))
 
     def execution_snapshot(self) -> Dict[str, Any]:
         """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which

@@ -102,6 +102,8 @@ MUTATIONS = [
      "signal_packs.py", "    if st[-1] and st[-1] != st[-2]:", "    if st[-1]:"),
     ("signals pack: the signal reads the bar after i",
      "signal_packs.py", "            for k, r in enumerate(bars[lo:i + 1])]", "            for k, r in enumerate(bars[lo:i + 2])]"),
+    ("config gate: a losing configuration is not blocked",
+     "set_engine.py", "        ok, pf, k = group_verdict(rows_of(key) or (), now, book.config_gate_n, book.config_gate_pf, book.config_gate_hours, book.config_gate_min)\n        if not ok:", "        ok, pf, k = group_verdict(rows_of(key) or (), now, book.config_gate_n, book.config_gate_pf, book.config_gate_hours, book.config_gate_min)\n        if False:"),
     ("trail hold: the scan ignores an armed trail's freedom",
      "set_engine.py", "if why is None and held >= time_bars and not (trail is not None and armed_free):", "if why is None and held >= time_bars:"),
     ("trail hold: live closes an armed trail at the hold",
