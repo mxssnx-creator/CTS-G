@@ -268,18 +268,31 @@ def config_key(set_id: str, lane: str = "pos") -> str:
     return f"cfg:{set_id}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
 
 
-def exec_gates_allow(book: Any, rows_of: Callable[[str], Any], set_id: str, lane: str, now: float) -> Tuple[bool, str, Optional[float], int]:
+def exec_gates_allow(book: Any, rows_of: Callable[[str], Any], set_id: str, lane: str, now: float,
+                     paper: Optional[Callable[[], Sequence[Tuple[float, float]]]] = None) -> Tuple[bool, str, Optional[float], int]:
     """The executed-results gates of one candidate: the group gate (groupGate) and the config gate (configGate), each on the results its own key holds
-    (group_verdict). Returns (allow, the blocking key or "", its PF, its count); both off = allow."""
+    (group_verdict). Returns (allow, the blocking key or "", its PF, its count); both off = allow.
+    gateRecovery (owner 2026-11-15, "never block then, no stuck"): a blocked scope opens nothing, so its executed record cannot change until it ages out; with
+    recovery on, the candidate Set's own continuing paper results (its lane Set: Real / Real Negative orders, `paper`) that closed AFTER the scope's newest
+    executed result are judged by the same rule, and a pass reopens the scope for this candidate."""
+    def recovered(key: str, n: int, floor: float, hours: float) -> bool:
+        if paper is None or not getattr(book, "gate_recovery", False):
+            return False
+        last = max((float(t) for t, _x in (rows_of(key) or ())), default=float("-inf"))
+        after = [(float(t), float(x)) for t, x in (paper() or ()) if last < float(t) <= float(now)]
+        if not after:
+            return False
+        ok_p, _pf_p, _k_p = group_verdict(after, now, n, floor, hours, 1)
+        return ok_p
     if getattr(book, "group_gate", False):
         key = set_group(set_id, lane, getattr(book, "group_gate_side", False))
         ok, pf, k = group_verdict(rows_of(key) or (), now, book.group_gate_n, book.group_gate_pf, book.group_gate_hours, book.group_gate_min)
-        if not ok:
+        if not ok and not recovered(key, book.group_gate_n, book.group_gate_pf, book.group_gate_hours):
             return False, key, pf, k
     if getattr(book, "config_gate", False):
         key = config_key(set_id, lane)
         ok, pf, k = group_verdict(rows_of(key) or (), now, book.config_gate_n, book.config_gate_pf, book.config_gate_hours, book.config_gate_min)
-        if not ok:
+        if not ok and not recovered(key, book.config_gate_n, book.config_gate_pf, book.config_gate_hours):
             return False, key, pf, k
     return True, "", None, 0
 
@@ -2468,6 +2481,7 @@ class SetBook:
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
         self.config_gate, self.config_gate_n, self.config_gate_pf, self.config_gate_hours, self.config_gate_min = False, 5, 1.0, 24.0, 1   # configGate (config_key)
         self.axis_sets = axis_sets.AxisSetsCfg()
+        self.gate_recovery = False
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
         self.hist_honor_tp = True
@@ -2937,6 +2951,7 @@ class SetBook:
         self.group_gate_min = int(_num("groupGateMin", 1, 1, 50))
         # the config gate: the same rule on one configuration Set's own executed results (config_key), next to the group gate (default off)
         self.config_gate = bool(ov.get("configGate", False))
+        self.gate_recovery = bool(ov.get("gateRecovery", False))       # a blocked group / config scope reopens on its Sets' paper results after its last executed one
         self.axis_sets = axis_sets.config_of(ov.get("axisSets"))       # Axis Sets: per configuration and lane, the Auto choice among every Axis setting
         self.config_gate_n = int(_num("configGateN", 5, 1, 200))
         self.config_gate_pf = _num("configGatePf", 1.0, 0.5, 3.0)

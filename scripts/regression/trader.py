@@ -3897,3 +3897,33 @@ CHECKS = [
     ("trader.padding-is-not-readiness", padding_does_not_count_as_readiness),
     ("trader.only-main-loop-pings-watchdog", only_the_main_loop_pings_the_watchdog),
 ]
+
+
+def blocked_gates_recover_on_paper_results_after_their_last_executed_one():
+    """gateRecovery (owner 2026-11-15, "never block then, no stuck"): a scope blocked by its executed results reopens for a candidate whose own lane Set's
+    paper results that closed AFTER the scope's newest executed result pass the same rule; paper results from before that, or failing ones, keep it shut;
+    recovery off keeps the earlier behaviour (blocked until the executed results age out)."""
+    from set_engine import exec_gates_allow, config_key, set_group
+    class B:
+        group_gate, group_gate_side, group_gate_n, group_gate_pf, group_gate_hours, group_gate_min = True, False, 3, 1.0, 6.0, 1
+        config_gate, config_gate_n, config_gate_pf, config_gate_hours, config_gate_min = True, 5, 1.0, 24.0, 1
+        gate_recovery = True
+    sid, now = "general:1m:sl1.00:st5", 100000.0
+    gkey = set_group(sid, "pos", False)
+    hist = {gkey: [(now - 3000, -1.0), (now - 2000, -1.0), (now - 1000, -1.0)]}
+    rows_of = hist.get
+    b = B()
+    before_only = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 1500, 2.0)])[0]           # paper before the last executed result
+    losing = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 500, -0.5), (now - 400, 0.2)])[0]
+    passing = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 500, -0.5), (now - 400, 1.0)])
+    b.gate_recovery = False
+    off = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 500, 1.0)])[0]
+    b.gate_recovery = True
+    hist[config_key(sid, "pos")] = [(now - 600, -1.0)]
+    cfg_after = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 300, 1.0)])[0]
+    cfg_between = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 800, 1.0)])     # passes the group, not the config gate
+    ok = not before_only and not losing and passing[0] and not off and cfg_after and not cfg_between[0] and cfg_between[1].startswith("cfg:")
+    return ok, f"paper before the block {before_only}, losing paper {losing}, passing paper {passing}, recovery off {off}, config after {cfg_after}, config between {cfg_between}"
+
+
+CHECKS.append(("trader.blocked-gates-recover-on-paper-results-after-their-last-executed-one", blocked_gates_recover_on_paper_results_after_their_last_executed_one))

@@ -3844,7 +3844,8 @@ class Pulse:
             blocked = []
             def allows(st, lane):
                 if self.sets.group_gate or getattr(self.sets, "config_gate", False):
-                    g_ok, gkey, g_pf, g_k = exec_gates_allow(self.sets, self.__dict__.get("group_exec", {}).get, st.id, lane, time.time())
+                    g_ok, gkey, g_pf, g_k = exec_gates_allow(self.sets, self.__dict__.get("group_exec", {}).get, st.id, lane, time.time(),
+                                                             paper=lambda: (st.neg if lane == "neg" else st.exe) or ())
                     if not g_ok:
                         floor_g = self.sets.config_gate_pf if gkey.startswith("cfg:") else self.sets.group_gate_pf
                         self.coord.scopes[gkey] = {"allow": False, "orders": g_k, "pf": g_pf, "source": "executed", "minPf": floor_g,
@@ -3894,9 +3895,13 @@ class Pulse:
                 # the profit group gate and the config gate: skip the Sets whose group (or own configuration) is losing, the next-ranked Set runs instead
                 now_g = time.time()
                 rows_of = self.__dict__.get("group_exec", {}).get
+                def paper_of(st_, lane_):
+                    return lambda: (st_.neg if lane_ == "neg" else st_.exe) or ()
                 def group_open(st_):
-                    return exec_gates_allow(self.sets, rows_of, st_.id, self.sets.lane_of(st_) or "pos", now_g)[0]
-                first = exec_gates_allow(self.sets, rows_of, chosen.id, self.sets.lane_of(chosen) or "pos", now_g)
+                    lane_ = self.sets.lane_of(st_) or "pos"
+                    return exec_gates_allow(self.sets, rows_of, st_.id, lane_, now_g, paper=paper_of(st_, lane_))[0]
+                lane_c = self.sets.lane_of(chosen) or "pos"
+                first = exec_gates_allow(self.sets, rows_of, chosen.id, lane_c, now_g, paper=paper_of(chosen, lane_c))
                 if not first[0]:
                     group_blocked = first[1]
                     chosen = self.sets.pick_any(pack, side=side, predicate=group_open)

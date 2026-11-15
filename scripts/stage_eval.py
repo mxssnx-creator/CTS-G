@@ -862,7 +862,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     def group_ok(st_, lane_: str, now_: float) -> bool:
         if gg is None and not cg:
             return True
-        return se.exec_gates_allow(book, lambda k: ghist.get(k, ()), st_.id, lane_, now_)[0]
+        return se.exec_gates_allow(book, lambda k: ghist.get(k, ()), st_.id, lane_, now_,
+                                   paper=lambda: lane_stream(book, tapes, st_, now_, lane_))[0]
 
     # with a per-candidate rule (Axis) a Set open on both lanes is a candidate of each, as the engine lists it; without one the first lane always takes it
     both_lanes = axis_coord is not None or axis_pick is not None
