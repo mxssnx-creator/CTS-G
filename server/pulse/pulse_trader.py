@@ -775,9 +775,25 @@ def rss_mb() -> float:
         return 0.0
 
 
+def _redis_read_output(args: List[str], timeout: float) -> Optional[str]:
+    """Read once with a deadline. Error replies are never configuration."""
+    try:
+        p = subprocess.run(["redis-cli", *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    output = p.stdout or ""
+    if p.returncode != 0 or output.lstrip().startswith((
+            "(error)", "ERR ", "NOAUTH ", "WRONGTYPE ", "NOPERM ", "DENIED ", "OOM ",
+            "LOADING ", "BUSY ", "MISCONF ", "CLUSTERDOWN ", "MASTERDOWN ",
+            "READONLY ", "MOVED ", "ASK ", "TRYAGAIN ")):
+        return None
+    return output
+
+
 def redis_hget(field: str) -> str:
-    p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
-    return (p.stdout or "").strip()
+    output = _redis_read_output(["HGET", REDIS_CONN, field], 6)
+    value = (output or "").strip()
+    return "" if value == "(nil)" else value
 
 
 def cred_file_path() -> str:
@@ -823,11 +839,14 @@ def dump_cts_settings() -> dict:
     if now - float(_CTS_CACHE["t"]) < 60.0:
         return dict(_CTS_CACHE["data"])
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True, timeout=3)
+        output = _redis_read_output(["HGETALL", f"settings:connection_settings:{CONN_SHORT}"], 3)
     except Exception:
         _CTS_CACHE.update(t=now, data={})
         return {}
-    lines = (p.stdout or "").splitlines()
+    if output is None:
+        _CTS_CACHE.update(t=now, data={})
+        return {}
+    lines = output.splitlines()
     out = {}
     for i in range(0, len(lines) - 1, 2):
         v = lines[i + 1]
