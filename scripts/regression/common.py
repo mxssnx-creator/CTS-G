@@ -99,6 +99,8 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["scanWorkers"] = 0           # fixtures scan in the test process (forked scans have their own check)
     ov["replayWorkers"], ov["signalCachePath"] = 0, ""   # fixtures compute their signals in the test process and keep no memo file (the shipped x01 runs worker processes and a memo file)
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
+    # x01 took x02's measured settings (owner 2026-11-15, "update x01 live"): fixtures keep the earlier stop floor, no config gate and no Axis Sets
+    ov["minSlDistancePct"], ov["configGate"], ov["axisSets"] = 0.1, False, {}
     ov.update(extra)
     return ov
 

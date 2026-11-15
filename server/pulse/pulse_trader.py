@@ -3839,7 +3839,8 @@ class Pulse:
         another pack or a blocked positive lane cannot mask a valid alternative."""
         if symbol and isinstance(self.sets, SetBook) and not self.sets.symbol_allows(pack, symbol):
             return None, "", "symbol-lane"
-        if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and any(ax.enabled for ax in self.coord.axes.values()):
+        ax_sets = isinstance(self.sets, SetBook) and getattr(getattr(self.sets, "axis_sets", None), "enabled", False)
+        if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and (ax_sets or any(ax.enabled for ax in self.coord.axes.values())):
             blocked = []
             def allows(st, lane):
                 if self.sets.group_gate or getattr(self.sets, "config_gate", False):
@@ -3857,6 +3858,19 @@ class Pulse:
                 rows = [{"t": t, "pnl_pct": value + cf} for t, value in source
                         if cutoff <= t <= now]
                 floor = self.set_axis_floor(st, lane)
+                if ax_sets:
+                    # Axis Sets (axisSets): the Set's own Auto choice among every Axis setting, judged on its lane Set; the volume ratio rides to place()
+                    v = self.sets.axis_set_verdict(st, lane, now, cutoff, float(floor if floor is not None else self.sets.floor_for(15, st.pack, st)))
+                    if v is not None:
+                        key = f"set:{st.id}:{lane}"
+                        self.coord.scopes[key] = {"allow": v["allow"], "orders": len(rows), "pf": v["pf"], "basePf": v["basePf"], "source": "axisSet",
+                                                  "setting": v["setting"], "vol": v["vol"], "minPf": floor,
+                                                  "reasons": [] if v["allow"] else [f"axis set {v['setting']} does not admit"]}
+                        if not v["allow"]:
+                            blocked.append(key)
+                            return False
+                        self.__dict__.setdefault("axis_vol", {})[(st.id, lane)] = float(v["vol"])
+                        return True
                 result = self.coord.judge(rows, self.coord.net_streak(rows), min_pf=floor)
                 key = f"set:{st.id}:{lane}"
                 scope = {"allow": result["allow"], "reasons": result["reasons"], "orders": len(rows),
@@ -4068,6 +4082,8 @@ class Pulse:
             # balance carries; the venue minimum lot still applies
             vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}),
                                  getattr(self, "volume_by_pack_kind", {}))*relational_set_factor(getattr(self,"relational_volume_ratios",None),chosen,sym,"axis" if any(ax.enabled for ax in self.coord.axes.values()) else None)
+            if getattr(getattr(self.sets, "axis_sets", None), "enabled", False):
+                vm *= float(self.__dict__.get("axis_vol", {}).get((chosen.id, chosen_lane or "pos"), 1.0))   # the Axis Set's volume ratio to its base Set
             # Block v2 carry (blockCarry, off by default): a Set parent opens at V0 x (1 + the ratios up to the level its relation carries), never above the book
             # room or the hard size ceiling; its adds stay fractions of that parent's own (original) volume
             sb_ = getattr(self, "set_block", None)

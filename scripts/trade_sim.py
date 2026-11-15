@@ -400,7 +400,23 @@ def main() -> int:
         from coord_engine import Coordinator
         coordinator = Coordinator()
         coordinator.load({}, overlay)
-    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)), include_open=True, axis_coord=coordinator)
+    axis_pick = None
+    if getattr(getattr(book, "axis_sets", None), "enabled", False):
+        # Axis Sets (axisSets): the engine's own module, on the lane Set's orders with their entry times, at the Set's floor, cached per Set / lane / hour
+        import axis_sets as _axs
+        _cache = {}
+        def axis_pick(st, lane, now):
+            key = (st.idx, lane, int(now // 60))
+            if key not in _cache:
+                rows_ = sg.lane_stream_entries(book, tapes, st, now, lane)
+                wn = book.win(st)
+                floor = float(book.floor_for(wn.real_neg_n if lane == "neg" else wn.real_n, st.pack, st))
+                v = _axs.choose([r[0] for r in rows_], [r[1] for r in rows_], [r[2] for r in rows_], floor, book.axis_sets)
+                _cache[key] = (v["allow"], v["vol"], v["setting"])
+            return _cache[key][0], _cache[key][1]
+        coordinator = None
+    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)), include_open=True, axis_coord=coordinator,
+                      axis_pick=axis_pick)
     apply_portfolio_weights(book, overlay, rows, coordinator)
     if a.execution_cache:
         with open(a.execution_cache, 'wb') as stream:

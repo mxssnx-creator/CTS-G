@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from config_num import num
 from lane_policy import expand_entries, negative_filter_ok
 import relation_lanes
+import axis_sets
 from modules import trailing_enabled, range_processing, additional_processing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
@@ -1401,6 +1402,8 @@ class SetState:
     exe_pf: float = 0.0             # net PF of the executable lane over its last setGateWindow orders (listing)
     exe_n: int = 0
     neg: List[Tuple[float, float]] = field(default_factory=list)    # Real Negative Set (exit t, net): Main orders opened in a dip
+    exe_ent: Optional[array] = None   # entry times of `exe` (axisSets only): an Axis Set judges every order on the orders closed before its entry
+    neg_ent: Optional[array] = None   # entry times of `neg`
     neg_total: int = 0
     neg_n: int = 0
     neg_pf: float = 0.0
@@ -2455,6 +2458,7 @@ class SetBook:
         self.group_gate_side = False         # groupGateSide: the group key also carries the Set's direction (long / short groups judged apart)
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
         self.config_gate, self.config_gate_n, self.config_gate_pf, self.config_gate_hours, self.config_gate_min = False, 5, 1.0, 24.0, 1   # configGate (config_key)
+        self.axis_sets = axis_sets.AxisSetsCfg()
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
         self.hist_honor_tp = True
@@ -2923,6 +2927,7 @@ class SetBook:
         self.group_gate_min = int(_num("groupGateMin", 1, 1, 50))
         # the config gate: the same rule on one configuration Set's own executed results (config_key), next to the group gate (default off)
         self.config_gate = bool(ov.get("configGate", False))
+        self.axis_sets = axis_sets.config_of(ov.get("axisSets"))       # Axis Sets: per configuration and lane, the Auto choice among every Axis setting
         self.config_gate_n = int(_num("configGateN", 5, 1, 200))
         self.config_gate_pf = _num("configGatePf", 1.0, 0.5, 3.0)
         self.config_gate_hours = _num("configGateHours", 24.0, 1.0, 72.0)
@@ -4335,6 +4340,25 @@ class SetBook:
                 return ranged, "range"
         return None
 
+    def axis_set_verdict(self, st: "SetState", lane: str, now: float, cutoff: float, floor: float) -> Optional[Dict[str, Any]]:
+        """axisSets: the Auto choice among every Axis setting for this Set's lane Set (its Real / Real Negative orders inside the evidence window, each judged
+        on the orders closed before its entry). Cached until the lane Set changes. None when the lane Set holds no entry times (axisSets off)."""
+        src = st.neg if lane == "neg" else st.exe
+        ents = st.neg_ent if lane == "neg" else st.exe_ent
+        if ents is None or len(ents) != len(src):
+            return None
+        keep = [k for k, (t, _v) in enumerate(src) if cutoff <= t <= now]
+        key = (st.id, lane, len(src), src[-1][0] if src else 0.0, keep[0] if keep else -1, round(floor, 6))
+        cache = self.__dict__.setdefault("_axis_set_cache", {})
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        got = axis_sets.choose([src[k][0] for k in keep], [ents[k] for k in keep], [src[k][1] for k in keep], floor, self.axis_sets)
+        if len(cache) > 50000:
+            cache.clear()
+        cache[key] = got
+        return got
+
     def floor_of(self, st: "SetState") -> Tuple[float, str]:
         """The one minimum PF of a Set (every window, every stage) and where it comes from. Auto on (minPfByStep + minPfStepAuto): the Set's own learned floor
         (scope "set") first; a configuration with its own manual floor (own_manual_floor) falls back to THAT value, never to a floor learned on other
@@ -4435,6 +4459,9 @@ class SetBook:
         cutoff = finite(now) - self._evidence_lookback() * BAR_S if now is not None else None
         ch = stage_chain(ts, ents, nets, self.stage_params(st.pack, st), window_start=cutoff)
         out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
+        if getattr(getattr(self, "axis_sets", None), "enabled", False):
+            out["real_ent"] = array("d", (ents[k] for k in ch["real"]))
+            out["realneg_ent"] = array("d", (ents[k] for k in ch["realneg"]))
         out["short_n"] = ch["short_n"]
         if relation_rows:
             # the Main-Set orders with their entry and symbol: what the Set contributes to its relation lanes (relation_lanes.Accumulator)
@@ -4463,6 +4490,10 @@ class SetBook:
         st.proc, st.proc_total = ch["main"][-PROC_KEEP:], len(ch["main"])
         st.exe, st.exe_total = ch["real"][-PROC_KEEP:], len(ch["real"])
         st.neg, st.neg_total = ch["realneg"][-PROC_KEEP:], len(ch["realneg"])
+        if "real_ent" in ch:
+            st.exe_ent, st.neg_ent = ch["real_ent"][-PROC_KEEP:], ch["realneg_ent"][-PROC_KEEP:]
+        else:
+            st.exe_ent = st.neg_ent = None
         st.main_short_win = int(ch["short_n"])
         st.main_evidence = ch.get("main_evidence")
         st.proc_replayed = True
