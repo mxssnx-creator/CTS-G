@@ -316,12 +316,14 @@ class LoadGovernor:
             b.tf_5m = False
             b.tf_15m = False
             b.extra_sources = False
-            b.hist_run = False
+            # Memory sheds the Set history; slow cycles alone do not (2026-11-15, x02 after a restart): a cycle is an overrun only while the history fetch
+            # is not busy, so shedding the fetch for overruns kept every cycle an overrun -- critical for good, no history, no replay, no valid Set.
+            b.hist_run = rss < hard
             b.kline_rest = not self.hist_busy
             b.do_gc = True
             b.stats_full = False
             b.warm_s = 0.55
-            shed = ["extra", "tf15m", "tf5m", "hist", "fat-stats"]
+            shed = ["extra", "tf15m", "tf5m", "fat-stats"] + ([] if b.hist_run else ["hist"])
         elif level == "overload":
             b.scan_chunk = max(6, min(12, 8 + n_open))
             b.kline_batch = 3

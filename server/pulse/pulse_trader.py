@@ -8119,7 +8119,7 @@ class Pulse:
                 names = [s for s in names if s in fetched]
             if b.hist_run:
                 self.sets.replay_all(on_step=lambda: time.sleep(0), symbols=names, expected_symbols=hist_universe,
-                                     abort=lambda: self.load.last_budget.level == "critical")
+                                     abort=lambda: self.load.last_budget.level == "critical" and not self.load.last_budget.hist_run)   # memory, not slow cycles
         finally:
             self.hist_busy = False
 

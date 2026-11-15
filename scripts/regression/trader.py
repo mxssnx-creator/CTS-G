@@ -3594,6 +3594,19 @@ def HOLD_ok(holds):
     return se.HOLD_NEVER not in holds
 
 
+def slow_cycles_alone_never_shed_the_set_history():
+    """Found live on x02 after a restart (2026-11-15): a loop cycle counts as an overrun only while the history fetch is not busy, and eight overruns made the
+    governor critical, which shed the history fetch -- so every cycle stayed an overrun, the level stayed critical and the Set replay never started. Overruns
+    alone (memory under the hard limit) now keep the history running; memory over the hard limit still sheds it."""
+    import load_engine as le
+    g = le.LoadGovernor()
+    for _ in range(20):
+        b = g.observe(n_sym=150, n_open=20, hot_ms=1600, warm_ms=3500, cycle_overrun=True, rss_mb=500.0)
+    over = g.observe(n_sym=150, n_open=20, hot_ms=1600, warm_ms=3500, cycle_overrun=True, rss_mb=g.crit_limit(150) + 10)
+    ok = b.level == "critical" and b.hist_run and "hist" not in b.shed and not over.hist_run and "hist" in over.shed
+    return ok, f"overruns only: level {b.level}, history {b.hist_run}, shed {b.shed}; memory over the limit: history {over.hist_run}"
+
+
 CHECKS = [
     ("trader.alternate-lane-keeps-the-executed-group-gate", alternate_lane_keeps_the_executed_group_gate),
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
@@ -3641,6 +3654,7 @@ CHECKS = [
     ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),
     ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
     ("trader.trailing-sets-have-no-time-exit-unless-asked", trailing_sets_have_no_time_exit_unless_asked),
+    ("trader.slow-cycles-alone-never-shed-the-set-history", slow_cycles_alone_never_shed_the_set_history),
     ("trader.set-lane-honours-tp-as-the-replay-does", a_set_lane_honours_tp_only_as_the_replay_does),
     ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),
     ("trader.exit-lane-scores-only-its-own-closes", exit_lane_scores_only_its_own_closes),

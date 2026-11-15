@@ -102,6 +102,8 @@ MUTATIONS = [
      "signal_packs.py", "    if st[-1] and st[-1] != st[-2]:", "    if st[-1]:"),
     ("signals pack: the signal reads the bar after i",
      "signal_packs.py", "            for k, r in enumerate(bars[lo:i + 1])]", "            for k, r in enumerate(bars[lo:i + 2])]"),
+    ("load critical: slow cycles shed the Set history again",
+     "load_engine.py", "            b.hist_run = rss < hard\n            b.kline_rest = not self.hist_busy\n            b.do_gc = True\n            b.stats_full = False\n            b.warm_s = 0.55", "            b.hist_run = False\n            b.kline_rest = not self.hist_busy\n            b.do_gc = True\n            b.stats_full = False\n            b.warm_s = 0.55"),
     ("pack index: the index is never rebuilt after the Set list changes",
      "set_engine.py", "        if idx is None or idx[0] != key:", "        if idx is None:"),
     ("scan fork: a child's pause choices are not handed back",
