@@ -13,6 +13,7 @@ import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from redis_reads import read_output as redis_read_output, credentials_available
 
 DIR = "/opt/grok-x01-pulse"
 STOP_ALL_PATH = os.path.join(DIR, "STOP")
@@ -388,10 +389,12 @@ def load_cts(conn: str) -> dict:
             return data
     key = f"settings:connection_settings:{conn}"
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True, timeout=5)
-        lines = (p.stdout or "").splitlines()
+        output = redis_read_output(["HGETALL", key], 5)
+        if output is None:
+            return {}
+        lines = output.splitlines()
     except Exception:   # a hung or missing redis must not hold the request handler
-        lines = []
+        return {}
     out = {}
     for i in range(0, len(lines) - 1, 2):
         out[lines[i]] = parse_val(lines[i + 1])
@@ -902,14 +905,8 @@ def heal_loop() -> None:
                     if now - float(last.get(cid, 0) or 0) < 150.0:
                         continue
                     try:
-                        credentials_ok = True
-                        for field in ("api_key", "api_secret"):
-                            p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", field], capture_output=True, text=True, timeout=6)
-                            if p.returncode != 0 or (p.stdout or "").strip() in ("", "(nil)"):
-                                credentials_ok = False
-                                break
-                        if not credentials_ok:
-                            continue  # no complete credentials — engine would exit instantly
+                        if not credentials_available(f"connection:{cid}"):
+                            continue  # no confirmed credentials: leave the service alone
                     except Exception:
                         continue
                     last[cid] = now

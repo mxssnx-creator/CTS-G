@@ -311,7 +311,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="44236d34b2f366d981f66a2dd0b6b51bc39969bb"
+  local pt_want="a8396d7a958e0e0c5964c7c7e5dc95159f94c2bc"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
@@ -364,6 +364,7 @@ sync_pulse_tree() {
   [[ -f "$src/universe.json" ]] && cp -a "$src/universe.json" "$PULSE_DIR/universe.json"
   restore_pulse_trader
   python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
+    "$PULSE_DIR"/redis_reads.py \
     "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py \
     "$PULSE_DIR"/set_block.py "$PULSE_DIR"/execution_cost.py "$PULSE_DIR"/market_features.py
   ok "pulse tree $PULSE_DIR"
@@ -431,10 +432,10 @@ npm_install_desk() {
 redis_has_keys() {
   local slot="$1"
   have redis-cli || return 1
-  local key sec
-  key="$(redis-cli HGET "connection:$slot" api_key 2>/dev/null || true)"
-  sec="$(redis-cli HGET "connection:$slot" api_secret 2>/dev/null || true)"
-  [[ -n "$key" && -n "$sec" && "$key" != "(nil)" && "$sec" != "(nil)" ]]
+  have python3 || return 1
+  local reader="$CTS_G_ROOT/server/pulse/redis_reads.py"
+  [[ -f "$reader" ]] || return 1
+  python3 "$reader" "$slot" >/dev/null 2>&1
 }
 
 disable_vst_autostart() {
