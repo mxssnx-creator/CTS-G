@@ -71,7 +71,7 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 ## Minimum PF per configuration (owner: own values, Auto with fallback to the manual defaults, no collisions)
 - [x] One resolver `floor_of`: own learned floor -> the configuration's own manual floor (Signals, Micro range, lane policy) -> step learned floor -> 1 + TP% x ratio.
 - [x] Collisions fixed: Micro range / Signals floors overrode Auto; desk Short Range floor labelled unused under step floors; Signals floor out of the window-size section; window-size class names.
-- [x] Check `step-pf.every-coordination-asks-its-own-floor-...`, mutants `own floor:` (3).
+- [x] Check `step-pf.every-coordination-asks-its-own-floor-...`, mutants `own floor:` (3, all caught).
 - [~] Old against new code on the x02 overlay (4 symbols, dev + sealed): running (chain19).
 
 ## Execution last-N check (owner: 10 .. 30 step 5, 50 symbols x 3 days, set best as default)
