@@ -207,6 +207,7 @@
  "lift: the relation multiple does not weight the with side": "trader.lift-figures-compare-the-same-parents-with-and-without",
  "live close: duplicates not removed": "processing.live-dedupe-and-history-bounded",
  "live entry: the lower confidence pack wins": "trader.live-entry-is-the-replays-signal",
+ "load critical: slow cycles shed the Set history again": "trader.slow-cycles-alone-never-shed-the-set-history",
  "low range: a tie counts as a narrow-range bar": "extra.nr7-and-inside-bar-both-ways",
  "low range: the fade reads its own bar into the regime": "extra.low-range-fade-both-ways",
  "low range: the inside-bar break reads its own bar into the regime": "extra.nr7-and-inside-bar-both-ways",
