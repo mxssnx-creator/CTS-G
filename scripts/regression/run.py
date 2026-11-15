@@ -195,6 +195,10 @@ def _run_serial(checks, fail_fast):
 
 
 def main(argv=None):
+    # every check runs against a private runtime directory (the trader's logs, state and trade records): the live engines' files are never written by a test
+    if not os.environ.get("CTSG_RUNTIME_DIR"):
+        import tempfile
+        os.environ["CTSG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="ctsg-regression-")
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
     ap.add_argument("--list", action="store_true")

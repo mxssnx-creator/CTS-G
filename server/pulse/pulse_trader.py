@@ -49,7 +49,7 @@ from redis_reads import read_output as _redis_read_output
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
 BASE, _INITIAL_MODE = resolve_base(CONN_SHORT, env_base=os.environ.get("PULSE_BASE", ""))
-DIR = "/opt/grok-x01-pulse"
+DIR = os.environ.get("CTSG_RUNTIME_DIR") or "/opt/grok-x01-pulse"   # the regression runner points this at a private temp directory; the live engines never set it
 STATS_PATH = os.path.join(DIR, f"stats-{CONN_SHORT}.json")
 TRADES_PATH = os.path.join(DIR, f"trades-{CONN_SHORT}.jsonl")
 STOP_PATH = os.path.join(DIR, f"STOP-{CONN_SHORT}")

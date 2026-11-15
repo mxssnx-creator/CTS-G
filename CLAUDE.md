@@ -2,6 +2,10 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-15 (late), test isolation defect fixed.** The regression suite drove the real trader, whose log and state directory was hard-coded to the live engine
+  directory: a full run wrote synthetic closes (BTC-USDT at 100.0) into the live x01 log and touched its block state files. `pulse_trader.DIR` now reads
+  `CTSG_RUNTIME_DIR` (live engines never set it, default `/opt/grok-x01-pulse`), and `scripts/regression/run.py` points every run at a fresh temp directory. Live trade
+  records were checked: no synthetic rows. Check: `trader.lanes` leaves the live log unchanged.
 - **2026-11-15 (evening), owner: "exec last N 10 to 30 step 5, 50 symbols", "block steps increasing and remaining at the last until net positive for lane, best vol
   increment ratio", "test Relate", "update x01 live, 120 symbols, DCA off, Axis, Block on", "axis with all possible multiple configs, auto PF, vol ratios to the base set".**
   (a) **Execution last N** (trade_sim, 50 symbols, fresh 3 days 11-12 10:00 .. 11-15 10:00, x02 overlay with Axis prev 4; executed PF / orders): off 1.630 / 694 dev,

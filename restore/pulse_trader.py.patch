@@ -12,7 +12,7 @@
  import json
  import math
  import os
-@@ -19,23 +21,34 @@
+@@ -19,24 +21,35 @@
  import urllib.request
  from collections import deque
  from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,10 +49,12 @@
  CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
  REDIS_CONN = f"connection:{CONN_SHORT}"
 -BASE = os.environ.get("PULSE_BASE", "") or "https://open-api.bingx.com"
+-DIR = "/opt/grok-x01-pulse"
 +BASE, _INITIAL_MODE = resolve_base(CONN_SHORT, env_base=os.environ.get("PULSE_BASE", ""))
- DIR = "/opt/grok-x01-pulse"
++DIR = os.environ.get("CTSG_RUNTIME_DIR") or "/opt/grok-x01-pulse"   # the regression runner points this at a private temp directory; the live engines never set it
  STATS_PATH = os.path.join(DIR, f"stats-{CONN_SHORT}.json")
  TRADES_PATH = os.path.join(DIR, f"trades-{CONN_SHORT}.jsonl")
+ STOP_PATH = os.path.join(DIR, f"STOP-{CONN_SHORT}")
 @@ -50,6 +63,7 @@
  ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
  LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
