@@ -48,6 +48,8 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 ## Queued by the owner (2026-11-15, "later")
 - [ ] Indications completely for Normal / Long / Wide strategies: additional indications, ranges, tactics, configs, relations and specialities
       (after the 15 / 30 min x relation screen on 25 symbols; same rule: four windows where data exists, then trade_sim dev + sealed against the shipped setting).
+- [ ] Trend and break indications calculated over longer distances and timeframes (owner, "later"): longer lookbacks (n 30 .. 120) and 15 / 30 / 60 min series for the
+      trend / break families, for the Normal / Long / Wide targets (the CTS-A-O trend tactics on 5 min are the first lead).
 - [~] 15 / 30 min + combined votes x 21 time-activity / situation relations (13,728 names), 25 symbols x 3 days: screen running.
 - [~] CTS-A-O trend tactics (`tactic-trend-s` / `-m` 5 min, `tactic-dca-trend-8-atr-1-2-0.25` 1 min; four-window screen PF >= 1.1 everywhere) through trade_sim.
 
