@@ -2,6 +2,31 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-15, owner: "Fix all performance issues completly .. async processings fully, multiple and for each" / "Check if max hold time works correctly .. For trailing no max hold time use".**
+  (a) **Live x02 profile (py-spy, 150 symbols, 16,844 Sets):** the trading loop spent 61 % of its time rebuilding the stats snapshot (0.9 s, every second, under the
+  book's lock, so the replay and the entry picks waited). `SetBook.snapshot_cached` (Pulse.stats): a snapshot that costs at least 0.25 s is rebuilt in a background
+  thread at most every 20 x its cost (cap 60 s) and right after a scoring pass; between rebuilds the last one is served with the live progress (`snapshotAgeS`).
+  After: 4 % of the loop. Check `processing.the-stats-snapshot-is-cached-only-when-it-is-costly`.
+  (b) **Forked lane scans** (`scanWorkers`, x01 / x02 3, engine and fixtures 0): after the signals, a symbol's per-Set scans run in balanced shares in forked children
+  that inherit the frozen replay frame (nothing re-sent, the signal memo stays shared), pack their own rows and hand back columns, tape keys and pause choices; the
+  parent rebuilds the in-thread aliases. Identical rows, aliases, pauses and verdicts; a failed fork or a dying child falls back to the in-thread scan. One symbol of the
+  x02 grid, warm memo: 12.2 - 12.4 s -> 4.4 - 5.3 s (the dict -> column packing, about 6 s of the in-thread cost, moves into the children). Off with hold Auto (it needs the
+  replay inputs). Check `processing.forked-lane-scans-equal-the-in-thread-scans`, mutants `scan fork:` (3).
+  (c) **Entry picks** read a (pack, type) index of the Sets (`SetBook._of_pack_kind`, rebuilt when the Set list changes) instead of filtering all 16,844 Sets per pack,
+  type and direction (610 of 807 samples of the entry path). Check `processing.the-pack-index-picks-what-the-plain-filter-picks`, mutant `pack index:`.
+  (d) **Load-governor deadlock fixed:** a loop cycle counts as an overrun only while the history fetch is idle; eight overruns made the level critical, critical shed the
+  fetch and aborted the replay, so after a restart x02 stayed critical with no history and no replay. Slow cycles alone now keep the history and the replay; only memory
+  over the hard limit sheds them. Check `trader.slow-cycles-alone-never-shed-the-set-history`, mutant `load critical:`. Remaining: the per-Set verdict (`is_eligible` ->
+  `gate_reason`) recomputed on every pick is now the top of the entry path; it reads the verdict's freshness against the clock, so it is not cached.
+  (e) **Max hold time, audited:** replay and live read the same `st.hold_bars`, an open position keeps the hold it opened with, a restart credits the downtime
+  (`hold_credit_s`; live x02 had one base Set close by time after 607 min wall time for a 360 min hold). The time exit decides little: 4 of 178 executed orders in the
+  Auto-SL sweep (0 of 100 trailing), 1 live x02 close. **`trailTimeExit`** (new, engine and fixtures true; x01 / x02 / desk / secure preset false by the owner's
+  instruction): a trailing Set's hold is `HOLD_NEVER`, so replay, simulator and live (also positions opened before the switch) leave it only by stop / trail / TP.
+  Check `trader.trailing-sets-have-no-time-exit-unless-asked`. **Measured (4 symbols, x02 overlay, executed PF / orders / net): with the time exit 1.054 / 127 / +5.82 %
+  dev, 1.082 / 51 / +3.72 % sealed; without it 1.028 / 119 / +2.76 % dev, 0.881 / 63 / -6.58 % sealed: worse on both windows** (no executed trailing order closed by
+  time in either arm: the change works through which trailing Sets validate and how long a position holds its symbol). Shipped because the owner asked for it, not as a
+  finding; revert = `trailTimeExit` true. Also measured: TP steps to 50 (`setStepMax` 50, with trailTimeExit off) 1.012 / 96 dev, 0.939 / 40 sealed: not shipped.
+
 - **2026-11-14 (later), owner: "Stop x1 and run x02", "min SL ratio 0.5", "max SL ratios 1.4", "long, wide 0.2 to 0.8 step 0.1", "Exit ... close later", "Real ... last N 20",
   "at the end of Real before executing a last-N check, try 10 to 35 step 5", "auto PF for each config Set, defaults when not enough samples", "for EACH config Set independent".**
   (a) **x01 is stopped by the owner**: marker `/var/lib/cts-g/x01-stopped-by-owner` (ensure_x01.sh, the hook and the watchdog start nothing while it exists; delete it to
