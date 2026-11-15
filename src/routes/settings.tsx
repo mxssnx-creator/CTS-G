@@ -2,12 +2,13 @@ import {VolumeRatioSliders} from "../../shared/cts-volume/sliders.tsx";
 import {PORTED_CATALOG,DEFAULT_TACTIC_SOURCES,DEFAULT_INVERSE_SOURCES} from "../../shared/cts-indications/catalog.ts";
 import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
-import { ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
+import { ROUND_AUTO_N_MAX, ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
 import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
 import { SignalConfigEditor } from "@/components/signal-config-editor";
 import { createFileRoute } from "@tanstack/react-router";
+import { SECTION_GROUPS, SECTION_LABEL, groupOf, type SettingsSection } from "@/lib/settings-menu";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MIN_PF_FLOOR,
@@ -80,33 +81,88 @@ import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
-const SECTIONS = [
-  "overview",
-  "connection",
-  "profit",
-  "risk",
-  "trailing",
-  "timeframes",
-  "packs",
-  "sets",
-  "exits",
-  "stages",
-  "block",
-  "dca",
-  "axes",
-  "volume",
-  "controls",
-  "indication",
-  "pulse",
-  "symbols",
-] as const;
+type SectionId = SettingsSection;
+
+function slug(text: string): string {
+  return "card-" + text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+}
+
+/** The page's menus: the top menus with their sections (on a phone only the open menu's sections), then "On this page": a jump to every card of the section. */
+function SettingsMenu({ section, onSection, pageRef }: { section: SectionId; onSection: (id: SectionId) => void; pageRef: React.RefObject<HTMLDivElement | null> }) {
+  const active = groupOf(section);
+  const [open, setOpen] = useState(active);
+  useEffect(() => setOpen(active), [active]);
+  const [cards, setCards] = useState<Array<{ id: string; title: string }>>([]);
+  useEffect(() => {
+    const read = () => {
+      const els = Array.from(pageRef.current?.querySelectorAll<HTMLElement>("[data-card]") ?? []);
+      setCards(els.map((el) => ({ id: el.id, title: el.dataset.card ?? "" })));
+    };
+    read();
+    const t = window.setTimeout(read, 300);        // cards that render after the stats arrive
+    return () => window.clearTimeout(t);
+  }, [section, pageRef]);
+  const openGroup = SECTION_GROUPS.find((g) => g.id === open) ?? SECTION_GROUPS[0];
+  return (
+    <>
+      {/* every section, grouped by its menu (desktop); scrolls away with the page */}
+      <nav className="hidden flex-wrap gap-x-4 gap-y-1 lg:flex" aria-label="Settings sections">
+        {SECTION_GROUPS.map((g) => (
+          <div key={g.id} className="flex min-w-0 items-center gap-1">
+            <span className="shrink-0 font-mono text-[10px] uppercase text-muted">{g.label}</span>
+            {g.sections.map((id) => (
+              <button key={id} type="button" onClick={() => onSection(id)}
+                className={`min-h-9 shrink-0 rounded-md px-2.5 text-left text-sm ${section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"}`}
+                data-section={id} data-testid={`section-${id}`} aria-current={section === id ? "page" : undefined}>
+                {SECTION_LABEL[id]}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+      {/* the sticky bar: top menus, the open menu's submenu, and the cards of this section */}
+      <div className="sticky top-0 z-20 -mx-1 space-y-1.5 rounded-radius border border-border bg-bg/95 px-1 py-1.5 backdrop-blur" data-testid="settings-menu">
+        <nav className="flex gap-1 overflow-x-auto" aria-label="Settings menus">
+          {SECTION_GROUPS.map((g) => (
+            <button key={g.id} type="button" onClick={() => { setOpen(g.id); if (!g.sections.includes(section)) onSection(g.sections[0]); }}
+              className={`min-h-9 shrink-0 rounded-lg px-3 text-sm font-medium ${active === g.id ? "bg-bg2 text-fg ring-1 ring-primary" : open === g.id ? "bg-bg2 text-fg" : "text-muted"}`}
+              data-testid={`menu-${g.id}`} aria-expanded={open === g.id}>
+              {g.label}
+            </button>
+          ))}
+        </nav>
+        <nav className="flex gap-1 overflow-x-auto" aria-label={`${openGroup.label} submenu`}>
+          {openGroup.sections.map((id) => (
+            <button key={id} type="button" onClick={() => onSection(id)}
+              className={`min-h-8 shrink-0 rounded-md px-2.5 text-sm ${section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"}`}
+              data-testid={`submenu-${id}`}>
+              {SECTION_LABEL[id]}
+            </button>
+          ))}
+        </nav>
+        {cards.length > 1 ? (
+          <nav className="flex gap-1 overflow-x-auto border-t border-border pt-1.5" aria-label="On this page" data-testid="settings-page-index">
+            <span className="shrink-0 self-center font-mono text-[10px] uppercase text-muted">On this page</span>
+            {cards.map((c) => (
+              <button key={c.id} type="button" className="min-h-8 shrink-0 rounded-md border border-border px-2 text-xs text-muted hover:text-fg"
+                onClick={() => document.getElementById(c.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+                {c.title}
+              </button>
+            ))}
+          </nav>
+        ) : null}
+      </div>
+    </>
+  );
+}
 
 function SettingsPage() {
   const { conn } = useConnection();
   const [cts, setCts] = useState<CtsSettings | null>(null);
   const [raw, setRaw] = useState<LiveStats | null>(null);
   const [overlay, setOverlay] = useState<PulseOverlay>(DEFAULT_OVERLAY);
-  const [section, setSection] = useState<(typeof SECTIONS)[number]>("overview");
+  const [section, setSection] = useState<SectionId>("overview");
+  const pageRef = useRef<HTMLDivElement | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -206,49 +262,9 @@ function SettingsPage() {
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
-      <div className="flex flex-col gap-4 lg:flex-row">
-        <aside className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto">
-          <nav className="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:pb-0">
-            {SECTIONS.map((id) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setSection(id)}
-                className={`min-h-11 shrink-0 rounded-lg px-3 text-left text-sm capitalize ${
-                  section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"
-                }`}
-                data-section={id}
-                data-testid={`section-${id}`}
-              >
-                {id === "dca"
-                  ? "DCA"
-                  : id === "pulse"
-                    ? "Pulse overlay"
-                    : id === "profit"
-                      ? "Profit factor"
-                      : id === "risk"
-                        ? "SL / TP ratios"
-                        : id === "trailing"
-                          ? "Trailing recals"
-                          : id === "timeframes"
-                            ? "Timeframes"
-                            : id === "packs"
-                              ? "Strategy packs"
-                              : id === "sets"
-                                ? "Sets · historic"
-                                : id === "exits"
-                                  ? "Exits · SL"
-                                  : id === "overview"
-                                    ? "Overview"
-                                    : id === "controls"
-                                      ? "Control orders"
-                                      : id}
-              </button>
-            ))}
-          </nav>
-        </aside>
-
-        <div className="min-w-0 flex-1 space-y-4">
+      <div className="flex flex-col gap-4">
+        <SettingsMenu section={section} onSection={setSection} pageRef={pageRef} />
+        <div ref={pageRef} className="min-w-0 flex-1 space-y-4">
           <LiveApplied conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
           {section === "overview" && (
             <Card title="Secure, Minimal" hint="Saved run preset · load it here, review it, then save to the selected connection">
@@ -1322,6 +1338,16 @@ function SettingsPage() {
                     <Grid>
                       <Toggle label="Block rounds" on={cfg.enabled} onChange={(enabled) => update({ enabled })} />
                       <Num label="Volume multiple ceiling" value={cfg.maxMult} min={1} max={ROUND_MULT_MAX} step={0.25} hint="1 + the raised procedures' ratio × level, never above this" onChange={(maxMult) => update({ maxMult })} />
+                      <Toggle label="Auto: every block count decides by its own newest results" on={cfg.auto} onChange={(auto) => update({ auto })} />
+                      <Num label="Auto · newest results judged (last N)" value={cfg.autoN} min={1} max={ROUND_AUTO_N_MAX} step={1}
+                        hint="per block count and relation: level × net of every position that opened while one of its procedures stood raised (on paper for a count that does not raise)"
+                        onChange={(autoN) => update({ autoN, autoMin: Math.min(cfg.autoMin, autoN) })} />
+                      <Num label="Auto · results needed (minimum)" value={cfg.autoMin} min={1} max={cfg.autoN} step={1}
+                        hint="fewer results: the count's manual switch (Raises column) holds" onChange={(autoMin) => update({ autoMin })} />
+                      <Num label="Auto · PF a count needs to raise" value={cfg.autoPf} min={0.5} max={3} step={0.05}
+                        hint="1.00 = its raises at least paid for themselves" onChange={(autoPf) => update({ autoPf })} />
+                      <Num label="Auto · ratio of a count without its own" value={cfg.autoRatio} min={0.05} max={ROUND_RATIO_MAX} step={0.05}
+                        hint="a count Auto switches on whose own ratio is 0 raises by this × level of the original volume" onChange={(autoRatio) => update({ autoRatio })} />
                     </Grid>
                     <div className="mt-3 flex flex-wrap gap-3">
                       {ROUND_RELATIONS.map((name) => (
@@ -1334,7 +1360,7 @@ function SettingsPage() {
                         <thead className="font-mono text-[11px] text-muted">
                           <tr>
                             <th className="pb-2 font-medium">Block count</th>
-                            <th className="pb-2 font-medium">Raises</th>
+                            <th className="pb-2 font-medium">{cfg.auto ? "Raises (manual, until Auto has its minimum)" : "Raises"}</th>
                             <th className="pb-2 font-medium">Volume ratio</th>
                             <th className="pb-2 font-medium">Step</th>
                             <th className="pb-2 font-medium">Top level</th>
@@ -1358,6 +1384,7 @@ function SettingsPage() {
                         </tbody>
                       </table>
                     </div>
+                    <BlockRoundsAutoTable stats={stats ?? null} />
                     <p className="mt-3 text-xs opacity-70">
                       Largest multiple of one entry with these settings: ×{blockRoundsMax(cfg).toFixed(2)}. A count that does not raise still forms its blocks and keeps its record.
                       Shipped: relation Step, block count 5, ratio 1.0, step to level 2, ceiling ×3 — the only procedure measured at or above “without” on all nine windows
@@ -2828,9 +2855,47 @@ function IndicationConfigEditor({
   );
 }
 
+type RoundsAutoRow = { relation: string; count: number; raises: boolean; source: string; pf: number; results: number; ratio: number };
+
+/** The live Auto verdict of every block count (execution.blockRounds.auto from the engine): which counts raise now, on what evidence. */
+function BlockRoundsAutoTable({ stats }: { stats: LiveStats | null }) {
+  const raw = (stats?.execution?.blockRounds as { auto?: RoundsAutoRow[] } | undefined)?.auto;
+  if (!Array.isArray(raw) || !raw.length) return <p className="mt-3 font-mono text-[11px] text-muted">Auto verdicts appear once the engine reports them.</p>;
+  return (
+    <div className="mt-3 overflow-x-auto" data-testid="block-rounds-auto">
+      <table className="w-full min-w-[520px] text-left text-sm">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 font-medium">Relation</th>
+            <th className="pb-2 font-medium">Count</th>
+            <th className="pb-2 font-medium">Results</th>
+            <th className="pb-2 font-medium">PF of its raises</th>
+            <th className="pb-2 font-medium">Decided by</th>
+            <th className="pb-2 font-medium">Raises now</th>
+            <th className="pb-2 font-medium">Ratio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {raw.map((r) => (
+            <tr key={`${r.relation}-${r.count}`} className="border-t border-border font-mono tabular-nums">
+              <td className="py-1">{r.relation}</td>
+              <td className="py-1">{r.count}</td>
+              <td className="py-1">{r.results}</td>
+              <td className="py-1">{r.results ? r.pf.toFixed(3) : "—"}</td>
+              <td className="py-1">{r.source}</td>
+              <td className={`py-1 ${r.raises ? "text-fg" : "text-muted"}`}>{r.raises ? "yes" : "no"}</td>
+              <td className="py-1">{r.ratio.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Card({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-4 rounded-radius border border-border bg-surface p-4">
+    <section id={slug(title)} data-card={title} className="scroll-mt-36 space-y-4 rounded-radius border border-border bg-surface p-4">
       <div>
         <h2 className="text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
         {hint ? <p className="mt-1 text-sm text-muted">{hint}</p> : null}

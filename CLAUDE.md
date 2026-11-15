@@ -2,6 +2,17 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-15 (newest), owner: "Block to auto eval for each block count and set by last n30 but minimal 15 .. add to settings" / "add top menus (submenus) for sections".**
+  (a) `blockRounds.auto` (+ `autoN` 30, `autoMin` 15, `autoPf` 1.0, `autoRatio` 1.0; `block_rounds.RoundsBook.auto_verdict`): every block count of every selected relation
+  decides by itself whether it raises. Evidence = level x net (volume 1) of every position that opened while one of that count's procedures stood raised -- recorded for a
+  count that only observes exactly as for one that raises, so an off count is judged on paper. Raises while the PF of its newest 30 results >= 1.0; under 15 results its
+  manual switch holds; a count Auto switches on with ratio 0 raises by autoRatio x level. Shipped on in every overlay / preset / the desk default (owner instruction, no
+  measurement yet: the 11-11 parent windows are not in this container); revert = `auto` false. Stats `execution.blockRounds.auto` (per relation x count: results, PF,
+  decided by, raises now, ratio), desk table under Block rounds. Check `block_structure.block-rounds-auto-judges-every-count-on-its-own-newest-results` (600 positions,
+  2 relations x 6 counts against a plain reading), mutants `block auto:` (3, caught). The multiple stays under `maxMult` (x3 shipped).
+  (b) Settings navigation (`src/lib/settings-menu.ts`): six top menus (Run, Strategies, Validation · PF, Exits · risk, Block · DCA · Axis, Volume), each section under exactly one;
+  a sticky bar holds the menus, the open menu's submenu and "On this page" (a jump to every card of the section, `Card` ids). Desktop keeps the full grouped section list
+  (`section-*` test ids unchanged); phones show the open menu's sections only.
 - **2026-11-15 (newest), owner: "min PF has for each coord own values and if auto enabled use the auto values with fallback to their manual defaults .. check sections,
   settings .. ensure no collisions".** One resolver, `SetBook.floor_of(st)` -> (floor, source), read by `floor_for`, `step_floor`, `stage_params` (engine and simulator):
   Auto on (minPfByStep + minPfStepAuto): the Set's own learned floor (scope "set", `auto-set`, capped by minPfStepAutoHigh) -> the configuration's OWN manual floor

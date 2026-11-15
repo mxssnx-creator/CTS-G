@@ -487,12 +487,69 @@ def block_rounds_ship_the_procedure_measured_at_or_above_without():
     files = [os.path.join(pulse, f) for f in sorted(os.listdir(pulse)) if f.startswith("overlay-") and f.endswith(".json")]
     files += [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json", "low-steps-coordination-research.json")]
     carried = {os.path.basename(f): json.load(open(f)).get("blockRounds") for f in files}
-    want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "counts": {"5": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 2, "pause": 0}}}).to_json()
+    want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 1.0,
+                             "counts": {"5": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 2, "pause": 0}}}).to_json()
     same = {name: (isinstance(v, dict) and rounds.config_of(v).to_json() == want and v == want) for name, v in carried.items()}
     desk = open(os.path.join(ROOT, "src", "lib", "block-rounds.ts")).read()
-    desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 3,', desk)) and '"5": { on: true, ratio: 1, step: true, maxLevel: 2, pause: 0 }' in desk
+    desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 3,\s*auto: true,\s*autoN: 30,\s*autoMin: 15,\s*autoPf: 1,\s*autoRatio: 1,', desk)) and '"5": { on: true, ratio: 1, step: true, maxLevel: 2, pause: 0 }' in desk
     off = rounds.config_of(None)
     return all(same.values()) and len(same) == 7 and desk_ok and not off.enabled and not any(c.on for c in off.counts.values()), f"carried equal to the measured object: {same}; desk {desk_ok}; absent key enabled {off.enabled}"
+
+
+def block_rounds_auto_judges_every_count_on_its_own_newest_results():
+    """Owner 2026-11-15 ("auto eval for each block count and set by last n30 but minimal 15"): with auto on, each block count of each relation raises while the
+    PF of its newest autoN raise results (level x net at volume 1 of every position that opened while one of its procedures stood raised; the same on paper for a
+    count that does not raise) is at least autoPf; with fewer than autoMin results its manual switch holds. Read against a plain replay of the same positions:
+    every count's evidence, verdict and every position's multiple."""
+    import random
+    import block_rounds as rounds
+    rng = random.Random(11)
+    cfg = rounds.config_of({"enabled": True, "relations": ["overall", "direction"], "maxMult": 5, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 0.5,
+                            "counts": {"2": {"on": True, "ratio": 0.25, "step": True, "maxLevel": 3}, "4": {"on": False, "ratio": 0.0}}})
+    book = rounds.RoundsBook(cfg=cfg)
+    # plain state: per (relation, key, n): level, net, pause, open blocks; per (relation, n): evidence
+    lvl, ev, bad, open_ = {}, {}, [], []
+    plain = rounds.RoundsBook(cfg=rounds.config_of({**cfg.to_json(), "auto": False}))     # the procedures without Auto: levels do not depend on Auto
+    seen_auto = 0
+    for i in range(600):
+        side = 1 if rng.random() < 0.5 else -1
+        k = rounds.keys_of("X", side, "p", "base", 5, "pos", "s")
+        # the plain verdict, from the plain evidence
+        add = 0.0
+        for rel in cfg.relations:
+            for n in rounds.COUNTS:
+                g = plain.groups.get(plain.gid(rel, k[rel], n))
+                if not g or g["level"] <= 0:
+                    continue
+                e = ev.get((rel, n), [])[-30:]
+                gp, gl = sum(x for x in e if x > 0), -sum(x for x in e if x < 0)
+                c = cfg.counts[n]
+                if len(e) < 15:
+                    on, ratio = c.on, c.ratio
+                else:
+                    on, ratio = (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)) >= 1.0, (c.ratio if c.ratio > 0 else 0.5)
+                    seen_auto += 1
+                if on and ratio > 0:
+                    add += ratio * g["level"]
+        want = min(5.0, 1.0 + add) if add > 0 else 1.0
+        got, _ = book.ask(k)
+        if abs(got - want) > 1e-9:
+            bad.append((i, got, want))
+        levels = {(rel, n): (plain.groups.get(plain.gid(rel, k[rel], n)) or {}).get("level", 0) for rel in cfg.relations for n in rounds.COUNTS}
+        book.opened(f"p{i}", k, got)
+        plain.opened(f"p{i}", k, want)                                   # the same volume: recovery reads the weighted net
+        net = rng.gauss(-0.1 if i < 300 else 0.15, 1.0)
+        book.closed(f"p{i}", net)
+        plain.closed(f"p{i}", net)
+        for (rel, n), L in levels.items():
+            if L > 0:
+                ev.setdefault((rel, n), []).append(L * net)
+    ev_same = all(abs(a - b) < 1e-6 for key in ev for a, b in zip(ev[key][-200:], book.evidence.get(book.eid(*key), [])))
+    snap = book.snapshot()
+    rows = {(r["relation"], r["count"]): r for r in snap["auto"]}
+    return (not bad and ev_same and seen_auto > 100 and len(rows) == 12 and all(r["source"] in ("auto", "manual") for r in rows.values()),
+            f"600 positions, 2 relations x 6 counts; multiples equal the plain reading: {not bad} {bad[:2]}; evidence equal {ev_same}; auto verdicts read {seen_auto}; "
+            f"verdicts {{{', '.join(f'{k[0]}:N{k[1]} {v['source']} {v['pf']} on {v['raises']}' for k, v in sorted(rows.items())[:6])}}}")
 
 
 CHECKS = [
@@ -505,4 +562,5 @@ CHECKS = [
     ("block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule", block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule),
     ("block_structure.block-rounds-hold-step-pause-and-stack-by-the-rule-on-overlapping-positions", block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions),
     ("block_structure.block-rounds-ship-the-procedure-measured-at-or-above-without", block_rounds_ship_the_procedure_measured_at_or_above_without),
+    ("block_structure.block-rounds-auto-judges-every-count-on-its-own-newest-results", block_rounds_auto_judges_every_count_on_its_own_newest_results),
 ]

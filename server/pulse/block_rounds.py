@@ -15,6 +15,12 @@ that is off (or at ratio 0) still forms its blocks and keeps its record, so ever
 The multiple is decided at the open from blocks completed before it: nothing that closes later is read. A close the engine cannot score (unverified,
 made while the engine was down) leaves its block without a result of its own (the block completes on its other positions).
 
+AUTO (owner 2026-11-15, "auto eval for each block count, set by last N 30 but minimal 15"): with `auto` on, every block count of every selected relation
+decides by itself whether it raises. Its evidence is the raise result of every position that opened while one of its procedures stood raised: level x the
+position's net at volume 1 -- the same for a count that raises and for one that only observes, so a switched-off count is judged on paper exactly as a
+switched-on one is judged on its real raises. The count raises while the PF of its newest `autoN` (30) results is at least `autoPf` (1.0); with fewer than
+`autoMin` (15) results it keeps its manual switch. A count that Auto switches on and has no ratio of its own raises by `autoRatio`.
+
 The same book is driven by the engine (pulse_trader.place / close) and by scripts/block_rounds_study.py, so a measured figure is the engine's rule.
 """
 from __future__ import annotations
@@ -28,6 +34,8 @@ RELATIONS = ("overall", "direction", "symbol", "indication", "type", "set", "ste
 COUNTS = (1, 2, 3, 4, 5, 6)
 RATIO_MAX, LEVEL_MAX, PAUSE_MAX, MULT_MAX = 2.0, 6, 6, 5.0
 KEEP_BLOCKS = 12          # completed blocks kept per procedure for the statistics
+AUTO_N, AUTO_MIN, AUTO_PF, AUTO_RATIO = 30, 15, 1.0, 1.0
+AUTO_N_MAX = 200
 
 
 @dataclass
@@ -45,9 +53,15 @@ class RoundsCfg:
     relations: Tuple[str, ...] = ("step",)
     counts: Dict[int, CountCfg] = field(default_factory=lambda: {n: CountCfg() for n in COUNTS})
     max_mult: float = 2.0
+    auto: bool = False
+    auto_n: int = AUTO_N
+    auto_min: int = AUTO_MIN
+    auto_pf: float = AUTO_PF
+    auto_ratio: float = AUTO_RATIO
 
     def to_json(self) -> Dict[str, Any]:
-        return {"enabled": self.enabled, "relations": list(self.relations), "maxMult": self.max_mult,
+        return {"enabled": self.enabled, "relations": list(self.relations), "maxMult": self.max_mult, "auto": self.auto, "autoN": self.auto_n,
+                "autoMin": self.auto_min, "autoPf": self.auto_pf, "autoRatio": self.auto_ratio,
                 "counts": {str(n): {"on": c.on, "ratio": c.ratio, "step": c.step, "maxLevel": c.max_level, "pause": c.pause} for n, c in sorted(self.counts.items())}}
 
 
@@ -69,6 +83,11 @@ def config_of(raw: Any) -> RoundsCfg:
         if picked:
             cfg.relations = picked
     cfg.max_mult = _num(raw.get("maxMult"), 2.0, 1.0, MULT_MAX)
+    cfg.auto = raw.get("auto") is True
+    cfg.auto_n = int(_num(raw.get("autoN"), AUTO_N, 1, AUTO_N_MAX))
+    cfg.auto_min = int(min(cfg.auto_n, _num(raw.get("autoMin"), AUTO_MIN, 1, AUTO_N_MAX)))
+    cfg.auto_pf = _num(raw.get("autoPf"), AUTO_PF, 0.5, 3.0)
+    cfg.auto_ratio = _num(raw.get("autoRatio"), AUTO_RATIO, 0.05, RATIO_MAX)
     counts = raw.get("counts")
     if isinstance(counts, dict):
         for n in COUNTS:
@@ -124,7 +143,8 @@ class RoundsBook:
         self.path = path
         self.cfg = cfg or RoundsCfg()
         self.groups: Dict[str, Dict[str, Any]] = {}          # "<relation>\t<key>\t<N>" -> procedure
-        self.members: Dict[str, Dict[str, Any]] = {}         # position id -> {"mult": m, "at": [[group id, block seq], ...]}
+        self.members: Dict[str, Dict[str, Any]] = {}         # position id -> {"mult": m, "at": [[group id, block seq, level at the open], ...]}
+        self.evidence: Dict[str, List[float]] = {}           # "<relation>\t<N>" -> the newest raise results (level x net at volume 1), AUTO_N_MAX kept
         self.error = ""
         self.load()
 
@@ -140,17 +160,39 @@ class RoundsBook:
             for n in COUNTS:
                 yield rel, n, self.gid(rel, key, n)
 
+    @staticmethod
+    def eid(relation: str, n: int) -> str:
+        return f"{relation}\t{n}"
+
+    def auto_verdict(self, relation: str, n: int) -> Dict[str, Any]:
+        """One block count's Auto verdict under one relation: the PF of its newest autoN raise results, whether it raises, and the source of the choice."""
+        c = self.cfg.counts.get(n) or CountCfg()
+        ev = self.evidence.get(self.eid(relation, n), [])[-self.cfg.auto_n:]
+        gains = sum(x for x in ev if x > 0)
+        losses = -sum(x for x in ev if x < 0)
+        pf = gains / losses if losses > 0 else (99.0 if gains > 0 else 0.0)
+        if not self.cfg.auto or len(ev) < self.cfg.auto_min:
+            return {"raises": bool(c.on), "source": "manual", "ratio": c.ratio, "results": len(ev), "pf": round(pf, 4)}
+        on = pf + 1e-12 >= self.cfg.auto_pf
+        return {"raises": on, "source": "auto", "ratio": c.ratio if c.ratio > 0 else self.cfg.auto_ratio, "results": len(ev), "pf": round(pf, 4)}
+
     def ask(self, keys: Dict[str, str]) -> Tuple[float, List[str]]:
         """(volume multiple, the procedures behind it) for a position that would open now; reads only, registers nothing."""
         if not self.cfg.enabled or self.error:
             return 1.0, []
         add, why = 0.0, []
+        verdicts: Dict[Tuple[str, int], Dict[str, Any]] = {}
         for rel, n, gid in self._procedures(keys):
             c = self.cfg.counts.get(n)
             g = self.groups.get(gid)
-            if c is None or not c.on or c.ratio <= 0 or g is None or g["level"] <= 0:
+            if c is None or g is None or g["level"] <= 0:
                 continue
-            add += c.ratio * g["level"]
+            v = verdicts.get((rel, n))
+            if v is None:
+                v = verdicts[(rel, n)] = self.auto_verdict(rel, n)
+            if not v["raises"] or v["ratio"] <= 0:
+                continue
+            add += v["ratio"] * g["level"]
             why.append(f"{rel}:N{n}:L{g['level']}")
         if add <= 0:
             return 1.0, []
@@ -167,7 +209,7 @@ class RoundsBook:
                 g["seq"] = int(g.get("seq", 0)) + 1
                 g["open"].append({"id": g["seq"], "n": 0, "closed": 0, "unit": 0.0, "weighted": 0.0})
             g["open"][-1]["n"] += 1
-            at.append([gid, g["open"][-1]["id"]])
+            at.append([gid, g["open"][-1]["id"], int(g["level"])])
         self.members[pid] = {"mult": float(mult) if mult and mult > 0 else 1.0, "at": at}
 
     def closed(self, pid: str, net: Optional[float], scored: bool = True) -> None:
@@ -176,7 +218,14 @@ class RoundsBook:
         if m is None:
             return
         counts = bool(scored) and isinstance(net, (int, float)) and not isinstance(net, bool) and net == net
-        for gid, bid in m["at"]:
+        for item in m["at"]:
+            gid, bid = item[0], item[1]
+            level = int(item[2]) if len(item) > 2 else 0
+            if counts and level > 0:
+                rel, _key, n_ = gid.split("\t")
+                ev = self.evidence.setdefault(self.eid(rel, int(n_)), [])
+                ev.append(round(level * float(net), 10))
+                del ev[:-AUTO_N_MAX]
             g = self.groups.get(gid)
             if g is None:
                 continue
@@ -204,7 +253,7 @@ class RoundsBook:
 
     # ---- persistence ----
     def to_json(self) -> Dict[str, Any]:
-        return {"version": 1, "groups": self.groups, "members": self.members}
+        return {"version": 1, "groups": self.groups, "members": self.members, "evidence": self.evidence}
 
     def save(self) -> None:
         if not self.path:
@@ -226,6 +275,8 @@ class RoundsBook:
             if not isinstance(d, dict) or d.get("version") != 1 or not isinstance(d.get("groups"), dict) or not isinstance(d.get("members"), dict):
                 raise ValueError("shape")
             self.groups, self.members = d["groups"], d["members"]
+            ev = d.get("evidence")
+            self.evidence = {str(k): [float(x) for x in v][-AUTO_N_MAX:] for k, v in ev.items() if isinstance(v, list)} if isinstance(ev, dict) else {}
         except Exception:
             self.groups, self.members = {}, {}
             self.error = "Block rounds state unreadable; raises disabled until the file is removed"
@@ -252,7 +303,8 @@ class RoundsBook:
             c = self.cfg.counts.get(n) or CountCfg()
             per.setdefault(str(n), {"count": n, "on": c.on, "ratio": c.ratio, "step": c.step, "maxLevel": c.max_level, "pause": c.pause,
                                     "groups": 0, "blocks": 0, "lost": 0, "raises": 0, "recovered": 0, "raisedNow": 0, "pausedNow": 0})
-        return {"config": self.cfg.to_json(), "error": self.error, "openPositions": len(self.members),
+        auto = [{"relation": rel, "count": n, **self.auto_verdict(rel, n)} for rel in self.cfg.relations for n in COUNTS]
+        return {"config": self.cfg.to_json(), "error": self.error, "openPositions": len(self.members), "auto": auto,
                 "byCount": [per[str(n)] for n in COUNTS], "groups": rows[:limit], "groupsTotal": len(self.groups)}
 
 
@@ -295,6 +347,23 @@ def _self_test() -> List[Tuple[str, bool]]:
     off = RoundsBook(cfg=config_of({"relations": ["overall"], "counts": {"1": {"on": True, "ratio": 1.0}}}))
     off.opened("x", k, 1.0)
     out.append(("off: nothing is tracked or raised", not off.groups and off.ask(k) == (1.0, [])))
+    # Auto: a count raises while its newest autoN raise results (level x net) read PF >= autoPf, with at least autoMin of them; else its manual switch
+    acfg = config_of({"enabled": True, "relations": ["overall"], "maxMult": 5, "auto": True, "autoN": 4, "autoMin": 3, "autoPf": 1.0,
+                      "counts": {"1": {"on": False, "ratio": 0.0}}})
+    ab = RoundsBook(cfg=acfg)
+    out.append(("auto: fewer than autoMin results keep the manual switch", ab.auto_verdict("overall", 1) == {"raises": False, "source": "manual", "ratio": 0.0, "results": 0, "pf": 0.0}))
+    ab.evidence[ab.eid("overall", 1)] = [1.0, 1.0, -0.5]
+    v = ab.auto_verdict("overall", 1)
+    out.append(("auto: a paying count raises at the auto ratio", v["raises"] and v["source"] == "auto" and v["ratio"] == AUTO_RATIO and abs(v["pf"] - 4.0) < 1e-9))
+    ab.evidence[ab.eid("overall", 1)] = [9.0, -1.0, -1.0, -1.0, -1.0]                 # only the newest 4 are read: PF 0
+    out.append(("auto: only the newest autoN results are read", not ab.auto_verdict("overall", 1)["raises"]))
+    ab.evidence.clear()
+    for i, net in enumerate([-1.0, 2.0, 2.0, 2.0]):                                  # N1: the loss raises; the three raised positions win
+        m, _ = ab.ask(k)
+        ab.opened(f"p{i}", k, m)
+        ab.closed(f"p{i}", net)
+    ev = ab.evidence.get(ab.eid("overall", 1), [])
+    out.append(("auto: an observing count records level x net of its raised positions", ev[:1] == [2.0] and len(ev) >= 1))
     return out
 
 
