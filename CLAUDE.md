@@ -2,6 +2,13 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-15 (latest), owner: "For all: use better working but also prioritize higher order amount."** Selection rule for every setting, indication, gate, Axis / Block /
+  DCA arm and default: (1) the executed PF must be better than the current setting on development AND sealed; (2) among arms that pass, prefer the one with MORE
+  executed orders (a higher PF on fewer orders is not preferred over a slightly lower PF on clearly more orders); a gain carried by a handful of orders is not shipped.
+  Report the order count next to every PF (as the 2026-11-04 rule already asks). Example (Axis, current grid, 4 symbols): no Axis 1.054 / 127 orders dev, 1.082 / 51 sealed;
+  the shipped all four 1.000 / 127, 0.783 / 66; prev 4 alone 1.227 / 121, 1.084 / 51 -- the long single-control windows (prev 8 / 12, cont 8, pause 8) read the same
+  1.227 / 121 on development and equal no Axis on sealed, so most of that gain is the Axis selection path, not the prev rule.
+
 - **2026-11-15 (latest), owner: "pool PF under 1 is normal, note this .. important is always post Base and exec PF!!! Doc this as infos" / "make those succeeding ones work and increase their ratio for vol".**
   (a) **How to read PF (standing info for every session and project):** the pool PF (every Set's tape, every signal, before Base) is normally UNDER 1 -- the signals'
   gross move per order is under the cost, so an unfiltered pool reads 0.4 - 0.9 (here: every onset of the 1,812 Inverse names 0.37 - 0.85, every slow
