@@ -455,5 +455,8 @@
       ]
     }
   ],
-  "minPfStepAutoLow": 1.02
+  "minPfStepAutoLow": 1.02,
+  "slAutoRange": true,
+  "slAutoMin": 20,
+  "slAutoTol": 5
 }

@@ -749,6 +749,9 @@ export type LiveStats = {
       dropped?: Array<{ entry: string; name: string; reason: string }> };
     /** The Auto floor per config Set (minPfStepAutoScope "set"): Sets with their own learned floor, Sets on the defaults. */
     setFloors?: { scope?: string; learned?: number; defaults?: number; minAdmitted?: number };
+    /** Auto SL range per TP step (slAutoRange): the learned min / max SL ratio per step and side, the orders behind it and the PF in the range against all. */
+    slRanges?: { auto?: boolean; minOrders?: number; tolPct?: number;
+      steps?: Array<{ step: number; side: number; tpPct: number; ratios: number[]; lo: number | null; hi: number | null; orders: number; pfIn: number | null; pfAll: number | null; source: string }> };
     minPfSignals?: number;
     /** The engine's expansion of `indicationConfigs`: names built per entry and the combinations it dropped (with the reason). */
     indicationConfigs?: {

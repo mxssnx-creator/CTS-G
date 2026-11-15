@@ -2025,6 +2025,9 @@ function SettingsPage() {
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
                 <Slider label="Execution last N (end of Real)" value={overlay.execGateN} min={0} max={60} step={5} hint="the newest N results of the lane's Real Set must pass the minimum PF again right before execution; 0 = off (10 .. 35 tested)" onChange={(v) => patch("execGateN", v)} />
+                <EnableSlider label="Auto SL range per TP step" on={overlay.slAutoRange} hint="each TP step (and direction) learns its min / max SL ratio from the orders closed before the window it judges; a Set outside it is not valid (trailing Sets never); without enough orders the manual grid below stands" onChange={(v) => patch("slAutoRange", v)} />
+                <Slider label="Auto SL range: orders a range needs" value={overlay.slAutoMin} min={1} max={500} step={1} onChange={(v) => patch("slAutoMin", v)} />
+                <Slider label="Auto SL range: tolerance to the best PF (%)" value={overlay.slAutoTol} min={0} max={50} step={1} hint="the widest range whose PF is within this of the best" onChange={(v) => patch("slAutoTol", v)} />
                 <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
                 <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
                 {(["micro", "minimal", "short", "normal", "long", "wide"] as const).map((rg) => {

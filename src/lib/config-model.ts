@@ -555,6 +555,9 @@ export type PulseOverlay = {
   exitOptSlMax: number;
   exitMinHoldS: number;
   setSlMinRatio: number;
+  slAutoRange: boolean;
+  slAutoMin: number;
+  slAutoTol: number;
   execGateN: number;
   slRatiosByRange: Record<string, number[]>;
   exitSetHoldBars: number;
@@ -852,6 +855,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
   setSlMinRatio: 0.5,
+  slAutoRange: true,
+  slAutoMin: 20,
+  slAutoTol: 5,
   execGateN: 0,
   slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
   exitSetHoldBars: 720,
@@ -1128,6 +1134,9 @@ export type CtsSettings = {
   exitOptSlMax?: number;
   exitMinHoldS?: number;
   setSlMinRatio?: number;
+  slAutoRange?: boolean;
+  slAutoMin?: number;
+  slAutoTol?: number;
   execGateN?: number;
   slRatiosByRange?: Record<string, number[]>;
   exitSetHoldBars?: number;
@@ -1699,6 +1708,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitOptSlMax: num(cts.exitOptSlMax, 0.9),
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     setSlMinRatio: num(cts.setSlMinRatio, 0.5),
+    slAutoRange: bool(cts.slAutoRange, true),
+    slAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.slAutoMin, 20)))),
+    slAutoTol: Math.max(0, Math.min(50, num(cts.slAutoTol, 5))),
     execGateN: Math.max(0, Math.min(200, Math.round(num(cts.execGateN, 0)))),
     slRatiosByRange: ((raw: unknown): Record<string, number[]> => {
       if (!raw || typeof raw !== "object") return { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] };
