@@ -461,5 +461,5 @@
   "slAutoTol": 5,
   "trailStepMin": 3,
   "scanWorkers": 3,
-  "trailTimeExit": false
+  "trailTimeExit": true
 }

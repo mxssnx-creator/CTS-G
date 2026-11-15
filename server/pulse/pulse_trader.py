@@ -5052,6 +5052,12 @@ class Pulse:
         trailing = getattr(own, "kind", "") == "trail" if own is not None else bool(pos.trail_set_id and pos.trail_set_id == pos.set_id)
         if trailing and not getattr(self.sets, "trail_time_exit", True):
             hold_bars = 0                                # trailTimeExit off (owner 2026-11-15): no time exit for a trailing Set, also for one opened before the switch
+        elif trailing and hold_bars >= 10 ** 9:
+            # opened while trailTimeExit was off (a hold that never ends); switched back on (owner 2026-11-15), it takes the Set's current hold
+            hold_bars = int(getattr(own, "hold_bars", 0) or 0) if own is not None and int(getattr(own, "hold_bars", 0) or 0) < 10 ** 9 else 0
+            hold_bars = hold_bars or int(self.sets.hist_time_bars)
+        if trailing and pos.trail_armed and getattr(self.sets, "trail_armed_free", False):
+            hold_bars = 0                                # trailHoldArmedFree: an armed trail has no time exit, as in the replay
         if hold_bars and age >= float(hold_bars) * 60.0:
             self.close_pos(pos, px, "time")
             return

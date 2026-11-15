@@ -3579,13 +3579,22 @@ def trailing_sets_have_no_time_exit_unless_asked():
                 p.px[sym] = pos.entry * 0.9999
                 p.manage()
                 out[(name, flag)] = (sym in p.open, [c.reason for c in p.closed])
+        p, sym, pos = _lane_pulse("indications:1m:tr0.48:0.36")        # opened while the switch was off, then switched back on
+        p.exits.enabled = False
+        p.sets.trail_time_exit = True
+        pos.trail_set_id = pos.set_id
+        pos.set_hold_bars = se.HOLD_NEVER
+        pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+        p.px[sym] = pos.entry * 0.9999
+        p.manage()
+        out["never, back on"] = (sym in p.open, [c.reason for c in p.closed])
         return out
     live = _isolated(run)
     on, off = tapes[True], tapes[False]
     ok = ("time" in on[0]["trail"] and "time" not in off[0]["trail"] and "time" in on[0]["base"] and "time" in off[0]["base"]
           and off[1] == {se.HOLD_NEVER} and HOLD_ok(on[1])
           and live[("trail", True)] == (False, ["time"]) and live[("trail", False)] == (True, [])
-          and live[("base", True)] == (False, ["time"]) and live[("base", False)] == (False, ["time"]))
+          and live[("base", True)] == (False, ["time"]) and live[("base", False)] == (False, ["time"]) and live["never, back on"] == (False, ["time"]))
     return ok, f"replay exits on / off: {on[0]} / {off[0]}; trailing holds off {off[1]}; live {live}"
 
 
@@ -3605,6 +3614,64 @@ def slow_cycles_alone_never_shed_the_set_history():
     over = g.observe(n_sym=150, n_open=20, hot_ms=1600, warm_ms=3500, cycle_overrun=True, rss_mb=g.crit_limit(150) + 10)
     ok = b.level == "critical" and b.hist_run and "hist" not in b.shed and not over.hist_run and "hist" in over.shed
     return ok, f"overruns only: level {b.level}, history {b.hist_run}, shed {b.shed}; memory over the limit: history {over.hist_run}"
+
+
+def an_armed_trail_may_outlive_the_time_exit():
+    """trailHoldArmedFree (2026-11-15, owner "try multiple solutions .. it can dynamically vary"): the time exit applies to a trailing Set only while its trail has
+    not armed. On hand-made bars: an armed trail that is never hit stays open past the hold, an unarmed one leaves at the hold; the bar walk (step), the scan with
+    the bar index and the scan without it agree; off, both leave at the hold. Live: an armed trailing position past its hold stays open, an unarmed one closes."""
+    import set_engine as se
+    from common import overlay
+    b = se.SetBook()
+    b.load(overlay(**{"stratGeneral": True, "stratIndications": False, "setStepMax": 12}))
+    st = next(x for x in b.by_idx if x.kind == "trail" and x.side >= 0)
+    arm = st.trail_arm / 100.0
+    up = [[100.0, 100.0, 100.0, 100.0, 1.0]] + [[100.0 * (1 + arm * 2 * k / 5), 100.0 * (1 + arm * 2 * k / 5), 100.0 * (1 + arm * 2 * (k - 1) / 5), 100.0 * (1 + arm * 2 * k / 5), 1.0]
+                                                for k in range(1, 6)]
+    top = up[-1][3]
+    armed_bars = up + [[top, top, top, top, 1.0]] * 60
+    flat_bars = [[100.0, 100.0, 100.0, 100.0, 1.0]] * 66
+    out = {}
+    for name, bars in (("armed", armed_bars), ("unarmed", flat_bars)):
+        for free in (False, True):
+            cfg = {"entry_conf": 0.5, "time_bars": 20, "scratch_bars": 10 ** 6, "scratch_min": 1.0, "cooldown": 0, "cost_pct": 0.12, "honor_tp": False,
+                   "trail_armed_free": free}
+            dirs = [1] + [0] * (len(bars) - 1)
+            confs = [1.0] + [0.0] * (len(bars) - 1)
+            got = []
+            for mode in ("index", "plain", "step"):
+                lane = se.SetLane(st, "T")
+                if mode == "step":
+                    rows = []
+                    for i, bar in enumerate(bars):
+                        r = lane.step(i, bar, dirs[i], confs[i], True, cfg)
+                        if r:
+                            rows.append(r)
+                else:
+                    rows = lane.scan(0, len(bars), bars, dirs, confs, True, cfg, [0], se.BarIndex(bars) if mode == "index" else None)
+                got.append([(r["reason"], r["exit_i"]) for r in rows])
+            out[(name, free)] = got
+    replay_ok = (all(len({tuple(g) for g in v}) == 1 for v in out.values())
+                 and out[("armed", False)][0] == [("time", 20)] and out[("armed", True)][0] == []
+                 and out[("unarmed", False)][0] == [("time", 20)] and out[("unarmed", True)][0] == [("time", 20)])
+
+    def run():
+        res = {}
+        for armed in (True, False):
+            p, sym, pos = _lane_pulse("indications:1m:tr0.48:0.36")
+            p.exits.enabled = False
+            p.sets.trail_armed_free = True
+            pos.trail_set_id = pos.set_id
+            pos.trail_armed = armed
+            pos.set_hold_bars = int(p.sets.hist_time_bars)
+            pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+            p.px[sym] = pos.entry * 1.0001
+            p.manage()
+            res[armed] = (sym in p.open, [c.reason for c in p.closed])
+        return res
+    live = _isolated(run)
+    ok = replay_ok and live[True] == (True, []) and live[False] == (False, ["time"])
+    return ok, f"replay (index, plain, step) {out}; live armed / unarmed {live}"
 
 
 CHECKS = [
@@ -3654,6 +3721,7 @@ CHECKS = [
     ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),
     ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
     ("trader.trailing-sets-have-no-time-exit-unless-asked", trailing_sets_have_no_time_exit_unless_asked),
+    ("trader.an-armed-trail-may-outlive-the-time-exit", an_armed_trail_may_outlive_the_time_exit),
     ("trader.slow-cycles-alone-never-shed-the-set-history", slow_cycles_alone_never_shed_the_set_history),
     ("trader.set-lane-honours-tp-as-the-replay-does", a_set_lane_honours_tp_only_as_the_replay_does),
     ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),

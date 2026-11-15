@@ -563,6 +563,8 @@ export type PulseOverlay = {
   slRatiosByRange: Record<string, number[]>;
   exitSetHoldBars: number;
   trailTimeExit: boolean;
+  trailHoldBars: number;
+  trailHoldArmedFree: boolean;
   exitPfWindow: number;
   exitDeactN: number;
   exitMinPf: number;
@@ -864,7 +866,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   execGateN: 0,
   slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
   exitSetHoldBars: 720,
-  trailTimeExit: false,
+  trailTimeExit: true,
+  trailHoldBars: 0,
+  trailHoldArmedFree: false,
   exitPfWindow: 8,
   exitDeactN: 25,
   exitMinPf: 1.25,
@@ -1146,6 +1150,8 @@ export type CtsSettings = {
   slRatiosByRange?: Record<string, number[]>;
   exitSetHoldBars?: number;
   trailTimeExit?: boolean;
+  trailHoldBars?: number;
+  trailHoldArmedFree?: boolean;
   exitPfWindow?: number;
   exitDeactN?: number;
   exitMinPf?: number;
@@ -1729,7 +1735,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       return out;
     })(cts.slRatiosByRange),
     exitSetHoldBars: num(cts.exitSetHoldBars, 720),
-    trailTimeExit: typeof cts.trailTimeExit === "boolean" ? cts.trailTimeExit : false,
+    trailTimeExit: typeof cts.trailTimeExit === "boolean" ? cts.trailTimeExit : true,
+    trailHoldBars: Math.max(0, Math.min(4320, num(cts.trailHoldBars, 0))),
+    trailHoldArmedFree: cts.trailHoldArmedFree === true,
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
     exitMinPf: pfFloor(num(cts.exitMinPf, GATE_MIN_PF_DEFAULT)),

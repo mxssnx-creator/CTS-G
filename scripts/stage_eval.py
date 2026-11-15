@@ -97,7 +97,8 @@ def evidence_s(book) -> float:
 def lane_cfg(b: se.SetBook) -> Dict[str, Any]:
     return {"entry_conf": b.entry_conf, "time_bars": b.hist_time_bars, "scratch_bars": b.scratch_bars,
             "scratch_min": b.scratch_min, "cooldown": b.cooldown_bars, "cost_pct": b.cost_pct,
-            "honor_tp": bool(getattr(b, "hist_honor_tp", True)), "min_sl_distance_pct": b.min_sl_distance_pct}
+            "honor_tp": bool(getattr(b, "hist_honor_tp", True)), "min_sl_distance_pct": b.min_sl_distance_pct,
+            "trail_armed_free": bool(getattr(b, "trail_armed_free", False))}
 
 
 # ---- phase 1: shadow tapes and signals, one worker per symbol ---------------------------------------------------------

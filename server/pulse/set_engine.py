@@ -1789,7 +1789,7 @@ class SetLane:
                     o["peak"] = max(o["peak"], float(bar[1]))
                 else:
                     o["peak"] = min(o["peak"], float(bar[2]))
-            if why is None and held >= (self.hold or cfg["time_bars"]):
+            if why is None and held >= (self.hold or cfg["time_bars"]) and not (o.get("trail") is not None and cfg.get("trail_armed_free")):
                 why, px = "time", float(bar[3])
             if why is None and held >= cfg["scratch_bars"]:
                 if (float(bar[3]) - entry) / entry * side >= cfg["scratch_min"]:
@@ -1845,6 +1845,7 @@ class SetLane:
         if cand is None:
             cand = [i for i in range(i0, i1) if dirs[i] != 0 and confs[i] >= thr]
         time_bars = self.hold or cfg["time_bars"]
+        armed_free = bool(cfg.get("trail_armed_free"))        # trailHoldArmedFree: an armed trail has no time exit (the walk path; the lookup path runs only unarmed)
         scratch_bars = cfg["scratch_bars"]
         scratch_min = cfg["scratch_min"]
         cooldown = cfg["cooldown"]
@@ -1995,7 +1996,7 @@ class SetLane:
                             peak = max(peak, high)
                         else:
                             peak = min(peak, low)
-                    if why is None and held >= time_bars:
+                    if why is None and held >= time_bars and not (trail is not None and armed_free):
                         why, px = "time", close
                     if why is None and held >= scratch_bars and (close - entry) / entry * side >= scratch_min:
                         why, px = "scratch+", close
@@ -2446,6 +2447,8 @@ class SetBook:
         self.sl_max_ratio = 0.0
         self.exit_set_hold_bars = 0
         self.trail_time_exit = True
+        self.trail_hold_bars = 0
+        self.trail_armed_free = False
         self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
         self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
         self.trail_step_max = TRAIL_STEP_MAX                  # trailStepMax: the largest trailing arm in TP steps (22 = 2.2 %, up to TRAIL_STEP_CEIL)
@@ -2781,6 +2784,8 @@ class SetBook:
         # exitSetHoldBars (0 = the global time stop): Exit Sets (no TP) hold this many minutes before the time exit
         self.exit_set_hold_bars = int(max(0, min(720, finite(ov.get("exitSetHoldBars"), 0.0))))
         self.trail_time_exit = bool(ov.get("trailTimeExit", True))      # false: trailing Sets have no time exit (hold_bars_for -> HOLD_NEVER)
+        self.trail_hold_bars = int(max(0, min(4320, finite(ov.get("trailHoldBars"), 0.0))))   # trailing Sets' own max hold in minutes; 0 = the global time stop
+        self.trail_armed_free = bool(ov.get("trailHoldArmedFree", False))  # the time exit applies only while a trailing Set's trail has not armed
         self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
         try:
             self.trail_step_max = int(max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_CEIL, int(float(ov.get("trailStepMax") or TRAIL_STEP_MAX)))))
@@ -3341,7 +3346,8 @@ class SetBook:
         depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
         manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
         automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
-        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0))
+        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0),
+                        int(getattr(self, "trail_hold_bars", 0) or 0))
         return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
@@ -3928,6 +3934,7 @@ class SetBook:
             "cost_pct": self.cost_pct,
             "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
             "min_sl_distance_pct": self.min_sl_distance_pct,
+            "trail_armed_free": bool(getattr(self, "trail_armed_free", False)),
         }
         # per pack: directions, confidences and the bars where an entry is possible (shared by all its Sets)
         dirs: Dict[str, List[int]] = {}
@@ -4998,7 +5005,9 @@ class SetBook:
     def hold_bars_for(self, st: "SetState") -> int:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
         if st.kind == "trail" and not getattr(self, "trail_time_exit", True):
-            return HOLD_NEVER            # trailTimeExit off (owner 2026-11-15 "for trailing no max hold time"): a trailing Set leaves only by its stop / trail (and its TP when honoured)
+            return HOLD_NEVER
+        if st.kind == "trail" and getattr(self, "trail_hold_bars", 0):
+            return int(self.trail_hold_bars)  # trailHoldBars: the trailing Sets' own max hold (minutes)            # trailTimeExit off (owner 2026-11-15 "for trailing no max hold time"): a trailing Set leaves only by its stop / trail (and its TP when honoured)
         table = getattr(self, "step_hold", None) or {}
         manual = int(table.get(self.step_of(st), 0)) if table else 0
         if not manual and st.kind == "exit":
