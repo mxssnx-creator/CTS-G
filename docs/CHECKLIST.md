@@ -72,7 +72,7 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 - [x] One resolver `floor_of`: own learned floor -> the configuration's own manual floor (Signals, Micro range, lane policy) -> step learned floor -> 1 + TP% x ratio.
 - [x] Collisions fixed: Micro range / Signals floors overrode Auto; desk Short Range floor labelled unused under step floors; Signals floor out of the window-size section; window-size class names.
 - [x] Check `step-pf.every-coordination-asks-its-own-floor-...`, mutants `own floor:` (3, all caught).
-- [~] Old against new code on the x02 overlay (4 symbols, dev + sealed): running (chain19).
+- [x] Old against new code on the x02 overlay (4 symbols, trade_sim, executed PF / orders / net): development **1.054 / 127 / +5.82 % -> 1.154 / 123 / +15.69 %**, sealed 1.082 / 51 / +3.72 % -> identical. Better on development, equal on sealed.
 
 ## Execution last-N check (owner: 10 .. 30 step 5, 50 symbols x 3 days, set best as default)
 - [~] trade_sim, 50 symbols (fresh 3-day snapshot 11-12 10:00 .. 11-15 10:00 UTC), x02 overlay with its Axis, execGateN 0 / 10 / 15 / 20 / 25 / 30 on one shared replay (`--cache-shared execGateN`): running (chain18).

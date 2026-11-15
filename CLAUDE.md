@@ -22,7 +22,7 @@
   configurations' orders. Desk: `shortRangeMinPf` is labelled unused while the step floors are on (they always took precedence), the Signals floor moved out of the
   window-size section (it applies whatever that setting), the window-size classes are named "Window Micro / Minimal / ..." (they collided with the TP range names),
   and a line states the resolution order. Snapshot `stagePolicy.minPfSource`. Check `step-pf.every-coordination-asks-its-own-floor-auto-first-then-its-own-manual-default`,
-  mutants `own floor:` (3). Shipped as asked; measured old against new code on the x02 overlay (4 symbols): see docs/CHECKLIST.md.
+  mutants `own floor:` (3). Shipped as asked; measured old against new code on the x02 overlay (4 symbols, executed PF / orders / net): development 1.054 / 127 / +5.82 % -> **1.154 / 123 / +15.69 %**, sealed 1.082 / 51 / +3.72 % unchanged.
 - **2026-11-15 (newest), Axis / Block / DCA decided on the current grid** (stack_eval, 4 symbols, x02 overlay, executed PF / orders dev, sealed): no Axis 1.054 / 127, 1.082 / 51;
   shipped all four 1.000 / 127, 0.783 / 66; **prev 4 alone 1.227 / 121, 1.084 / 51** (prev 8 / 12 and cont 8 equal no Axis on sealed; cont 1 1.074, pause 4 0.970 dev / 1.420 sealed,
   last 1 / 2 0.864 / 0.953 sealed). **x02 now runs Axis prev 4 only** (`axisPrevMaxWindow` 4, last / cont / pause off; better than the shipped all-four on both windows and not
