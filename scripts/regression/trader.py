@@ -3544,6 +3544,56 @@ def alternate_lane_keeps_the_executed_group_gate():
     return ok, f"healthy alternative={allowed[0] is rows[2]}, all losing denied={denied[0] is None}, gate off={disabled[0] is rows[1]}"
 
 
+def trailing_sets_have_no_time_exit_unless_asked():
+    from common import overlay
+    """trailTimeExit (owner 2026-11-15 "for trailing no max hold time use"): off, a trailing Set's lane has no time exit -- in the replay (its tape holds no
+    "time" exit on a market that never arms the trail nor reaches the stop) and live (a trailing position held past the hold stays open, also one opened
+    before the switch); base and Exit Sets keep theirs. On (the engine default, fixtures) every lane keeps the earlier time exit."""
+    import set_engine as se
+    from common import synth_bars, T0
+    tapes = {}
+    for flag in (True, False):
+        b = se.SetBook()
+        b.load(overlay(**{"stratGeneral": True, "stratIndications": False, "setStepMax": 12, "trailTimeExit": flag, "timeStopS": 1800}))
+        b.bars["Q-USDT"] = synth_bars(3, 900, drift=0.0, vol=0.0004)
+        b.bar_t["Q-USDT"] = T0 - 60
+        b.replay_all(now=T0)
+        reasons = {"trail": set(), "base": set()}
+        for st in b.by_idx:
+            if st.kind in reasons:
+                reasons[st.kind].update(r[6] for r in b._hist_rows.get("Q-USDT", {}).get(st.id, ()))
+        holds = {st.hold_bars for st in b.by_idx if st.kind == "trail"}
+        tapes[flag] = (reasons, holds)
+
+    def run():
+        out = {}
+        for flag in (True, False):
+            for name, sid in (("trail", "indications:1m:tr0.48:0.36"), ("base", "indications:1m:sl1.00:st4")):
+                p, sym, pos = _lane_pulse(sid)
+                p.exits.enabled = False
+                p.sets.trail_time_exit = flag
+                if name == "trail":
+                    pos.trail_set_id = sid
+                pos.set_hold_bars = int(p.sets.hist_time_bars)          # held with the earlier hold
+                pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+                p.px[sym] = pos.entry * 0.9999
+                p.manage()
+                out[(name, flag)] = (sym in p.open, [c.reason for c in p.closed])
+        return out
+    live = _isolated(run)
+    on, off = tapes[True], tapes[False]
+    ok = ("time" in on[0]["trail"] and "time" not in off[0]["trail"] and "time" in on[0]["base"] and "time" in off[0]["base"]
+          and off[1] == {se.HOLD_NEVER} and HOLD_ok(on[1])
+          and live[("trail", True)] == (False, ["time"]) and live[("trail", False)] == (True, [])
+          and live[("base", True)] == (False, ["time"]) and live[("base", False)] == (False, ["time"]))
+    return ok, f"replay exits on / off: {on[0]} / {off[0]}; trailing holds off {off[1]}; live {live}"
+
+
+def HOLD_ok(holds):
+    import set_engine as se
+    return se.HOLD_NEVER not in holds
+
+
 CHECKS = [
     ("trader.alternate-lane-keeps-the-executed-group-gate", alternate_lane_keeps_the_executed_group_gate),
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
@@ -3590,6 +3640,7 @@ CHECKS = [
     ("trader.set-lane-does-not-read-the-exit-strategies", the_set_lane_does_not_read_the_exit_strategies),
     ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),
     ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
+    ("trader.trailing-sets-have-no-time-exit-unless-asked", trailing_sets_have_no_time_exit_unless_asked),
     ("trader.set-lane-honours-tp-as-the-replay-does", a_set_lane_honours_tp_only_as_the_replay_does),
     ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),
     ("trader.exit-lane-scores-only-its-own-closes", exit_lane_scores_only_its_own_closes),

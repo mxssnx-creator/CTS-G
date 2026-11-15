@@ -2093,6 +2093,197 @@ def parse_step_hold(on: Any, minutes: Any) -> Dict[int, int]:
     return out
 
 
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------
+# Forked lane scans (overlay scanWorkers, owner 2026-11-15 "fix all performance issues ... async processings fully, multiple and for each").
+# A warm replay (signal memo hit) spends most of its time in the per-Set lane scans of one symbol, one Set after the other in one thread under the GIL.
+# Every Set's scan is a pure function of the symbol's frozen bars, the pack's signals and the Set's own geometry, so the Sets are split into balanced shares
+# and each share is scanned in a forked child: the child inherits exactly the replay's frame (same objects, nothing re-loaded, nothing re-sent), scans,
+# packs its rows into the same RowCols the in-thread loop builds and sends them back. The parent keeps the in-thread order for the tape aliases, so the
+# stored columns, ids and aliases equal the loop's (check processing.forked-lane-scans-equal-the-in-thread-scans). Any failure (no fork, a child that
+# dies, times out or answers garbage) returns None and the replay runs the in-thread loop: the result is the same either way, only slower.
+SCAN_FORK_MAX = 8
+HOLD_NEVER = 10 ** 9             # a Set's hold_bars that never ends (trailing Sets with trailTimeExit off): stop, trail and target decide alone
+SNAP_CACHE_MIN_COST_S = 0.25     # SetBook.snapshot_cached: snapshots cheaper than this are built on every call
+SNAP_CACHE_X = 20.0              # a costly snapshot is rebuilt at most every 20 x its own cost (about 5 % of one core) ...
+SNAP_CACHE_MAX_S = 60.0          # ... and at least every minute
+SCAN_FORK_MIN_SETS = 64          # fewer Sets than this are scanned in the replay's own thread (a fork costs more)
+SCAN_FORK_TIMEOUT_S = 1800.0
+
+
+def _scan_share(book: "SetBook", symbol: str, sets: Sequence["SetState"], packs: Sequence[str], bars, base_ts: float, warmup: int, n: int,
+                cfg: Dict[str, Any], dirs, confs, cand, acc, cand_side) -> Tuple[Dict[Tuple[str, str, int], int], List[Tuple[str, "RowCols", bytes]]]:
+    """One share of a symbol's Sets: the pause plan of the packs it touches, then each Set's scan exactly as _replay_symbol's loop does (no hold
+    candidates: the forked path is off with hold Auto). Returns (pause_now entries of these packs on this symbol, [(set id, columns, tape key)])."""
+    plan = book._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc, packs=packs)
+    own = set(packs)
+    pauses = {k: v for k, v in book.pause_now.items() if k[1] == symbol and k[0] in own}
+    out: List[Tuple[str, RowCols, bytes]] = []
+    for st in sets:
+        lane = SetLane(st, symbol)
+        sel_pause = book._lane_pause(lane, st.pack, plan, st.side)
+        trades = lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
+        if not trades:
+            continue
+        cols = RowCols([{"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"], "pnl": done["pnl"], "pnl_pct": done["pnl_pct"],
+                         "hold_s": done["hold_s"], "reason": done["reason"], "set_id": st.id} for done in trades])
+        # the in-thread loop's tape signature (entry, exit, reason, pnl_pct, side) as exact bytes: equal bytes = equal orders
+        key = (array("q", [d["entry_i"] for d in trades]).tobytes() + array("q", [d["exit_i"] for d in trades]).tobytes()
+               + array("d", [d["pnl_pct"] for d in trades]).tobytes() + "\x1f".join(f"{d['reason']}\x1e{d['side']}" for d in trades).encode())
+        out.append((st.id, cols, key))
+    return pauses, out
+
+
+def _scan_shares(book: "SetBook", symbol: str, sets: Sequence["SetState"], cand: Dict[str, List[int]], k: int) -> List[List["SetState"]]:
+    """Split the Sets into k shares of about equal work (a Set's work ~ its pack's entry bars), whole packs where they fit, each share in by_idx order."""
+    cost = {st.id: 1 + len(cand.get(st.pack) or ()) for st in sets}
+    total = sum(cost.values())
+    cap = total / k
+    units: List[List[SetState]] = []
+    by_pack: Dict[str, List[SetState]] = {}
+    for st in sets:
+        by_pack.setdefault(st.pack, []).append(st)
+    for rows in by_pack.values():
+        w = sum(cost[st.id] for st in rows)
+        if w <= cap / 2:
+            units.append(rows)
+            continue
+        part: List[SetState] = []
+        acc_w = 0.0
+        for st in rows:                       # a large pack is cut into pieces of about half a share
+            part.append(st)
+            acc_w += cost[st.id]
+            if acc_w >= cap / 2:
+                units.append(part)
+                part, acc_w = [], 0.0
+        if part:
+            units.append(part)
+    units.sort(key=lambda u: -sum(cost[st.id] for st in u))
+    shares: List[List[SetState]] = [[] for _ in range(k)]
+    loads = [0.0] * k
+    for u in units:                           # longest unit first onto the lightest share
+        j = loads.index(min(loads))
+        shares[j].extend(u)
+        loads[j] += sum(cost[st.id] for st in u)
+    order = {st.id: i for i, st in enumerate(sets)}
+    return [sorted(sh, key=lambda st: order[st.id]) for sh in shares if sh]
+
+
+def scan_forked(book: "SetBook", symbol: str, bars, base_ts: float, warmup: int, n: int, cfg: Dict[str, Any], dirs, confs, cand, acc, cand_side,
+                on_step: Optional[Callable[[], None]] = None) -> Optional[Dict[str, "RowCols"]]:
+    """{set id: columns} of every Set of this symbol that traded (aliased Sets share their first twin's columns), the pause_now entries applied; None = not
+    done (the caller scans in its own thread)."""
+    if not hasattr(os, "fork"):
+        return None
+    sets = [st for st in book.by_idx if st.pack in book.packs and book.symbol_allows(st.pack, symbol)]
+    k = max(1, min(int(book.scan_workers or 0), SCAN_FORK_MAX, os.cpu_count() or 1, len(sets) // max(1, SCAN_FORK_MIN_SETS)))
+    if k < 1 or len(sets) < SCAN_FORK_MIN_SETS:
+        return None
+    import gc
+    import pickle
+    import selectors
+    import warnings
+    shares = _scan_shares(book, symbol, sets, cand, k)
+    share_packs = [[p for p in book.packs if any(st.pack == p for st in share)] for share in shares]
+    covered = {p for ps in share_packs for p in ps}
+    share_packs[0] += [p for p in book.packs if p not in covered]       # a pack without a Set here still gets its pause plan, as in the in-thread pass
+    kids: List[Tuple[int, int]] = []
+    try:
+        for share, packs in zip(shares, share_packs):
+            packs = [p for p in book.packs if p in set(packs)]
+            r, w = os.pipe()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)      # "multi-threaded, fork() may deadlock": the child takes no lock and does no I/O but its pipe
+                pid = os.fork()
+            if pid == 0:                                                 # child: compute, write, leave without running any parent cleanup
+                code = 1
+                try:
+                    os.close(r)
+                    gc.disable()                                         # a collection would touch (and so copy) the parent's whole heap
+                    blob = pickle.dumps((list(_CODES),) + _scan_share(book, symbol, share, packs, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc,
+                                                                      cand_side), 5)
+                    view = memoryview(blob)
+                    while view:
+                        view = view[os.write(w, view):]
+                    code = 0
+                except BaseException:
+                    pass
+                finally:
+                    os._exit(code)
+            os.close(w)
+            kids.append((pid, r))
+        bufs = {r: bytearray() for _pid, r in kids}
+        sel = selectors.DefaultSelector()
+        for _pid, r in kids:
+            sel.register(r, selectors.EVENT_READ)
+        t0 = time.monotonic()
+        open_n = len(kids)
+        while open_n:
+            if time.monotonic() - t0 > SCAN_FORK_TIMEOUT_S:
+                raise TimeoutError("forked scan timed out")
+            for key, _ev in sel.select(timeout=1.0):
+                chunk = os.read(key.fd, 1 << 20)
+                if chunk:
+                    bufs[key.fd] += chunk
+                else:
+                    sel.unregister(key.fd)
+                    open_n -= 1
+            if on_step:
+                on_step()
+        sel.close()
+        results = []
+        for pid, r in kids:
+            _p, status = os.waitpid(pid, 0)
+            if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+                raise RuntimeError("forked scan failed")
+            results.append(pickle.loads(bytes(bufs[r])))
+        kids_done = True
+    except Exception:
+        for pid, _r in kids:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+        kids_done = False
+    finally:
+        for _pid, r in kids:
+            try:
+                os.close(r)
+            except OSError:
+                pass
+    if not kids_done:
+        return None
+    got: Dict[str, Tuple[RowCols, bytes]] = {}
+    for codes, pauses, rows in results:
+        # a child may have met a row word the parent's table does not hold yet: register it here and recode that child's columns
+        table = bytes(_code(wd) for wd in codes)
+        same = table == bytes(range(len(codes)))
+        book.pause_now.update(pauses)
+        for sid, cols, key in rows:
+            if not same:
+                cols.side, cols.reason = bytearray(cols.side.translate(table.ljust(256, b"\0"))), bytearray(cols.reason.translate(table.ljust(256, b"\0")))
+            got[sid] = (cols, key)
+    packed: Dict[str, RowCols] = {}
+    first_of: Dict[bytes, str] = {}
+    for st in sets:                                   # the in-thread order: the first Set with a tape keeps its columns, a later twin shares them
+        hit = got.get(st.id)
+        if hit is None:
+            continue
+        cols, key = hit
+        twin = first_of.get(key)
+        if twin is not None and len(packed[twin]) == len(cols):
+            packed[st.id] = packed[twin].share(st.id)
+        else:
+            first_of.setdefault(key, st.id)
+            packed[st.id] = cols
+    if sets:
+        book.progress.set_id = sets[-1].id
+    return packed
+
+
 class SetBook:
     def __init__(self) -> None:
         self.enabled = True
@@ -2235,6 +2426,7 @@ class SetBook:
         self.relation_at = 0.0                                  # the event clock of that pass (0 = none yet)
         self.relation_ms = 0.0                                  # what the last pass spent on the relation lanes
         self.window_basis = "time"           # lastNBasis: "time" (windows inside the lookback) or "count" (the newest N orders of the configuration, whatever their age)
+        self.scan_workers = 0                # scanWorkers: forked processes for the per-Set lane scans of one symbol (0 = off)
         self.replay_workers = 0              # replayWorkers: worker processes for the per-bar signals of a replay (0 = off, the engine's own process computes them)
         self.group_gate_side = False         # groupGateSide: the group key also carries the Set's direction (long / short groups judged apart)
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
@@ -2253,6 +2445,7 @@ class SetBook:
         self.sl_min_ratio = 0.0
         self.sl_max_ratio = 0.0
         self.exit_set_hold_bars = 0
+        self.trail_time_exit = True
         self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
         self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
         self.trail_step_max = TRAIL_STEP_MAX                  # trailStepMax: the largest trailing arm in TP steps (22 = 2.2 %, up to TRAIL_STEP_CEIL)
@@ -2587,6 +2780,7 @@ class SetBook:
         self.sl_grid_all = sorted(set(self.sl_ratios) | {r for lst in by_range.values() for r in lst})
         # exitSetHoldBars (0 = the global time stop): Exit Sets (no TP) hold this many minutes before the time exit
         self.exit_set_hold_bars = int(max(0, min(720, finite(ov.get("exitSetHoldBars"), 0.0))))
+        self.trail_time_exit = bool(ov.get("trailTimeExit", True))      # false: trailing Sets have no time exit (hold_bars_for -> HOLD_NEVER)
         self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
         try:
             self.trail_step_max = int(max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_CEIL, int(float(ov.get("trailStepMax") or TRAIL_STEP_MAX)))))
@@ -2683,6 +2877,11 @@ class SetBook:
             self.replay_workers = max(0, min(6, int(float(ov.get("replayWorkers") or 0))))
         except (TypeError, ValueError):
             self.replay_workers = 0
+        try:
+            # scanWorkers: forked processes that run the per-Set lane scans of one symbol (0 = off, the scans run in the replay's own thread)
+            self.scan_workers = max(0, min(SCAN_FORK_MAX, int(float(ov.get("scanWorkers") or 0))))
+        except (TypeError, ValueError):
+            self.scan_workers = 0
         def _num(key, default, lo, hi):
             try:
                 x = float(ov.get(key) if ov.get(key) is not None else default)
@@ -3445,6 +3644,7 @@ class SetBook:
                 replay_book = copy.copy(self)
                 replay_book.bars = market
                 replay_book.bar_t = dated
+                replay_book._scan_packed = True     # this loop stores packed columns, so _replay_symbol may hand them over from forked scans
             prefetch = getattr(self, '_prefetch_replay', None)
             if prefetch is not None:
                 prefetch(replay_book, names, now)
@@ -3467,7 +3667,7 @@ class SetBook:
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
                     continue
-                packed: Dict[str, RowCols] = {}
+                packed: Dict[str, RowCols] = (inputs.pop("packed", None) if isinstance(inputs, dict) else None) or {}
                 alias = (inputs.get("tape_alias") if isinstance(inputs, dict) else None) or {}      # a stub or an older producer returns nothing: no sharing
                 for sid, rows in per_set.items():
                     if rows and sid not in alias:
@@ -3671,6 +3871,7 @@ class SetBook:
         finally:
             self._replay_local.__dict__.pop('market', None)
             self.progress.last_run_ms = (time.time() - t0) * 1000
+            self._snapshot_stale()
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
@@ -3739,6 +3940,12 @@ class SetBook:
             cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
         acc = BarIndex(bars)          # one index per symbol, shared by every lane
         cand_side = self._cand_by_side(cand, dirs)
+        if self.__dict__.get("_scan_packed") and self.scan_workers and not getattr(self, "hold_auto", False):
+            forked = scan_forked(self, symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc, cand_side, on_step)
+            if forked is not None:
+                # the same rows, columns and aliases the loop below builds, made in forked processes (scan_forked); replay_all stores them as they are
+                return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg, "dirs": dirs, "confs": confs, "cand": cand,
+                        "cand_side": cand_side, "acc": acc, "pause": {}, "tape_alias": {}, "packed": forked}
         pause_plan = self._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc)
         # Keys that traded exactly the same orders in this pass (Sets whose stops and targets never decide a trade differently) are noted in `tape_alias`
         # so the packing step stores their columns once. Every list in `hist` and every row stays its own: a Set's rows always name that Set.
@@ -3786,8 +3993,8 @@ class SetBook:
         return out
 
     def _pause_plan(self, symbol: str, bars: Sequence[Sequence[float]], base_ts: float, warmup: int, n: int, cfg: Dict[str, Any],
-                    dirs: Dict[str, List[int]], confs: Dict[str, List[float]], cand: Dict[str, List[int]], acc: "BarIndex"
-                    ) -> Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]]:
+                    dirs: Dict[str, List[int]], confs: Dict[str, List[float]], cand: Dict[str, List[int]], acc: "BarIndex",
+                    packs: Optional[Sequence[str]] = None) -> Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]]:
         """Per (pack, side) the rest after a winning close this symbol's replay uses: (fixed minutes, choice function or None). A long Set and a short
         Set of the same indication each learn their own pause from their own side's reference Sets (side 0: the one Set that trades both).
         Manual (pausePack) and fixed values are constants. The Auto Mode replays the reference Sets once per candidate pause on this symbol and, at each
@@ -3797,7 +4004,7 @@ class SetBook:
         plan: Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]] = {}
         sides = (1, -1) if self.direction_split else (0,)
         cand_side = self._cand_by_side(cand, dirs)
-        for pack in self.packs:
+        for pack in (self.packs if packs is None else packs):      # packs: a forked scan's own share (scan_forked); None = every pack
             if not self.pause_active(pack):
                 continue
             for side in sides:
@@ -4777,6 +4984,8 @@ class SetBook:
 
     def hold_bars_for(self, st: "SetState") -> int:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
+        if st.kind == "trail" and not getattr(self, "trail_time_exit", True):
+            return HOLD_NEVER            # trailTimeExit off (owner 2026-11-15 "for trailing no max hold time"): a trailing Set leaves only by its stop / trail (and its TP when honoured)
         table = getattr(self, "step_hold", None) or {}
         manual = int(table.get(self.step_of(st), 0)) if table else 0
         if not manual and st.kind == "exit":
@@ -5041,6 +5250,55 @@ class SetBook:
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             return self._snapshot()
+
+    def _progress_view(self) -> Dict[str, Any]:
+        p = self.progress
+        return {"phase": p.phase, "pct": round(p.pct, 1), "symbol": p.symbol, "setId": p.set_id, "barsDone": p.bars_done, "barsTotal": p.bars_total,
+                "setsDone": p.sets_done, "setsTotal": p.sets_total, "symbolsDone": p.symbols_done, "symbolsTotal": p.symbols_total,
+                "elapsedMs": round(p.elapsed_ms, 1), "lastRunMs": round(p.last_run_ms, 1), "cycle": p.cycle, "detail": p.detail, "ready": p.ready,
+                "error": p.error, "errors": p.errors}
+
+    def snapshot_cached(self) -> Dict[str, Any]:
+        """The snapshot for the stats file the engine writes every second (2026-11-15). Found live on x02 (150 symbols, 16,844 Sets): the full snapshot took
+        about 0.9 s and was rebuilt every second in the trading loop, under the book's lock -- 61 % of the loop's time, and the replay and the entry picks waited
+        on that lock. A snapshot that costs at least SNAP_CACHE_MIN_COST_S is now rebuilt in a background thread at most every SNAP_CACHE_X x its cost (capped
+        SNAP_CACHE_MAX_S) and at once after a scoring pass; between rebuilds the last one is served with the live progress. A cheap snapshot (a small book)
+        is built every time, as before. `snapshotAgeS` says how old the served one is."""
+        c = self.__dict__.get("_snap_cache")
+        if c is None or c["cost"] < SNAP_CACHE_MIN_COST_S:
+            return self._snapshot_store()
+        age = time.monotonic() - c["at"]
+        if age >= min(SNAP_CACHE_MAX_S, SNAP_CACHE_X * c["cost"]) and not c["busy"]:
+            c["busy"] = True
+            threading.Thread(target=self._snapshot_bg, name="sets-snapshot", daemon=True).start()
+        snap = dict(c["snap"])
+        snap["progress"] = self._progress_view()
+        snap["snapshotAgeS"] = round(max(0.0, time.monotonic() - c["built"]), 1)
+        return snap
+
+    def _snapshot_store(self) -> Dict[str, Any]:
+        t0 = time.monotonic()
+        snap = self.snapshot()
+        t1 = time.monotonic()
+        self._snap_cache = {"at": t1, "built": t0, "cost": t1 - t0, "snap": snap, "busy": False}
+        snap = dict(snap)
+        snap["snapshotAgeS"] = 0.0
+        return snap
+
+    def _snapshot_bg(self) -> None:
+        try:
+            self._snapshot_store()
+        except Exception:
+            c = self.__dict__.get("_snap_cache")
+            if c is not None:
+                c["busy"] = False
+                c["at"] = time.monotonic()        # a failing snapshot is retried after the usual interval, not every second
+
+    def _snapshot_stale(self) -> None:
+        """A scoring pass changed the verdicts: the next stats write starts a rebuild (the served snapshot stays until it is done)."""
+        c = self.__dict__.get("_snap_cache")
+        if c is not None:
+            c["at"] = -1e18
 
     def _pf_split(self) -> Dict[str, Any]:
         """The post-Base standard figures, on each Set's rolling gate window (its last `setGateWindow` orders), never on
@@ -5329,7 +5587,8 @@ class SetBook:
                     "wr": st.wr,
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
-                    "holdMin": st.hold_bars,
+                    "holdMin": 0 if st.hold_bars >= HOLD_NEVER else st.hold_bars,
+                    "holdNever": st.hold_bars >= HOLD_NEVER,
                     "holdAuto": st.hold_auto,
                     "pfAll": st.pf_all,
                     "gp": st.gp,
@@ -5469,25 +5728,7 @@ class SetBook:
             "barsSymbols": len(self.bars),
             "quality": {"excluded": len(self.quality), "maxFlatShare": self.max_flat_share, "maxJumpPct": self.max_jump * 100.0,
                         "symbols": dict(sorted(self.quality.items())[:24])},
-            "progress": {
-                "phase": p.phase,
-                "pct": round(p.pct, 1),
-                "symbol": p.symbol,
-                "setId": p.set_id,
-                "barsDone": p.bars_done,
-                "barsTotal": p.bars_total,
-                "setsDone": p.sets_done,
-                "setsTotal": p.sets_total,
-                "symbolsDone": p.symbols_done,
-                "symbolsTotal": p.symbols_total,
-                "elapsedMs": round(p.elapsed_ms, 1),
-                "lastRunMs": round(p.last_run_ms, 1),
-                "cycle": p.cycle,
-                "detail": p.detail,
-                "ready": p.ready,
-                "error": p.error,
-                "errors": p.errors,
-            },
+            "progress": self._progress_view(),
             "rows": rows,
         }
 

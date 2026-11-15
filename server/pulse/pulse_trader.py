@@ -5049,7 +5049,10 @@ class Pulse:
                         pos.trail = prev
         own = self.sets.sets.get(pos.set_id)            # the Set's own hold (stepHoldOn / stepHoldMin), else the global time stop
         hold_bars = pos.set_hold_bars or int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
-        if age >= float(hold_bars) * 60.0:
+        trailing = getattr(own, "kind", "") == "trail" if own is not None else bool(pos.trail_set_id and pos.trail_set_id == pos.set_id)
+        if trailing and not getattr(self.sets, "trail_time_exit", True):
+            hold_bars = 0                                # trailTimeExit off (owner 2026-11-15): no time exit for a trailing Set, also for one opened before the switch
+        if hold_bars and age >= float(hold_bars) * 60.0:
             self.close_pos(pos, px, "time")
             return
         # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m
@@ -7316,7 +7319,7 @@ class Pulse:
             "returnScorePlus1xCost": 1.1,
             "pfScale": "net gains / net losses",
             "variants": self.variants.snapshot(),
-            "sets": self.sets.snapshot(),
+            "sets": self.sets.snapshot_cached() if hasattr(self.sets, "snapshot_cached") else self.sets.snapshot(),
             "execution": self.execution_snapshot(),
             "exits": self.exits.snapshot(),
             "indications": self.indications.snapshot(),

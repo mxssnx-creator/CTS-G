@@ -89,12 +89,14 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["minPfStepAutoScope"] = "step"
     ov["stratSignals"] = False
     ov["slAutoRange"] = False
+    ov["trailTimeExit"] = True        # fixtures keep the time exit on trailing Sets (shipped x01 / x02 / desk: off, owner 2026-11-15)
     ov["trailStepMin"] = 0
     ov["minPfStepAutoLow"] = 1.0           # fixtures keep the earlier lowest Auto floor (shipped x01 / x02: 1.02, so a window at PF 1.00 never passes)
     ov["setSlMinRatio"], ov["exitSetHoldBars"] = 0, 0        # fixtures pin the earlier grid and the global time exit (shipped x01: min SL ratio 0.5, Exit Sets hold 720 min)
     ov["realGateN"] = 15           # the shipped x01 / x02 ask the last 8 Real orders per lane (owner 2026-11-14); fixtures keep the window their counts were pinned with
     ov["histLookbackBars"], ov["histLookbackMax"] = 4320, 4320
     ov["histLookbackAuto"] = True   # x01 holds its 32 h lookback (no automatic growth); the growth checks and the fixtures keep it on   # likewise the earlier 3-day lookback (the shipped x01 / x02: 32 h, 1920 bars)
+    ov["scanWorkers"] = 0           # fixtures scan in the test process (forked scans have their own check)
     ov["replayWorkers"], ov["signalCachePath"] = 0, ""   # fixtures compute their signals in the test process and keep no memo file (the shipped x01 runs worker processes and a memo file)
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)

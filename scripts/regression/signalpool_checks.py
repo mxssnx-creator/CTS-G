@@ -74,5 +74,107 @@ def memo_survives_a_restart():
     return ok, f"bar signals computed: cold {n_cold}, warm from the file {n_warm}, other settings {n_other}, no file {n_plain}; Set rows equal {rows_warm == rows_cold == rows_plain}"
 
 
+def forked_lane_scans_equal_the_in_thread_scans():
+    """scanWorkers (2026-11-15): the per-Set lane scans of a symbol run in forked children. Every Set's stored columns (each row), which keys share
+    columns (tape aliases), the pause choices, the verdicts and lanes equal the in-thread replay with the pause Auto on and split directions; a fork that
+    fails, and a child that dies, fall back to the in-thread scan with the same result."""
+    import os
+    import set_engine as se
+    from correctness import SMALL, T0
+
+    def run(workers, **kw):
+        b = SetBook()
+        b.load(overlay(**{**SMALL, "holdEnabled": False, "setStepAdapt": False, "stratTrend": True, "stratReversion": True, "pauseMode": "auto",
+                          "scanWorkers": workers, **kw}))
+        for i in range(3):
+            sym = f"F{i}-USDT"
+            b.bars[sym] = synth_bars(20 + i, 700, drift=.0003 * (1 - i), vol=.004)
+            b.bar_t[sym] = T0 - 60
+        b.replay_all(now=T0)
+        rows = {(s, sid): list(cols) for s, d in b._hist_rows.items() for sid, cols in d.items()}
+        shared = sorted((s, a, c) for s, d in b._hist_rows.items() for a, x in d.items() for c, y in d.items() if a < c and x.t is y.t)
+        verdicts = {st.id: (b.lane_of(st), st.gate_pf, st.gate_n, st.main_pf, st.hist) for st in b.by_idx}
+        return rows, shared, dict(b.pause_now), verdicts, len(b.sets)
+    real_sig, real_min, real_fork, real_share = se.pack_signals, se.SCAN_FORK_MIN_SETS, os.fork, se._scan_share
+    memo = {}
+
+    def once(bars, packs, *a, **k):              # the four replays read the same signals: compute them once (the scan is what is compared)
+        key = (len(bars), tuple(bars[-1]), tuple(bars[0]), tuple(packs))
+        if key not in memo:
+            memo[key] = real_sig(bars, packs, *a, **k)
+        return memo[key]
+
+    def no_fork():
+        raise OSError("no fork")
+
+    def dies(*a, **k):
+        raise RuntimeError("child dies")
+    real_split = se._scan_shares
+    split = []
+
+    def counted(*a, **k):
+        got = real_split(*a, **k)
+        split.append(len(got))
+        return got
+    try:
+        se._scan_shares = counted
+        se.pack_signals, se.SCAN_FORK_MIN_SETS = once, 8      # several shares per symbol, so a pack is also cut across children
+        plain = run(0)
+        forked = run(3)
+        os.fork = no_fork
+        nofork = run(3)
+        os.fork = real_fork
+        se._scan_share = dies
+        died = run(3)
+    finally:
+        se.pack_signals, se.SCAN_FORK_MIN_SETS, os.fork, se._scan_share, se._scan_shares = real_sig, real_min, real_fork, real_share, real_split
+    names = ("rows", "aliases", "pauses", "verdicts")
+    eq = {nm: (plain[i] == forked[i], plain[i] == nofork[i], plain[i] == died[i]) for i, nm in enumerate(names)}
+    ok = (all(all(v) for v in eq.values()) and len(plain[0]) > 100 and len(plain[1]) > 0 and any(v for v in plain[2].values())
+          and split and min(split[:3]) >= 2)
+    return ok, (f"{plain[4]} Sets, {len(plain[0])} (symbol, Set) tapes, {len(plain[1])} shared, {sum(1 for v in plain[2].values() if v)} pauses chosen; "
+                f"shares per symbol {split[:3]}; equal (forked, fork fails, child dies): {eq}")
+
+
+def the_stats_snapshot_is_cached_only_when_it_is_costly():
+    """SetBook.snapshot_cached (2026-11-15, x02: a 0.9 s snapshot rebuilt every second under the book's lock): a cheap snapshot is built on every call (a
+    change shows at once); a costly one is served from the last build with the live progress, rebuilt in the background after its interval, and marked for a
+    rebuild by a scoring pass; what it serves is a snapshot the book really built."""
+    import time as _t
+    import set_engine as se
+    from correctness import SMALL, T0
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "holdEnabled": False}))
+    b.bars["C-USDT"] = synth_bars(4, 300, drift=.0004)
+    b.bar_t["C-USDT"] = T0 - 60
+    b.replay_all(now=T0)
+    cheap1 = b.snapshot_cached()
+    b.progress.detail = "changed-1"
+    cheap2 = b.snapshot_cached()
+    real_min, real_x = se.SNAP_CACHE_MIN_COST_S, se.SNAP_CACHE_X
+    try:
+        se.SNAP_CACHE_MIN_COST_S, se.SNAP_CACHE_X = 0.0, 1e9          # every snapshot counts as costly; the interval never ends by itself
+        first = b.snapshot_cached()
+        built = b._snap_cache["snap"]
+        b.progress.detail = "changed-2"
+        served = b.snapshot_cached()
+        cached_ok = served["rows"] is built["rows"] and served["progress"]["detail"] == "changed-2"
+        b._snapshot_stale()
+        during = b.snapshot_cached()                 # starts the background rebuild, serves the old one meanwhile
+        for _ in range(200):
+            if b._snap_cache["snap"] is not built and not b._snap_cache["busy"]:
+                break
+            _t.sleep(0.02)
+        after = b.snapshot_cached()
+        rebuilt = b._snap_cache["snap"] is not built and after["rows"] == b.snapshot()["rows"]
+    finally:
+        se.SNAP_CACHE_MIN_COST_S, se.SNAP_CACHE_X = real_min, real_x
+    ok = (cheap2["progress"]["detail"] == "changed-1" and cheap2["rows"] is not cheap1["rows"] and cached_ok and during["rows"] is built["rows"]
+          and rebuilt and first["snapshotAgeS"] == 0.0)
+    return ok, f"cheap rebuilt each call {cheap2['rows'] is not cheap1['rows']}; costly served with live progress {cached_ok}; rebuilt after a pass {rebuilt}"
+
+
 CHECKS = [("signalpool.parallel-signals-equal-sequential", parallel_signals_equal_sequential),
-          ("signalpool.signal-memo-survives-a-restart", memo_survives_a_restart)]
+          ("signalpool.signal-memo-survives-a-restart", memo_survives_a_restart),
+          ("processing.forked-lane-scans-equal-the-in-thread-scans", forked_lane_scans_equal_the_in_thread_scans),
+          ("processing.the-stats-snapshot-is-cached-only-when-it-is-costly", the_stats_snapshot_is_cached_only_when_it_is_costly)]

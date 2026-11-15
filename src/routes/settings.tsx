@@ -2031,6 +2031,7 @@ function SettingsPage() {
                 <Slider label="Min trailing arm (TP steps)" value={overlay.trailStepMin} min={0} max={20} step={1} hint={`no trailing Set arms under ${(overlay.trailStepMin * 0.1).toFixed(1)}% (0 = every arm the grid builds)`} onChange={(v) => patch("trailStepMin", v)} />
                 <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
                 <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
+                <Toggle label="Time exit on trailing Sets (off: no max hold, they leave by stop and trail only)" on={overlay.trailTimeExit} onChange={(v) => patch("trailTimeExit", v)} />
                 {(["micro", "minimal", "short", "normal", "long", "wide"] as const).map((rg) => {
                   const xs = overlay.slRatiosByRange?.[rg] ?? [];
                   const own = xs.length > 0;
