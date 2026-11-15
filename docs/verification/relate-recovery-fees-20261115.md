@@ -14,6 +14,8 @@ Recovery requires an owned pending client ID, the exact returned order identity,
 
 The saved Secure Minimal JSON also lacked the three Auto SL range fields recently added to the Settings factory. The existing preset-equality test failed with exactly `slAutoRange`, `slAutoMin`, `slAutoTol` missing. The JSON now carries the same requested defaults (true / 20 / 5). Its conservative sizing and enabled strategies remain as defined by the preset.
 
+While the PR was under verification, target commit `a4c2b3e757ec35e588d4bf878cd38c0523f81e11` added `trailStepMin`. The target is integrated without reverting its eight changed files, including the x02 source preference of 150 symbols. The preset now also contains `trailStepMin: 3`, matching the Settings factory; no active account setting was applied. The first hosted verify attempt caught this fourth preset-field drift and is retained as a failed attempt rather than counted as a passing gate.
+
 ## Validation
 
 - Original target: full 736-check regression, 0 failures/skips, 248 s.

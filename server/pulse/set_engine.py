@@ -2662,6 +2662,10 @@ class SetBook:
             self.trail_min_lock = 0.0
         if self.trail_min_lock > 0:
             self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
+        # trailStepMin (owner 2026-11-15, "min trail step 3"): no trailing Set arms under this many TP steps (0.1 % each); 0 / absent = every arm the grid builds
+        self.trail_step_min = int(max(0, min(50, finite(ov.get("trailStepMin"), 0.0))))
+        if self.trail_step_min:
+            self.trails = [t for t in self.trails if t[1] + 1e-9 >= self.trail_step_min * TP_UNIT_PCT]
         self.window_basis = "count" if self.disjoint or str(ov.get("lastNBasis") or "time").lower() == "count" else "time"
         # relation lanes read the chains and change no tape or Set verdict, so they are not part of the evaluation signature. A change of what the lanes ARE
         # (relations, windows, floor) drops the held lanes until the next scoring pass rebuilds them; ratios and the ceiling apply at once.

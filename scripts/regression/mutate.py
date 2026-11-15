@@ -117,6 +117,8 @@ MUTATIONS = [
     ("sl auto: the learning reads orders closed after the boundary",
      "set_engine.py", "            rows = self._tape_rows(st.id, tape_order, float(\"-inf\"), until=until)\n            if not rows:\n                continue\n            sig = 0",
      "            rows = self._tape_rows(st.id, tape_order, float(\"-inf\"), until=None)\n            if not rows:\n                continue\n            sig = 0"),
+    ("trail step min: the minimum arm removes nothing",
+     "set_engine.py", "            self.trails = [t for t in self.trails if t[1] + 1e-9 >= self.trail_step_min * TP_UNIT_PCT]", "            pass"),
     ("exec gate: the last check before execution never blocks",
      "set_engine.py", "    r_ok = r_ok and x_ok", "    r_ok = r_ok"),
     ("block guard: adds are sent while the book's executed adds are in deficit",

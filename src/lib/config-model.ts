@@ -555,6 +555,7 @@ export type PulseOverlay = {
   exitOptSlMax: number;
   exitMinHoldS: number;
   setSlMinRatio: number;
+  trailStepMin: number;
   slAutoRange: boolean;
   slAutoMin: number;
   slAutoTol: number;
@@ -855,6 +856,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
   setSlMinRatio: 0.5,
+  trailStepMin: 3,
   slAutoRange: true,
   slAutoMin: 20,
   slAutoTol: 5,
@@ -1134,6 +1136,7 @@ export type CtsSettings = {
   exitOptSlMax?: number;
   exitMinHoldS?: number;
   setSlMinRatio?: number;
+  trailStepMin?: number;
   slAutoRange?: boolean;
   slAutoMin?: number;
   slAutoTol?: number;
@@ -1708,6 +1711,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitOptSlMax: num(cts.exitOptSlMax, 0.9),
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     setSlMinRatio: num(cts.setSlMinRatio, 0.5),
+    trailStepMin: Math.max(0, Math.min(50, Math.round(num(cts.trailStepMin, 3)))),
     slAutoRange: bool(cts.slAutoRange, true),
     slAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.slAutoMin, 20)))),
     slAutoTol: Math.max(0, Math.min(50, num(cts.slAutoTol, 5))),
