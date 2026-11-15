@@ -15,7 +15,7 @@ test("block rounds: an absent key is the shipped default, an object follows the 
 });
 
 test("block rounds: the largest multiple is bounded by the ceiling and is 1 when off", () => {
-  assert.equal(blockRoundsMax(DEFAULT_BLOCK_ROUNDS), 3);
+  assert.equal(blockRoundsMax(DEFAULT_BLOCK_ROUNDS), 4);
   assert.equal(blockRoundsMax({ ...DEFAULT_BLOCK_ROUNDS, maxMult: 2 }), 2);
   assert.equal(blockRoundsMax({ ...DEFAULT_BLOCK_ROUNDS, enabled: false }), 1);
 });

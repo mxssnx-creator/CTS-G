@@ -39,13 +39,20 @@ const OFF: RoundCount = { on: false, ratio: 0, step: false, maxLevel: 1, pause: 
 export const DEFAULT_BLOCK_ROUNDS: BlockRoundsConfig = {
   enabled: true,
   relations: ["step"],
-  maxMult: 3,
+  maxMult: 4,
   auto: true,
   autoN: 30,
   autoMin: 15,
   autoPf: 1,
   autoRatio: 1,
-  counts: { "1": { ...OFF }, "2": { ...OFF }, "3": { ...OFF }, "4": { ...OFF }, "5": { on: true, ratio: 1, step: true, maxLevel: 2, pause: 0 }, "6": { ...OFF } },
+  counts: {
+    "1": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 },
+    "2": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 },
+    "3": { ...OFF },
+    "4": { ...OFF },
+    "5": { ...OFF },
+    "6": { ...OFF },
+  },
 };
 
 function bounded(v: unknown, lo: number, hi: number, fallback: number): number {

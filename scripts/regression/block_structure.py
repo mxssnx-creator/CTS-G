@@ -487,11 +487,14 @@ def block_rounds_ship_the_procedure_measured_at_or_above_without():
     files = [os.path.join(pulse, f) for f in sorted(os.listdir(pulse)) if f.startswith("overlay-") and f.endswith(".json")]
     files += [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json", "low-steps-coordination-research.json")]
     carried = {os.path.basename(f): json.load(open(f)).get("blockRounds") for f in files}
-    want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 1.0,
-                             "counts": {"5": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 2, "pause": 0}}}).to_json()
+    # owner 2026-11-15 ("block steps increasing and remaining at the last until net positive for lane, best vol increment ratio"): counts 1 and 2 of the step
+    # relation, ratio 1.0, step to level 3 (held until the lane's net is back at zero), ceiling x4; measured on 50 symbols, dev + sealed (CLAUDE.md)
+    want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 4, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 1.0,
+                             "counts": {"1": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0},
+                                        "2": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0}}}).to_json()
     same = {name: (isinstance(v, dict) and rounds.config_of(v).to_json() == want and v == want) for name, v in carried.items()}
     desk = open(os.path.join(ROOT, "src", "lib", "block-rounds.ts")).read()
-    desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 3,\s*auto: true,\s*autoN: 30,\s*autoMin: 15,\s*autoPf: 1,\s*autoRatio: 1,', desk)) and '"5": { on: true, ratio: 1, step: true, maxLevel: 2, pause: 0 }' in desk
+    desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 4,\s*auto: true,\s*autoN: 30,\s*autoMin: 15,\s*autoPf: 1,\s*autoRatio: 1,', desk)) and '"2": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 }' in desk
     off = rounds.config_of(None)
     return all(same.values()) and len(same) == 7 and desk_ok and not off.enabled and not any(c.on for c in off.counts.values()), f"carried equal to the measured object: {same}; desk {desk_ok}; absent key enabled {off.enabled}"
 

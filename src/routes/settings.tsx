@@ -1387,8 +1387,8 @@ function SettingsPage() {
                     <BlockRoundsAutoTable stats={stats ?? null} />
                     <p className="mt-3 text-xs opacity-70">
                       Largest multiple of one entry with these settings: ×{blockRoundsMax(cfg).toFixed(2)}. A count that does not raise still forms its blocks and keeps its record.
-                      Shipped: relation Step, block count 5, ratio 1.0, step to level 2, ceiling ×3 — the only procedure measured at or above “without” on all nine windows
-                      (volume-weighted PF 0.750 against 0.648, net −480.2 against −495.1 points; both below 1). A raise weights results; it does not change a per-order PF.
+                      Shipped (2026-11-15): relation Step, block counts 1 and 2, ratio 1.0, step to level 3 held until the lane's net is back at zero, ceiling ×4, Auto on
+                      (50 symbols, volume-weighted PF 1.669 / 1.152 development / sealed against 1.630 / 1.019 without). A raise weights results; it does not change a per-order PF.
                     </p>
                   </div>
                 );

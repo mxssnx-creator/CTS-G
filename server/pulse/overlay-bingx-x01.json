@@ -336,7 +336,7 @@
     "relations": [
       "step"
     ],
-    "maxMult": 3.0,
+    "maxMult": 4.0,
     "auto": true,
     "autoN": 30,
     "autoMin": 15,
@@ -344,17 +344,17 @@
     "autoRatio": 1.0,
     "counts": {
       "1": {
-        "on": false,
-        "ratio": 0.0,
-        "step": false,
-        "maxLevel": 1,
+        "on": true,
+        "ratio": 1.0,
+        "step": true,
+        "maxLevel": 3,
         "pause": 0
       },
       "2": {
-        "on": false,
-        "ratio": 0.0,
-        "step": false,
-        "maxLevel": 1,
+        "on": true,
+        "ratio": 1.0,
+        "step": true,
+        "maxLevel": 3,
         "pause": 0
       },
       "3": {
@@ -372,10 +372,10 @@
         "pause": 0
       },
       "5": {
-        "on": true,
-        "ratio": 1.0,
-        "step": true,
-        "maxLevel": 2,
+        "on": false,
+        "ratio": 0.0,
+        "step": false,
+        "maxLevel": 1,
         "pause": 0
       },
       "6": {
