@@ -50,6 +50,13 @@
   `signals-pack.the-signal-memo-keeps-only-signalling-packs-and-answers-the-same`, mutant `signal memo:`). The Python heap of repeated passes stays flat (25 MB, no
   leak found); `malloc_trim` freed nothing measurable. **Not done:** streaming (O(1) per bar) indicators would cut the 218 s most (talipp / Hexital-style
   updates) but change the floating-point order of every indicator, so every signal and the golden fingerprint: the owner's decision.
+  (l) **Auto SL range per TP step** (owner "auto min and max SL ratios for each step ... Auto enabled by default, manual optimal values as defaults"): `slAutoRange`
+  (+ `slAutoMin` 20 orders, `slAutoTol` 5 %): every TP step and direction learns its SL ratio range from the base / Exit Sets' orders CLOSED BEFORE the window it
+  judges (`set_engine.learn_sl_range`: the widest contiguous range of ratios whose pooled PF is within tol of the best, with the orders; none = the manual grid);
+  a Set outside it is not valid (reason `slrange`), trailing Sets never. Manual grid = `setSlRatios` / `slRatiosByRange` (desk: every range now, micro .. wide) /
+  `setSlMinRatio` / `maxStopLossRatio` / `slMaxByRange`. Engine and simulator (plain and packed `AutoFloors`) learn the same ranges; stats `sets.slRanges`, desk
+  Settings + Insights "Stages" table. On for x01 / x02 / desk, off in the engine default and fixtures (golden unchanged). Checks `step-pf.sl-range-*`,
+  `step-pf.the-simulator-learns-the-engines-sl-ranges-and-the-gate-reads-them`; mutants `sl auto:` (3). Measured against off: pending (`simN_SA` against `simN_B0`).
   (g) **Engine stop:** SIGTERM ended only the main thread and worker threads kept trading (seen on x01 and x02); `_term` now ends the process (`os._exit(0)`), state files
   and venue-side stops / targets stay.
 
