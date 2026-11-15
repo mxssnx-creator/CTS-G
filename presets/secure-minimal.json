@@ -493,6 +493,7 @@
   "exitMinHoldS": 45,
   "setSlMinRatio": 0.5,
   "trailStepMin": 3,
+  "trailTimeExit": false,
   "slAutoRange": true,
   "slAutoMin": 20,
   "slAutoTol": 5,
