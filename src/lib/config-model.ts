@@ -572,6 +572,12 @@ export type PulseOverlay = {
   modules?: Record<string, boolean>;
 };
 
+/** The signal entries x01 / x02 ship (owner 2026-11-14 / 15): 1 / 5 min base + trailing, 15 / 30 min trailing. */
+const SHIPPED_SIGNAL_CONFIGS: SignalConfig[] = [
+  { label: "signals 1/5m", timeframes: [1, 5], stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"] },
+  { label: "signals 15/30m trailing", timeframes: [15, 30], stepMin: 6, stepMax: 15, slRatios: [0.5, 0.75, 1.0], types: ["trail"] },
+] as SignalConfig[];
+
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
   volumeFactor: 0.05,
@@ -665,12 +671,12 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   "KAS-USDT",
   ],
   axisPrevEnabled: true,
-  axisPrevMaxWindow: 12,
-  axisLastEnabled: true,
+  axisPrevMaxWindow: 4,
+  axisLastEnabled: false,
   axisLastMaxWindow: 4,
-  axisContEnabled: true,
+  axisContEnabled: false,
   axisContMaxWindow: 8,
-  axisPauseEnabled: true,
+  axisPauseEnabled: false,
   axisPauseMaxWindow: 8,
   minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.11,
@@ -711,8 +717,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   strategyProcessingByRange: {},
   stratGeneral: true,
   stratShortRange: true,
-  stratSignals: false,
-  signalConfigs: [],
+  stratSignals: true,
+  signalConfigs: SHIPPED_SIGNAL_CONFIGS,
   stratTrend: true,
   stratBreakout: false,
   stratReversion: true,

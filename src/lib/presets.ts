@@ -10,6 +10,8 @@ export function secureMinimalPreset(): PulseOverlay {
     stratReversion: false,
     stratFlow: false,
     stratMulti: false,
+    stratSignals: false,
+    signalConfigs: [],
     groupGate: false,
     groupGateN: 10,
     groupGateHours: 12,
