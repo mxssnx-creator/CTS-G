@@ -210,6 +210,8 @@ def main() -> int:
                            help="use exact causal prefix indexing (default); native fallback on context expiry")
     query_mode.add_argument("--native-stage", dest="indexed_stage", action="store_false",
                            help="use uncached native stage queries for independent comparison")
+    ap.add_argument("--cache-shared", default="", help="overlay keys that act only after the replay (e.g. execGateN, configGate*): left out of the cache "
+                    "fingerprint, so arms that differ only in them share one replay; the tapes do not read them")
     ap.add_argument("--next", default="", help="extra next-N order windows after a validation, e.g. 15,25 (next_pf in the JSON)")
     a = ap.parse_args()
     args_refresh = max(60, min(3600, int(a.eval_every)))
@@ -233,6 +235,9 @@ def main() -> int:
         print("No market data found")
         return 2
     overlay = sg.replay_overlay()
+    shared = {k.strip() for k in a.cache_shared.split(",") if k.strip()}
+    if shared:
+        overlay = {k: v for k, v in overlay.items() if k not in shared}
     manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
     loaded_names, bars, times = sg.load_bars(a.data, a.symbols)
     print(f'Loaded {len(names)} market histories; {len(book.by_idx)} independent Sets', flush=True)

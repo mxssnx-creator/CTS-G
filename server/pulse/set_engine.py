@@ -4319,41 +4319,59 @@ class SetBook:
         """
         return int(round(step_grid_pct(self.step_bucket(st) * TP_UNIT_PCT) / TP_UNIT_PCT))
 
-    def step_floor(self, st: "SetState") -> float:
-        """The one minimum PF of a Set (every window, every stage): the Auto Mode's learned value for its TP step when it has one, else 1 + TP% x ratio."""
-        bucket = self.step_bucket(st)
-        if self.pf_range_floor:
-            ranged = self.pf_range_floor.get(tp_range_of(bucket))
+    def own_manual_floor(self, st: "SetState") -> Optional[Tuple[float, str]]:
+        """The configuration's OWN manual minimum PF, when it has one (owner 2026-11-15: every coordination its own values): an indicationConfigs entry's
+        lanePolicy minPfByStep / minPfBySlRatio, a Signals pack's minPfSignals, a TP range's minPfByRange. None = the generic per-step table (1 + TP% x ratio)."""
+        policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
+        floors = [policy.get("minPfByStep", {}).get(str(self.step_bucket(st))), policy.get("minPfBySlRatio", {}).get(format(st.sl_ratio, "g"))]
+        floors = [float(f) for f in floors if f is not None]
+        if floors:
+            return max(floors + ([self.signal_min_pf] if is_signal_pack(st.pack) else [])), "lanePolicy"
+        if is_signal_pack(st.pack):
+            return self.signal_min_pf, "signals"
+        if self.pf_by_step and self.pf_range_floor:
+            ranged = self.pf_range_floor.get(tp_range_of(self.step_bucket(st)))
             if ranged is not None:
-                return ranged
+                return ranged, "range"
+        return None
+
+    def floor_of(self, st: "SetState") -> Tuple[float, str]:
+        """The one minimum PF of a Set (every window, every stage) and where it comes from. Auto on (minPfByStep + minPfStepAuto): the Set's own learned floor
+        (scope "set") first; a configuration with its own manual floor (own_manual_floor) falls back to THAT value, never to a floor learned on other
+        configurations' orders; every other Set falls back to its step's learned floor (step, else the direction's pool), then the manual step table.
+        Auto off: the configuration's own manual floor, else 1 + TP% x ratio. A learned floor is capped by minPfStepAutoHigh, as the manual table is."""
         high = self.pf_step_auto_high
-        if self.pf_step_auto:
-            own = self.set_floor_auto.get(st.id) if self.pf_set_auto else None
+        auto = self.pf_by_step and self.pf_step_auto
+        if auto and self.pf_set_auto:
+            own = self.set_floor_auto.get(st.id)
             if own is not None:
-                return min(float(own), high)          # the Set's own learned floor (minPfStepAutoScope "set")
+                return min(float(own), high), "auto-set"
+        mine = self.own_manual_floor(st)
+        if mine is not None:
+            return mine
+        if auto:
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
-                return min(float(learned), high)
+                return min(float(learned), high), "auto-step"
+        bucket = self.step_bucket(st)
         key = (bucket, self.pf_step_ratio)          # a pure function of the step and the ratio, asked for several times per Set by every verdict and snapshot
         got = self._manual_floor_cache.get(key)
         if got is None:
             got = self._manual_floor_cache[key] = manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
-        return min(got, high)
+        return min(got, high), "manual-step"
+
+    def step_floor(self, st: "SetState") -> float:
+        """The one minimum PF of a Set under minPfByStep (floor_of without its source)."""
+        return self.floor_of(st)[0]
 
     def floor_for(self, n: int, pack: str, st: Optional["SetState"] = None) -> float:
-        """The minimum PF a window of n orders of this pack asks. With minPfByStep (default) a Set asks one floor from its TP step in every window and stage;
-        else its size class when minPfBySize is on, else the pack's floor. Signal packs keep their own."""
-        if st is not None:
-            policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
-            floors = [policy.get("minPfByStep", {}).get(str(self.step_bucket(st))),
-                      policy.get("minPfBySlRatio", {}).get(format(st.sl_ratio, "g"))]
-            floors = [float(f) for f in floors if f is not None]
-            if floors:
-                return max(floors + ([self.signal_min_pf] if is_signal_pack(pack) else []))
+        """The minimum PF a window of n orders of this pack asks. With minPfByStep (default), with a configuration of its own floor (Signals, lanePolicy) or
+        with a learned own floor, a Set asks floor_of in every window and stage; else its size class when minPfBySize is on, else the pack's floor."""
+        if st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None
+                               or (self.pf_set_auto and st.id in self.set_floor_auto)):
+            return self.floor_of(st)[0]
         if is_signal_pack(pack):
             return self.signal_min_pf
-        if self.pf_by_step and st is not None:
-            return self.step_floor(st)
         if self.pf_by_size:
             for lim, pf in self.size_floors:
                 if n <= lim:
@@ -4390,8 +4408,7 @@ class SetBook:
     def stage_params(self, pack: str, st: Optional["SetState"] = None) -> StageParams:
         """The chain's rules for a pack and, with minPfByStep, for the Set's TP step (its one floor for every window and stage)."""
         policy = (self.pack_ranges.get(pack) or {}).get("lanePolicy") or {}
-        explicit = st is not None and (str(self.step_bucket(st)) in policy.get("minPfByStep", {}) or format(st.sl_ratio, "g") in policy.get("minPfBySlRatio", {}))
-        by_step = bool(explicit or (self.pf_by_step and st is not None and not is_signal_pack(pack)))
+        by_step = bool(st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None or (self.pf_set_auto and st.id in self.set_floor_auto)))
         step_floor = self.floor_for(0, pack, st) if by_step else 0.0
         w = self.win(st)
         return StageParams(base_long=w.base_long, base_short=w.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
@@ -5621,7 +5638,7 @@ class SetBook:
                     "trailGive": st.trail_give,
                     "trI": st.tr_i,
                     "step": st.step,
-                    "stagePolicy": {"minPf": self.floor_for(self.win(st).base_long, st.pack, st),
+                    "stagePolicy": {"minPf": self.floor_for(self.win(st).base_long, st.pack, st), "minPfSource": self.floor_of(st)[1] if self.pf_by_step else "size",
                                     "windows": self.win(st).__dict__, "scope": "set", "source": "paper"},
                     "side": st.side,
                     "stepI": st.step_i,

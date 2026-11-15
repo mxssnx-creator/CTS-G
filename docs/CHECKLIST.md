@@ -1,4 +1,4 @@
-# CTS-G work checklist (updated 2026-11-15 07:00 UTC)
+# CTS-G work checklist (updated 2026-11-15 10:15 UTC)
 
 `[x]` done and verified · `[~]` running or partly done · `[ ]` open · `[-]` measured and not shipped (with the reason).
 Ship rule for every setting (owner): better than the shipped setting on BOTH the development and the sealed window; an owner instruction is shipped as asked and its measurement reported next to it.
@@ -68,26 +68,34 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 - [~] Trailing first (`trailPick` first-any), trailing + fixed together, Real Negative lane first, Base minimal window "newest negative",
       group gate off, Auto floor low 1.2, execution last-10 check, flow pack off, multi pack off.
 
+## Minimum PF per configuration (owner: own values, Auto with fallback to the manual defaults, no collisions)
+- [x] One resolver `floor_of`: own learned floor -> the configuration's own manual floor (Signals, Micro range, lane policy) -> step learned floor -> 1 + TP% x ratio.
+- [x] Collisions fixed: Micro range / Signals floors overrode Auto; desk Short Range floor labelled unused under step floors; Signals floor out of the window-size section; window-size class names.
+- [x] Check `step-pf.every-coordination-asks-its-own-floor-...`, mutants `own floor:` (3).
+- [~] Old against new code on the x02 overlay (4 symbols, dev + sealed): running (chain19).
+
+## Execution last-N check (owner: 10 .. 30 step 5, 50 symbols x 3 days, set best as default)
+- [~] trade_sim, 50 symbols (fresh 3-day snapshot 11-12 10:00 .. 11-15 10:00 UTC), x02 overlay with its Axis, execGateN 0 / 10 / 15 / 20 / 25 / 30 on one shared replay (`--cache-shared execGateN`): running (chain18).
+
 ## Gates
 - [x] Config gate (`configGate`, `configGateN` / `Pf` / `Hours` / `Min`, default off): the group gate's rule on one configuration Set's own executed results (Set x lane);
       live (both entry paths) and simulator share `set_engine.exec_gates_allow`. Check `trader.config-gate-blocks-a-losing-config-and-only-that-config`, mutant `config gate:`.
 - [~] Measured on 4 symbols, dev + sealed (N 3 / 5 / 10, floor 1.0 / 1.2, with and without the group gate): running (chain16).
 
 ## Axis
-- [x] x02 runs all four Axis controls (prev 12, last 4, cont 8, pause 8).
-- [~] Measured on the current grid (stack_eval, dev, base without trailing time exit): no Axis 1.028 / drawdown 27.2 %, **Axis all four 1.239 / drawdown 14.4 %**,
-      coordinator floor 1.122; sealed part rerunning on the corrected base.
-- [ ] Ship / keep decision once the sealed part is in (rule: both windows).
+- [x] Measured on the current grid (stack_eval, 4 symbols; dev / sealed): no Axis 1.054 (127) / 1.082 (51); all four 1.000 (127) / 0.783 (66); **prev 4 alone 1.227 (121) / 1.084 (51)**;
+      cont 1 1.074 sealed; pause 4 0.970 / 1.420; last 1 0.864 sealed.
+- [x] **x02 runs Axis prev 4 only** (better than the shipped all four on both windows, not worse than no Axis); copied to /opt, reload confirmed (`axes prev 1, last 0, cont 0, pause 0`).
+- [~] Per-Set Axis setting (stack_eval axissets, dev + sealed): running (chain17).
 
 ## Block
 - [x] Block rounds (count 5, ratio 1.0, step to level 2, ceiling x 3) shipped by the owner (2026-11-11); guard / target share / kinds rules on.
-- [~] Block v2 on parents the shipped Axis admits (stack_eval block2, dev + sealed) rerunning on the corrected base.
-- [ ] Decision against "without" on both windows.
+- [-] Block v2 on parents the Axis admits: 0.956 dev against 1.000 without adds: unchanged.
 
 ## DCA
 - [x] x02: DCA on behind its own Axis gate (owner "run always all"); x01 / presets keep it off.
 - [x] DCA add under the venue minimum now learns it (was re-sent every 25 s).
-- [ ] Measure DCA on the current grid (stack_eval `--part dca`, dev + sealed); earlier measurements (11-04) never beat "without".
+- [-] DCA on the current grid (10 arms, dev + sealed): none better than without on both (best dev rung 0.8 x stop 1.055 / sealed 1.046 against 1.054 / 1.082).
 
 ## Correctness / tests
 - [x] Full regression 742 / 742 (20 min); npm test; tsc; engine self-test 109 / 109.

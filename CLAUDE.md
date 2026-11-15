@@ -2,6 +2,21 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-15 (newest), owner: "min PF has for each coord own values and if auto enabled use the auto values with fallback to their manual defaults .. check sections,
+  settings .. ensure no collisions".** One resolver, `SetBook.floor_of(st)` -> (floor, source), read by `floor_for`, `step_floor`, `stage_params` (engine and simulator):
+  Auto on (minPfByStep + minPfStepAuto): the Set's own learned floor (scope "set", `auto-set`, capped by minPfStepAutoHigh) -> the configuration's OWN manual floor
+  (`own_manual_floor`: an indication entry's lanePolicy `lanePolicy`, a Signals pack's minPfSignals `signals`, a TP range's minPfByRange `range`) -> for every other Set the
+  step's learned floor (`auto-step`) -> 1 + TP% x ratio (`manual-step`). Auto off: own manual floor -> the table. **Collisions fixed:** (1) the Micro range floor and
+  (2) the Signals floor overrode Auto entirely (a Signals Set never used a learned floor); (3) an own-floor configuration never falls back to a floor learned on other
+  configurations' orders. Desk: `shortRangeMinPf` is labelled unused while the step floors are on (they always took precedence), the Signals floor moved out of the
+  window-size section (it applies whatever that setting), the window-size classes are named "Window Micro / Minimal / ..." (they collided with the TP range names),
+  and a line states the resolution order. Snapshot `stagePolicy.minPfSource`. Check `step-pf.every-coordination-asks-its-own-floor-auto-first-then-its-own-manual-default`,
+  mutants `own floor:` (3). Shipped as asked; measured old against new code on the x02 overlay (4 symbols): see docs/CHECKLIST.md.
+- **2026-11-15 (newest), Axis / Block / DCA decided on the current grid** (stack_eval, 4 symbols, x02 overlay, executed PF / orders dev, sealed): no Axis 1.054 / 127, 1.082 / 51;
+  shipped all four 1.000 / 127, 0.783 / 66; **prev 4 alone 1.227 / 121, 1.084 / 51** (prev 8 / 12 and cont 8 equal no Axis on sealed; cont 1 1.074, pause 4 0.970 dev / 1.420 sealed,
+  last 1 / 2 0.864 / 0.953 sealed). **x02 now runs Axis prev 4 only** (`axisPrevMaxWindow` 4, last / cont / pause off; better than the shipped all-four on both windows and not
+  worse than no Axis on either, 6 fewer orders on development). Block v2 on admitted parents 0.956 dev against 1.000 (unchanged). DCA (10 arms): none better than without
+  on both windows (best dev rung 0.8 x stop 1.055 / sealed 1.046 against 1.054 / 1.082); x02 keeps DCA on its Axis gate by the owner's "run always all".
 - **2026-11-15 (latest), owner: "For all: use better working but also prioritize higher order amount."** Selection rule for every setting, indication, gate, Axis / Block /
   DCA arm and default: (1) the executed PF must be better than the current setting on development AND sealed; (2) among arms that pass, prefer the one with MORE
   executed orders (a higher PF on fewer orders is not preferred over a slightly lower PF on clearly more orders); a gain carried by a handful of orders is not shipped.

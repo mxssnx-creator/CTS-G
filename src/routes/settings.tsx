@@ -1090,7 +1090,7 @@ function SettingsPage() {
                   min={MIN_PF_FLOOR}
                   max={2.3}
                   step={0.02}
-                  hint={overlay.minPfBySize !== false ? "The window-size PF controls currently take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
+                  hint={overlay.minPfByStep !== false ? "Not used now: with the minimum PF by TP step on, Short Range Sets ask their step floor (Auto or 1 + TP% x ratio) like every other Set." : overlay.minPfBySize !== false ? "Not used now: the window-size PF classes take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider label="Micro minimum SL (% of entry)" value={overlay.microMinSlDistancePct} min={0} max={10} step={0.01}
@@ -2458,9 +2458,21 @@ function PfWindowControls({
         {overlay.minPfByRange?.micro != null ? <Slider
           label="Micro range · minimum PF"
           value={overlay.minPfByRange.micro} min={1.001} max={2} step={0.001} digits={3}
-          hint="One positive PF floor for Micro TP steps 2–3 across Base, Main, Real and their strategy gates. PF 1.000 is break-even after modeled costs."
+          hint="Micro's own manual floor (TP steps 2–3) across Base, Main, Real and their strategy gates. With Auto per config Set on, a Micro Set with its own learned floor asks that; every other Micro Set asks this value, never a floor learned on other ranges. PF 1.000 is break-even after modeled costs."
           onChange={(value) => patch("minPfByRange", { ...overlay.minPfByRange, micro: value })} /> : null}
       </> : null}
+      <Slider
+        label="Signals packs · own minimum PF"
+        value={overlay.minPfSignals}
+        min={2.2}
+        max={3}
+        step={0.01}
+        hint="The own manual floor of every Signals pack Set (sig-*) in every window and stage, whatever the step or window-size setting. With Auto per config Set on, a Signals Set's own learned floor first and this value as its fallback (never a floor learned on other packs). Minimum 2.20."
+        onChange={(v) => patch("minPfSignals", v)}
+      />
+      <div className="col-span-full font-mono text-[11px] text-muted">
+        Which floor a Set asks: Auto on → its own learned floor (per config Set) → its configuration's own manual floor (Signals, Micro range, an indication entry's lane policy) → the step's learned floor → 1 + TP% × ratio. Auto off → own manual floor → 1 + TP% × ratio. The Sets overview and the Stages table show the source of each floor.
+      </div>
       <Toggle
         label="Choose among valid Sets by the lane's own Set (Real / Real Negative orders), not the raw Base tape"
         on={overlay.rankByLane !== false}
@@ -2530,7 +2542,7 @@ function PfWindowControls({
           checked={overlay.minPfStepAutoScope === "set"}
           onChange={(e) => patch("minPfStepAutoScope", e.target.checked ? "set" : "step")}
         />
-        Auto floor per config Set (each Set learns its own floor; with too few orders it uses the step, pooled, then manual floor)
+        Auto floor per config Set (each Set learns its own floor; with too few orders a configuration with its own manual floor — Signals, Micro range, an indication entry's lane policy — uses that value, every other Set the step, pooled, then manual floor)
       </label>
       <Slider
         label="Auto per Set: orders a Set needs"
@@ -2565,7 +2577,7 @@ function PfWindowControls({
         min={1}
         max={2}
         step={0.01}
-        hint="Caps the learned Auto floor and the manual 1 + TP % x ratio at this value in every stage (owner 2026-11-04: 1.27). 2.00 = no cap."
+        hint="Caps the learned Auto floor and the manual 1 + TP % x ratio at this value in every stage (owner 2026-11-04: 1.27). A configuration's own manual floor (Signals 2.20, Micro range) is not capped. 2.00 = no cap."
         onChange={(v) => patch("minPfStepAutoHigh", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
       />
       <StepPfTable overlay={overlay} stats={stats ?? null} />
@@ -2587,7 +2599,7 @@ function PfWindowControls({
       ).map(([name, pfKey, nKey]) => (
         <div key={pfKey} className="contents">
           <Slider
-            label={`${name} · min PF`}
+            label={`Window ${name} · min PF`}
             value={overlay[pfKey]}
             min={MIN_PF_FLOOR}
             max={2.5}
@@ -2596,7 +2608,7 @@ function PfWindowControls({
             onChange={(v) => patch(pfKey, v)}
           />
           <Slider
-            label={`${name} · up to N orders`}
+            label={`Window ${name} · up to N orders`}
             value={overlay[nKey]}
             min={1}
             max={100}
@@ -2607,22 +2619,13 @@ function PfWindowControls({
         </div>
       ))}
       <Slider
-        label="Long · min PF"
+        label="Window Long · min PF"
         value={overlay.minPfLong}
         min={MIN_PF_FLOOR}
         max={3}
         step={0.01}
         hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders`}
         onChange={(v) => patch("minPfLong", v)}
-      />
-      <Slider
-        label="Signals · min PF"
-        value={overlay.minPfSignals}
-        min={2.2}
-        max={3}
-        step={0.01}
-        hint="minimum 2.20 · own Signal evidence only; the full CTS-A-O Signal adapter is not yet connected in CTS-G"
-        onChange={(v) => patch("minPfSignals", v)}
       />
     </>
   );

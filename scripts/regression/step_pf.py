@@ -634,6 +634,55 @@ def shipped_floors_are_all_above_one():
     return all(v > 1.0 for v in rows.values()), f"lowest floor any window can ask: {rows}"
 
 
+def every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default():
+    """Owner 2026-11-15 ("min PF has for each coord own values and if auto enabled use the auto values with fallback to their manual defaults .. no
+    collisions"): with Auto on, a Set's own learned floor comes first; a configuration with its own manual floor (Micro range, Signals pack, an indication
+    entry's lane policy) falls back to THAT value and never to a floor learned on other configurations' orders; every other Set falls back to its step's
+    learned floor, then the manual table. Auto off: the configuration's own manual floor, else the table. The chain's StageParams ask the same value."""
+    import copy
+    from position_cost import tp_range_of
+    b = _book(setStepMax=12, minPfStepAuto=True, minPfStepAutoScope="set", minPfStepAutoHigh=1.3, minPfByRange={"micro": 1.01}, minPfSignals=2.4)
+    base = [x for x in b.by_idx if x.kind == "base" and x.sl_ratio == 1.0]
+    micro = next(x for x in base if tp_range_of(b.step_bucket(x)) == "micro")
+    gen = next(x for x in base if tp_range_of(b.step_bucket(x)) != "micro")
+    sig = copy.copy(gen); sig.pack, sig.id = "sig-ema-cross-short-t5", "sig-probe"
+    pol = copy.copy(gen); pol.pack, pol.id = "probe-policy", "policy-probe"
+    b.pack_ranges["probe-policy"] = {"lanePolicy": {"minPfByStep": {str(b.step_bucket(pol)): 1.33}}}
+    manual = se.manual_step_floor(b.step_bucket(gen) * 0.1, b.pf_step_ratio)
+    for x in (micro, gen, sig, pol):
+        b.step_floor_auto[(b.auto_step_bucket(x), x.side)] = 1.12      # a step floor learned on every pack's orders
+    rows, bad = {}, []
+    def ask(tag, x, want, src):
+        got, source = b.floor_of(x)
+        same = {b.floor_for(n, x.pack, x) for n in (1, 10, 50)} | {b.stage_params(x.pack, x).floor}
+        rows[tag] = (round(got, 4), source)
+        if abs(got - want) > 1e-9 or source != src or same != {got}:
+            bad.append((tag, got, source, want, src, same))
+    ask("micro, no own", micro, 1.01, "range")
+    ask("signals, no own", sig, 2.4, "signals")
+    ask("policy, no own", pol, 1.33, "lanePolicy")
+    ask("generic, no own", gen, 1.12, "auto-step")
+    for x in (micro, sig, pol, gen):
+        b.set_floor_auto[x.id] = 1.18
+    ask("micro, own", micro, 1.18, "auto-set")
+    ask("signals, own", sig, 1.18, "auto-set")
+    ask("policy, own", pol, 1.18, "auto-set")
+    ask("generic, own", gen, 1.18, "auto-set")
+    b.set_floor_auto[gen.id] = 1.9
+    ask("own capped", gen, 1.3, "auto-set")
+    b.step_floor_auto.clear(); b.set_floor_auto.clear()
+    ask("generic, nothing learned", gen, min(manual, 1.3), "manual-step")
+    off = _book(setStepMax=12, minPfStepAuto=False, minPfByRange={"micro": 1.01}, minPfSignals=2.4)
+    off.set_floor_auto[micro.id] = 1.18                                   # never read with Auto off
+    off.pack_ranges["probe-policy"] = b.pack_ranges["probe-policy"]
+    b = off
+    ask("off: micro", micro, 1.01, "range")
+    ask("off: signals", sig, 2.4, "signals")
+    ask("off: policy", pol, 1.33, "lanePolicy")
+    ask("off: generic", gen, min(manual, 1.3), "manual-step")
+    return not bad, f"{rows}; bad {bad[:2]}"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     ratio_midpoints_match_desk_half_up_normalization,
     auto_wide_steps_use_the_last_table_bucket_but_keep_policy_identity,
@@ -645,4 +694,5 @@ CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,
     auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors, the_simulator_learns_the_engines_own_floor_of_every_set,
     shipped_floors_are_all_above_one, the_packed_simulator_floors_equal_the_plain_ones,
+    every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default,
     sl_range_is_the_widest_interval_near_the_best, the_simulator_learns_the_engines_sl_ranges_and_the_gate_reads_them)]
