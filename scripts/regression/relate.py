@@ -173,3 +173,104 @@ def corrupt_state_and_atomic_receipts():
         assert b.pending['owned']['receipt']['total']<100
     return True,'6 corrupt snapshots refused; no partial policy mutation; pending receipt copied'
 CHECKS.append(('relate.corrupt-state-and-atomic-receipt',corrupt_state_and_atomic_receipts))
+
+
+def _pending_recovery(side='LONG', changes=None):
+    """An owned intent and a position snapshot are separate from its order fill."""
+    from types import SimpleNamespace
+    import pulse_trader as pt
+    from execution_cost import FeeSchedule
+    identity = {**ID, 'side': side}
+    book = RelateBook([config()])
+    warm(book, identity)
+    receipt = book.decide(identity, 200, .003, .01, qualified=True)
+    cid = pt.TAG + 'o-relate-restart'
+    book.reserve(cid, receipt, 1, {'sl': .003, 'tp': .01,
+                                'setId': identity['config'], 'lane': identity['lane']})
+    pos = pt.Position(identity['symbol'], side, receipt['total'], 99.999, 1000,
+                      90, 110, 100)
+    order = {'orderId': '11', 'symbol': pos.symbol, 'positionSide': side,
+             'side': 'BUY' if side == 'LONG' else 'SELL', 'clientOrderID': cid,
+             'executedQty': str(pos.qty), 'origQty': str(pos.qty),
+             'avgPrice': '100', 'status': 'FILLED', **(changes or {})}
+    pulse = pt.Pulse.__new__(pt.Pulse)
+    pulse.relate, pulse.overlay = book, {}
+    pulse.contracts = {pos.symbol: SimpleNamespace(maker_fee=.0002, taker_fee=.0005)}
+    pulse.fee_schedule = FeeSchedule()
+    pulse.api = SimpleNamespace(get=lambda *args: {'code': 0, 'data': {'order': order}})
+    pulse.open = {pos.symbol: pos}
+    saved = []
+    pulse.save_open_book = lambda: saved.append(True) or True
+    return pulse, pos, order, saved
+
+
+def recovered_relate_requires_exact_reported_fill():
+    from dataclasses import asdict
+    refused = []
+    mutations = [{'symbol': 'FOREIGN-USDT'}, {'positionSide': 'SHORT'}, {'side': 'SELL'},
+                 {'clientOrderID': 'foreign'}, {'orderId': ''},
+                 {'executedQty': None}, {'executedQty': ''}, {'executedQty': 'NaN'},
+                 {'executedQty': '0'}, {'executedQty': '999'},
+                 {'avgPrice': 'NaN'}, {'avgPrice': 'Infinity'},
+                 {'avgPrice': 'invalid'}, {'avgPrice': '0'}]
+    for changes in mutations:
+        pulse, pos, _row, saved = _pending_recovery(changes=changes)
+        before, pending = asdict(pos), deepcopy(pulse.relate.pending)
+        try:
+            recovered = pulse.recover_relate_intent(pos)
+        except (TypeError, ValueError, OverflowError):
+            recovered = True  # malformed evidence must return unknown, not abort reconciliation
+        refused.append(not recovered and asdict(pos) == before
+                       and pulse.relate.pending == pending and not saved)
+    for reply in ([], {'code': 0, 'data': ['not-an-order']},
+                  {'code': 0, 'data': 'invalid'}, {'code': 0, 'data': {'order': []}}):
+        pulse, pos, _row, saved = _pending_recovery()
+        pulse.api.get = lambda *args: reply
+        before, pending = asdict(pos), deepcopy(pulse.relate.pending)
+        try:
+            recovered = pulse.recover_relate_intent(pos)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            recovered = True
+        refused.append(not recovered and asdict(pos) == before
+                       and pulse.relate.pending == pending and not saved)
+    return all(refused), f'foreign/missing/malformed fill scopes refused without mutation={refused}'
+
+
+def recovered_relate_fee_evidence_survives_restart():
+    from dataclasses import asdict
+    import pulse_trader as pt
+    results = []
+    for side in ('LONG', 'SHORT'):
+        for reported_zero in (False, True):
+            pulse, pos, order, saved = _pending_recovery(
+                side, {'commission': 0} if reported_zero else {})
+            recovered = pulse.recover_relate_intent(pos)
+            restored = pt.Position(**json.loads(json.dumps(asdict(pos))))
+            source = 'reported-fee' if reported_zero else 'exchange-rate-estimate'
+            expected_entry_fee = 0 if reported_zero else pos.qty * 100 * .0005
+            evidence = (recovered and bool(saved) and not pulse.relate.pending
+                        and restored.order_id == '11' and restored.entry == restored.base_entry == 100
+                        and restored.notional == restored.qty * 100 and restored.opened_at == 1000
+                        and restored.fee_source == source
+                        and abs(restored.entry_fee_usdt - expected_entry_fee) < 1e-12
+                        and restored.fee_legs.get('11', {}).get('at') == 200)
+            exit_order = {**order, 'orderId': '12',
+                          'side': 'SELL' if side == 'LONG' else 'BUY'}
+            pulse.fill_cost(exit_order, restored.qty, 101, restored.symbol, restored)
+            reads = []
+            def exact(leg, since):
+                reads.append((leg['orderId'], since))
+                return .059 if leg['role'] == 'entry' else .061
+            promoted = pt.reconcile_position_fees(restored, exact)
+            # A reported zero remains zero; rate estimates may become exact once.
+            expected_reads = [] if reported_zero else [('11', 200), ('12', 1000)]
+            repeat = pt.reconcile_position_fees(restored, lambda *a: (_ for _ in ()).throw(
+                AssertionError('complete fees queried again')))
+            results.append(evidence and promoted and repeat and reads == expected_reads
+                           and restored.fee_source == 'reported-fee'
+                           and restored.base_entry_fee_usdt == (0 if reported_zero else .059))
+    return all(results), f'long/short rates and reported-zero fees retain exact restart evidence={results}'
+
+
+CHECKS += [('relate.recovered-intent-requires-exact-fill', recovered_relate_requires_exact_reported_fill),
+           ('relate.recovered-intent-retains-fee-evidence', recovered_relate_fee_evidence_survives_restart)]

@@ -492,6 +492,10 @@
   "exitOptSlMax": 0.9,
   "exitMinHoldS": 45,
   "setSlMinRatio": 0.5,
+  "trailStepMin": 3,
+  "slAutoRange": true,
+  "slAutoMin": 20,
+  "slAutoTol": 5,
   "execGateN": 0,
   "slRatiosByRange": {
     "long": [

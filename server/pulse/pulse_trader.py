@@ -30,6 +30,7 @@ from block_rules import clean_cfg as clean_block_cfg
 from sim_diff import diff_note as sim_diff_note, diff_report as sim_diff_report, new_diff as new_sim_diff
 from fee_policy import cost_policy
 from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage, number
+from venue_fill_fees import remember_fee_leg, reconcile_position_fees
 from position_cost import row_net_pnl_pct
 from coord_engine import Coordinator
 from relate_engine import RelateBook, MAX_STACK as RELATE_MAX_STACK
@@ -1257,7 +1258,6 @@ class Pulse:
         is_maker = data.get("isMaker") in (True, "true", "TRUE")
         fallback = policy["makerFeeRate"] if is_maker else policy["takerFeeRate"]
         fee, source = fill_fee(data, qty, price, maker, taker, 200 * fallback)
-        from venue_fill_fees import remember_fee_leg
         remember_fee_leg(pos, data, qty, price, fee, source)
         return fee, source
 
@@ -4823,7 +4823,6 @@ class Pulse:
             missing_qty = max(0.0, pos.qty - pos.exit_fee_qty)
             if missing_qty:
                 self.record_exit_fee(pos, {}, missing_qty, exit_px)
-            from venue_fill_fees import reconcile_position_fees
             if not precise:
                 reconcile_position_fees(pos, getattr(self.api, "reported_fill_fee", None))
             accounted = execution_result(pos.entry, exit_px, pos.qty, pos.side,
@@ -6714,18 +6713,31 @@ class Pulse:
         if relate is None:
             return False
         for cid, intent in list(relate.pending.items()):
+            if not self.cid_ours(cid):
+                continue
             identity = intent["receipt"]["identity"]
             if identity["symbol"] != pos.symbol or identity["side"] != pos.side:
                 continue
             reply = self.api.get("/openApi/swap/v2/trade/order", {"symbol": pos.symbol, "clientOrderID": cid})
-            if not self.ok(reply):
+            if not isinstance(reply, dict) or not self.ok(reply):
                 continue
-            row = (reply.get("data") or {}).get("order") or reply.get("data") or {}
-            if not isinstance(row, dict) or self.order_cid(row) != cid:
+            data = reply.get("data")
+            if not isinstance(data, dict):
                 continue
-            qty = filled_qty(row, 0)
-            avg = float(row.get("avgPrice") or 0)
-            if not math.isfinite(qty) or qty <= 0 or abs(qty - pos.qty) > max(1e-12, pos.qty * 1e-9) or avg <= 0:
+            row = data.get("order", data)
+            if (not isinstance(row, dict) or self.order_cid(row) != cid
+                    or row.get("symbol") != pos.symbol or row.get("positionSide") != pos.side
+                    or row.get("side") != ("BUY" if pos.side == "LONG" else "SELL")):
+                continue
+            oid = real_oid(row.get("orderId") or row.get("orderID"))
+            qty = executed_qty(row)  # requested/original quantity is never a fill receipt
+            try:
+                avg = float(row.get("avgPrice") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (not oid or qty is None or qty <= 0 or not math.isfinite(avg) or avg <= 0
+                    or not math.isfinite(pos.qty) or pos.qty <= 0
+                    or abs(qty - pos.qty) > max(1e-12, pos.qty * 1e-9)):
                 continue
             try:
                 receipt = relate.resized(intent["receipt"], qty / intent["originQty"])
@@ -6737,9 +6749,15 @@ class Pulse:
             pos.sl_pct, pos.tp_pct = protect["sl"], protect["tp"]
             pos.set_id, pos.lane, pos.client_id = protect["setId"], protect["lane"], cid
             pos.base_entry, pos.base_qty = avg, qty
-            fee, source = self.fill_cost(row, qty, avg, pos.symbol)
+            pos.entry, pos.notional, pos.order_id = avg, qty * avg, oid
+            fee, source = self.fill_cost(row, qty, avg, pos.symbol, pos)
+            # A probe's hold clock starts on recovery. Fee lookup still needs
+            # the persisted entry time, including fills older than that clock.
+            if oid in pos.fee_legs:
+                pos.fee_legs[oid]["at"] = intent["receipt"]["at"]
             pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
-            pos.fee_source = source
+            pos.fee_source = ("reported-fee" if source == "reported-fee" else
+                              "configured-estimate" if source == "configured-estimate" else "exchange-rate-estimate")
             if self.open.get(pos.symbol) is pos and self.save_open_book() and str(row.get("status") or "").upper() in ("FILLED", "CANCELED", "CANCELLED", "EXPIRED"):
                 relate.release(cid)
             return True
