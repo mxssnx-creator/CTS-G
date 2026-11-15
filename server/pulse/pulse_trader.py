@@ -44,6 +44,7 @@ from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
 from conn_guard import ConnGuardError, mode_of, resolve_base
+from redis_reads import read_output as _redis_read_output
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
@@ -773,21 +774,6 @@ def rss_mb() -> float:
         return pages * 4096 / 1048576.0
     except Exception:
         return 0.0
-
-
-def _redis_read_output(args: List[str], timeout: float) -> Optional[str]:
-    """Read once with a deadline. Error replies are never configuration."""
-    try:
-        p = subprocess.run(["redis-cli", *args], capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    output = p.stdout or ""
-    if p.returncode != 0 or output.lstrip().startswith((
-            "(error)", "ERR ", "NOAUTH ", "WRONGTYPE ", "NOPERM ", "DENIED ", "OOM ",
-            "LOADING ", "BUSY ", "MISCONF ", "CLUSTERDOWN ", "MASTERDOWN ",
-            "READONLY ", "MOVED ", "ASK ", "TRYAGAIN ")):
-        return None
-    return output
 
 
 def redis_hget(field: str) -> str:
