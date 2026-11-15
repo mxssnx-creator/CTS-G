@@ -367,6 +367,8 @@ def gate_base(book, tapes: Tapes, st, now: float, coordinate: bool = True):
         valid = _short_ok(book, e)
     if valid and coordinate and getattr(book, "base_min_n", 0):
         valid = _min_ok(book, e)
+    if valid and not book.sl_auto_allows(st):
+        valid = False                                         # slAutoRange: outside its TP step's learned SL range (SetBook.base_validation_reason "slrange")
     old, new, pf, n, floor = e["old"], e["new"], e["pf"], e["n"], e["floor"]
     halves = min(old, new) if (old or new) else pf
     shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * e["n_all"] / (e["n_all"] + se.RANK_SHRINK_N)
@@ -706,6 +708,7 @@ class AutoFloors:
     so the evaluation window is never judged with a floor fitted on it. Copies retain symbol, direction and entry provenance, as in the engine."""
 
     def __init__(self, book, tapes: "Tapes"):
+        self.tapes = tapes
         self.on = bool(getattr(book, "pf_by_step", False) and getattr(book, "pf_step_auto", False))
         # per Set, in the engine's order: (bucket key, exit times, running signature of its first k orders, its pairs (exit t, PF at entry, net))
         self.sets: List[Tuple[Tuple[int, int], List[float], List[int], List[Tuple[float, float, float]]]] = []
@@ -742,8 +745,48 @@ class AutoFloors:
                 sig.append(run)
             self.sets.append(((book.auto_step_bucket(st), st.side), list(tx), sig, pairs, st.id))
 
+    def _apply_sl(self, book, now: float) -> None:
+        """slAutoRange in the simulator: SetBook._learn_step_sl_ranges on the same orders (base / Exit Sets, closed before the evaluation window, one Set per
+        distinct tape and SL ratio), learned every test hour."""
+        hour = int(now // 3600) * 3600.0
+        boundary = hour - book.lookback * se.BAR_S
+        key_now = (hour, book.lookback)
+        if getattr(self, "_sl_last", None) == key_now:
+            return
+        self._sl_last = key_now
+        tapes = self.tapes
+        if getattr(self, "_sl_sets", None) is None:
+            rows = []
+            for st in book.by_idx:
+                if st.kind == "trail":
+                    continue
+                tx, te, pp = tapes.by_set[st.idx]
+                symbols = getattr(tapes, "symbols_by_set", {}).get(st.idx) or (f"unknown:{st.id}",) * len(tx)
+                sig, run = [], 0
+                for t_, e_, x_, symbol in zip(tx, te, pp, symbols):
+                    run = hash((run, se.auto_evidence_key(t_, symbol, x_, e_, st.side)))
+                    sig.append(run)
+                rows.append(((book.auto_step_bucket(st), st.side), round(float(st.sl_ratio), 4), list(tx), sig, [x - tapes.cf for x in pp]))
+            self._sl_sets = rows
+        by: Dict[Tuple[int, int], Dict[float, List[float]]] = {}
+        seen: set = set()
+        for key, ratio, tx, sig, nets in self._sl_sets:
+            cut = bisect.bisect_left(tx, boundary)
+            if cut <= 0 or (sig[cut - 1], ratio) in seen:
+                continue
+            seen.add((sig[cut - 1], ratio))
+            by.setdefault(key, {}).setdefault(ratio, []).extend(nets[:cut])
+        learned = {}
+        for key, by_ratio in by.items():
+            got = se.learn_sl_range(by_ratio, book.sl_auto_min, book.sl_auto_tol)
+            if got:
+                learned[key] = (got["lo"], got["hi"])
+        book.step_sl_auto = learned
+
     def apply(self, book, now: float) -> bool:
         """Learn before the evaluation window, matching native replay; refresh hourly."""
+        if getattr(book, "sl_auto", False):
+            self._apply_sl(book, now)
         if not self.on:
             return False
         hour = int(now // 3600) * 3600.0

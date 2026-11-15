@@ -31,6 +31,11 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("relate recovery: requested quantity becomes a confirmed fill", "pulse_trader.py", "            qty = executed_qty(row)  # requested/original quantity is never a fill receipt", "            qty = filled_qty(row, 0)  # wrong: an acknowledgement is not a fill"),
+    ("relate recovery: foreign order scope is accepted", "pulse_trader.py", "            if (not isinstance(row, dict) or self.order_cid(row) != cid\n                    or row.get(\"symbol\") != pos.symbol or row.get(\"positionSide\") != pos.side\n                    or row.get(\"side\") != (\"BUY\" if pos.side == \"LONG\" else \"SELL\")):", "            if not isinstance(row, dict) or self.order_cid(row) != cid:"),
+    ("relate recovery: the entry fee leg is lost on restart", "pulse_trader.py", "            fee, source = self.fill_cost(row, qty, avg, pos.symbol, pos)", "            fee, source = self.fill_cost(row, qty, avg, pos.symbol)"),
+    ("relate recovery: a new hold clock hides the original commission", "venue_fill_fees.py", "            since=min(pos.opened_at,float(leg.get('at',pos.opened_at)))", "            since=pos.opened_at"),
+    ("relate recovery: nonfinite prices become entry evidence", "pulse_trader.py", "            if (not oid or qty is None or qty <= 0 or not math.isfinite(avg) or avg <= 0", "            if (not oid or qty is None or qty <= 0 or avg <= 0"),
     ("axis disjoint: the previous window reads the last window's closes again",
      "coord_engine.py", "            before = list(closed_rows)[:-last_w] if last_w > 0 else list(closed_rows)", "            before = list(closed_rows)"),
     ("axis disjoint: the last window's outcome is never asked",
@@ -105,6 +110,15 @@ MUTATIONS = [
      "signal_packs.py", "min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk)])", "min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk[1:])])"),
     ("signals pack: an entry's step range and ratios are ignored",
      "set_engine.py", "            self.pack_ranges.update(sig[\"ranges\"])", "            pass"),
+    ("sl auto: the range picks the narrowest interval",
+     "set_engine.py", "key=lambda r: (r[4], r[2], -r[0]))", "key=lambda r: (-r[4], r[2], -r[0]))"),
+    ("sl auto: a Set outside its step's range stays valid",
+     "set_engine.py", "            return \"slrange\"         # the Set's SL ratio", "            pass                     # the Set's SL ratio"),
+    ("sl auto: the learning reads orders closed after the boundary",
+     "set_engine.py", "            rows = self._tape_rows(st.id, tape_order, float(\"-inf\"), until=until)\n            if not rows:\n                continue\n            sig = 0",
+     "            rows = self._tape_rows(st.id, tape_order, float(\"-inf\"), until=None)\n            if not rows:\n                continue\n            sig = 0"),
+    ("trail step min: the minimum arm removes nothing",
+     "set_engine.py", "            self.trails = [t for t in self.trails if t[1] + 1e-9 >= self.trail_step_min * TP_UNIT_PCT]", "            pass"),
     ("exec gate: the last check before execution never blocks",
      "set_engine.py", "    r_ok = r_ok and x_ok", "    r_ok = r_ok"),
     ("block guard: adds are sent while the book's executed adds are in deficit",

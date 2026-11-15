@@ -223,6 +223,13 @@ function StagesSection({ stats }: { stats: LiveStats | null }) {
           <Table head={["Window", "N", "Sets", "Share", "PF", "Orders"]} empty="No window figures yet."
             rows={windows.map(([k, w]) => [k, Array.isArray(w.n) ? w.n.join("/") : String(w.n ?? "–"), w.sets, `${w.pct.toFixed(1)}%`, <Pf v={w.pf} />, w.orders])} />
         </Panel>
+        <Panel title="Auto SL range per TP step" hint={stats?.sets?.slRanges?.auto ? `learned from the orders before the window · ${stats?.sets?.slRanges?.minOrders ?? 20} orders · tol ${stats?.sets?.slRanges?.tolPct ?? 5}%` : "off (manual grid)"}>
+          <div className="max-h-80 overflow-y-auto">
+            <Table head={["TP %", "Side", "Grid", "Min SL", "Max SL", "PF in", "PF all", "Orders"]} empty="No SL range learned yet."
+              rows={(stats?.sets?.slRanges?.steps ?? []).map((r) => [r.tpPct.toFixed(1), r.side === 1 ? "L" : r.side === -1 ? "S" : "-", r.ratios.join("/"),
+                r.lo == null ? "manual" : r.lo.toFixed(2), r.hi == null ? "manual" : r.hi.toFixed(2), <Pf v={r.pfIn} />, <Pf v={r.pfAll} />, r.orders])} />
+          </div>
+        </Panel>
         <Panel title="Minimum PF per TP step" hint="Manual floor and the floor used per direction (Auto where learned); a Set's own floor wins with scope 'set'">
           <div className="max-h-80 overflow-y-auto">
             <Table head={["TP %", "Manual", "Used L", "Used S", "Source", "Orders"]} empty="No step floor learned yet."

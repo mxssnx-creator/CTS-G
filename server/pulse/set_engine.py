@@ -1646,6 +1646,36 @@ def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, to
     return {"floor": pick[0], "pf": pick[1], "admitted": pick[2], "bestPf": best, "orders": len(prs), "pfAll": pf_of(g_[-1], l_[-1])}
 
 
+def learn_sl_range(by_ratio: Dict[float, Sequence[float]], min_orders: int, tol: float) -> Optional[Dict[str, Any]]:
+    """The Auto SL range of one TP step (owner 2026-11-14: "auto min and max SL ratios for each step"): over every contiguous interval of the SL ratios present
+    (sorted), the nets of its orders pooled; among the intervals with at least `min_orders` orders the best PF, and the WIDEST interval within `tol` of it (the
+    most valid Sets at nearly the best PF; ties: the higher PF, then the lower ratios). None when no interval has the orders. Pure: engine and simulator call it."""
+    ratios = sorted(r for r, v in by_ratio.items() if v)
+    if not ratios:
+        return None
+    rows = []
+    for i in range(len(ratios)):
+        g = l_ = 0.0
+        n = 0
+        for j in range(i, len(ratios)):
+            for x in by_ratio[ratios[j]]:
+                if x > 0:
+                    g += x
+                else:
+                    l_ -= x
+                n += 1
+            if n >= min_orders:
+                rows.append((ratios[i], ratios[j], pf_of(g, l_, n), n, j - i))
+    if not rows:
+        return None
+    best = max(r[2] for r in rows)
+    pick = max((r for r in rows if r[2] + 1e-12 >= best * (1.0 - tol)), key=lambda r: (r[4], r[2], -r[0]))
+    g_all = sum(x for v in by_ratio.values() for x in v if x > 0)
+    l_all = -sum(x for v in by_ratio.values() for x in v if x <= 0)
+    return {"lo": pick[0], "hi": pick[1], "pf": pick[2], "orders": pick[3], "bestPf": best,
+            "ordersAll": sum(len(v) for v in by_ratio.values()), "pfAll": pf_of(g_all, l_all, 1)}
+
+
 def auto_evidence_key(exit_t, symbol, gross, entry_t, side) -> tuple:
     """Identity of one causal learning observation, shared by native and replay.
 
@@ -2162,6 +2192,11 @@ class SetBook:
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
         self.pf_set_auto = False
         self.pf_set_auto_min = 10
+        self.sl_auto = False
+        self.sl_auto_min = 20
+        self.sl_auto_tol = 0.05
+        self.step_sl_auto: Dict[Tuple[int, int], Tuple[float, float]] = {}
+        self.step_sl_report: List[Dict[str, Any]] = []
         self.set_floor_auto: Dict[str, float] = {}             # Set id -> its own learned Auto floor (minPfStepAutoScope "set"); absent = the defaults
         self.pf_step_auto_tol = STEP_PF_AUTO_TOL_DEFAULT
         self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
@@ -2627,6 +2662,10 @@ class SetBook:
             self.trail_min_lock = 0.0
         if self.trail_min_lock > 0:
             self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
+        # trailStepMin (owner 2026-11-15, "min trail step 3"): no trailing Set arms under this many TP steps (0.1 % each); 0 / absent = every arm the grid builds
+        self.trail_step_min = int(max(0, min(50, finite(ov.get("trailStepMin"), 0.0))))
+        if self.trail_step_min:
+            self.trails = [t for t in self.trails if t[1] + 1e-9 >= self.trail_step_min * TP_UNIT_PCT]
         self.window_basis = "count" if self.disjoint or str(ov.get("lastNBasis") or "time").lower() == "count" else "time"
         # relation lanes read the chains and change no tape or Set verdict, so they are not part of the evaluation signature. A change of what the lanes ARE
         # (relations, windows, floor) drops the held lanes until the next scoring pass rebuilds them; ratios and the ceiling apply at once.
@@ -2686,6 +2725,11 @@ class SetBook:
         # minPfStepAutoScope "set" (owner 2026-11-14): every config Set learns its OWN Auto floor from its own causal pairs; a Set with fewer than
         # minPfSetAutoMin admitted orders uses the defaults (its TP step's floor, then the direction's pooled floor, then the manual floor)
         self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "step").lower() == "set"
+        # slAutoRange (owner 2026-11-14): every TP step (and direction) learns its own SL ratio range from the orders closed before the window it judges;
+        # a base / Exit Set outside it is not valid (reason "slrange"); trailing Sets have no SL ratio grid. Absent = off (the manual grid alone).
+        self.sl_auto = bool(ov.get("slAutoRange", False))
+        self.sl_auto_min = int(max(1, min(100000, num(ov, "slAutoMin", 20))))
+        self.sl_auto_tol = max(0.0, min(0.5, float(num(ov, "slAutoTol", 5)) / 100.0))
         self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", 10))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
@@ -3511,6 +3555,11 @@ class SetBook:
                         except Exception as exc:                              # never stops the scoring: the manual floors stand
                             self.step_floor_auto, self.step_floor_report = {}, []
                             errors.append(f"step floors: {type(exc).__name__}: {exc}"[:160])
+                        try:
+                            self._learn_step_sl_ranges(tape_order, cutoff)    # the per-step SL ratio range, learned before the window it will judge
+                        except Exception as exc:                              # never stops the scoring: the manual grid stands
+                            self.step_sl_auto, self.step_sl_report = {}, []
+                            errors.append(f"step SL ranges: {type(exc).__name__}: {exc}"[:160])
                     rel_acc = relation_lanes.Accumulator() if self.relation_cfg.enabled and not (stale or defer_score) else None
                     rel_failed = False
                     for st in ([] if stale or defer_score else self.by_idx):
@@ -3835,6 +3884,49 @@ class SetBook:
             self._lookback_retry_fast = True
             self._lookback_progress_key = None
             self._lookback_progress_count = 0
+
+    def _learn_step_sl_ranges(self, tape_order: Sequence[str], learn_before: float) -> None:
+        """slAutoRange: per (TP step bucket, side) the nets of the base / Exit Sets' orders that CLOSED BEFORE `learn_before`, by SL ratio, one Set per
+        distinct tape (the dedup of _learn_step_floors); learn_sl_range picks the range. Writes step_sl_auto and step_sl_report."""
+        if not self.sl_auto:
+            self.step_sl_auto, self.step_sl_report = {}, []
+            return
+        cf = cost_as_frac(self.cost_pct)
+        until = math.nextafter(float(learn_before), float("-inf"))
+        by: Dict[Tuple[int, int], Dict[float, List[float]]] = {}
+        seen: set = set()
+        for st in self.by_idx:
+            if st.kind == "trail":
+                continue
+            rows = self._tape_rows(st.id, tape_order, float("-inf"), until=until)
+            if not rows:
+                continue
+            sig = 0
+            for r in rows:
+                sig = hash((sig, auto_evidence_key(r[0], r[1], r[4], float(r[0]) - float(r[5]), st.side)))
+            if (sig, st.sl_ratio) in seen:
+                continue                       # a copy of a Set already read
+            seen.add((sig, st.sl_ratio))
+            by.setdefault((self.auto_step_bucket(st), st.side), {}).setdefault(round(float(st.sl_ratio), 4), []).extend(finite(r[4]) - cf for r in rows)
+        learned: Dict[Tuple[int, int], Tuple[float, float]] = {}
+        report: List[Dict[str, Any]] = []
+        for (bucket, side), by_ratio in sorted(by.items()):
+            got = learn_sl_range(by_ratio, self.sl_auto_min, self.sl_auto_tol)
+            if got:
+                learned[(bucket, side)] = (got["lo"], got["hi"])
+            report.append({"step": bucket, "side": side, "tpPct": round(bucket * TP_UNIT_PCT, 3), "ratios": sorted(by_ratio),
+                           "lo": got["lo"] if got else None, "hi": got["hi"] if got else None, "orders": sum(len(v) for v in by_ratio.values()),
+                           "pfIn": round(got["pf"], 4) if got else None, "pfAll": round(got["pfAll"], 4) if got else None, "source": "auto" if got else "manual"})
+        self.step_sl_auto, self.step_sl_report = learned, report
+
+    def sl_auto_allows(self, st: "SetState") -> bool:
+        """slAutoRange: is the Set's SL ratio inside its TP step's learned range? Trailing Sets, auto off and a step without a learned range: always."""
+        if not getattr(self, "sl_auto", False) or st.kind == "trail":
+            return True
+        rng = (getattr(self, "step_sl_auto", None) or {}).get((self.auto_step_bucket(st), st.side))
+        if not rng:
+            return True
+        return rng[0] - 1e-9 <= float(st.sl_ratio) <= rng[1] + 1e-9
 
     def _learn_step_floors(self, tape_order: Sequence[str], learn_before: float) -> None:
         """The Auto Mode of the minimum PF per TP step (minPfByStep + minPfStepAuto), learned from orders that CLOSED BEFORE `learn_before` (the start of the
@@ -4394,6 +4486,8 @@ class SetBook:
             oldest = min(st.evaluated_at, self._history_snapshot_oldest_at)
             if oldest <= 0 or time.time() - oldest > self._snapshot_max_age():
                 return "stale"
+        if not self.sl_auto_allows(st):
+            return "slrange"         # the Set's SL ratio is outside its TP step's learned range (slAutoRange)
         w = self.win(st)
         if st.gate_n < self.base_need(st):
             return "n<min"
@@ -5359,6 +5453,8 @@ class SetBook:
                        "autoMin": self.pf_step_auto_min, "steps": list(self.step_floor_report)},
             "indicationConfigs": dict(self.config_report),
             "signalConfigs": dict(getattr(self, "signal_report", {}) or {}),
+            "slRanges": {"auto": bool(getattr(self, "sl_auto", False)), "minOrders": int(getattr(self, "sl_auto_min", 20)),
+                         "tolPct": round(100 * float(getattr(self, "sl_auto_tol", 0.05)), 2), "steps": list(getattr(self, "step_sl_report", []) or [])[:200]},
             "setFloors": {"scope": "set" if getattr(self, "pf_set_auto", False) else "step", "learned": len(getattr(self, "set_floor_auto", {}) or {}),
                           "defaults": max(0, len(self.by_idx) - len(getattr(self, "set_floor_auto", {}) or {})) if getattr(self, "pf_set_auto", False) else len(self.by_idx),
                           "minAdmitted": int(getattr(self, "pf_set_auto_min", 10))},

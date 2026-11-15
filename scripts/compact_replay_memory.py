@@ -22,7 +22,7 @@ class CompactMemory:
         class PackedFloors(native):
             def __init__(self,book,tapes):
                 self.on=bool(getattr(book,'pf_by_step',False)and getattr(book,'pf_step_auto',False))
-                self.sets=[];self.last=None
+                self.sets=[];self.last=None;self.tapes=tapes
                 if not self.on:return
                 n_win,cf=int(book.pf_step_auto_n),tapes.cf
                 for st in book.by_idx:

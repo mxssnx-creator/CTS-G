@@ -65,6 +65,17 @@ def max_sl_ratio_caps_the_grid():
     return ok, f"cap 1.4 -> {cap.sl_ratios} (largest built {top}); no cap -> {free.sl_ratios}; long range {sorted(longs)}; entirely excluded global grid {none.sl_ratios}; isolated own-range cells {len(local)}"
 
 
+def trail_step_min_removes_only_short_arms():
+    """trailStepMin (owner 2026-11-15, "min trail step 3"): no trailing Set arms under that many steps; every other Set is unchanged; 0 builds every arm."""
+    free = _book(trailStepMin=0)
+    cut = _book(trailStepMin=6)
+    arms_free = sorted({round(t[1], 3) for t in free.trails})
+    arms_cut = sorted({round(t[1], 3) for t in cut.trails})
+    others_same = sorted(st.id for st in free.by_idx if st.kind != "trail") == sorted(st.id for st in cut.by_idx if st.kind != "trail")
+    ok = bool(arms_free) and min(arms_cut) >= 0.6 - 1e-9 and set(arms_cut) == {a for a in arms_free if a >= 0.6 - 1e-9} and others_same and min(arms_free) < 0.6
+    return ok, f"arms without {arms_free[:4]}.., with 6 steps {arms_cut[:4]}..; other Sets unchanged {others_same}"
+
+
 def tp_steps():
     steps = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1))
     tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
@@ -422,6 +433,7 @@ CHECKS = [
     ("grid.sl-ratios-0.25-2.5", sl_ratios),
     ("grid.long-and-wide-have-their-own-sl-ratios", sl_ratios_by_range),
     ("grid.max-sl-ratio-caps-the-grid", max_sl_ratio_caps_the_grid),
+    ("grid.trail-step-min-removes-only-short-arms", trail_step_min_removes_only_short_arms),
     ("grid.min-sl-ratio-drops-lower-stops-and-exit-sets-hold-later", min_sl_ratio_and_exit_hold),
     ("grid.default-grid-follows-its-rules", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),

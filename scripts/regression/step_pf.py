@@ -528,6 +528,95 @@ def the_packed_simulator_floors_equal_the_plain_ones():
     return plain == packed and bool(plain[1]), f"step floors equal {plain[0] == packed[0]}, Set floors equal {plain[1] == packed[1]} ({len(plain[1])} Sets with their own floor)"
 
 
+def sl_range_is_the_widest_interval_near_the_best():
+    """learn_sl_range against a plain reading: every contiguous interval of the ratios, its pooled PF, the intervals with enough orders, the widest within tol of
+    the best; None without the orders."""
+    import random as _r
+    rng = _r.Random(9)
+    bad = []
+    for case in range(300):
+        ratios = sorted(rng.sample([0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 0.8, 1.0, 1.25], rng.randint(1, 6)))
+        by = {r: [rng.choice((1, -1)) * rng.uniform(0.001, 0.02) for _ in range(rng.randint(0, 12))] for r in ratios}
+        mo, tol = rng.randint(1, 25), rng.choice((0.0, 0.05, 0.2))
+        got = se.learn_sl_range(by, mo, tol)
+        rs = [r for r in ratios if by[r]]
+        cands = []
+        for i in range(len(rs)):
+            for j in range(i, len(rs)):
+                xs = [x for r in rs[i:j + 1] for x in by[r]]
+                g, l_ = sum(x for x in xs if x > 0), -sum(x for x in xs if x <= 0)
+                if len(xs) >= mo:
+                    cands.append((rs[i], rs[j], se.pf_of(g, l_, len(xs)), j - i))
+        if not cands:
+            if got is not None:
+                bad.append(case)
+            continue
+        best = max(c[2] for c in cands)
+        near = [c for c in cands if c[2] + 1e-12 >= best * (1 - tol)]
+        want = max(near, key=lambda c: (c[3], c[2], -c[0]))
+        if not got or (got["lo"], got["hi"]) != (want[0], want[1]):
+            bad.append((case, got and (got["lo"], got["hi"]), want[:2]))
+    return not bad, f"300 random steps; mismatches {bad[:3]}"
+
+
+def the_simulator_learns_the_engines_sl_ranges_and_the_gate_reads_them():
+    """slAutoRange: stage_eval.AutoFloors (plain and packed) and SetBook._learn_step_sl_ranges learn the same SL range for every (step, side) from the same orders
+    closed before the same hour; a base Set outside its step's range is not valid (reason slrange), a trailing Set never is."""
+    import json as _json
+    import os as _os
+    import stage_eval as sg
+    from compact_replay_memory import CompactMemory
+    from common import SMALL, T0, synth_bars
+    names = ["S0-USDT", "S1-USDT"]
+    bars = {s_: synth_bars(71 + i, 1300, drift=0.0004 if i % 2 == 0 else -0.0004, vol=0.003) for i, s_ in enumerate(names)}
+    times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
+    patch = {**SMALL, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+             "setSlRatios": [0.5, 0.75, 1.0, 1.25, 1.5], "slAutoRange": True, "slAutoMin": 10, "slAutoTol": 5,
+             "directionMode": "split", "pauseMode": "off", "setScratchEnabled": True}
+    saved = _os.environ.get("STAGE_OVERLAY_PATCH")
+    try:
+        _os.environ["STAGE_OVERLAY_PATCH"] = _json.dumps(patch)
+        shadow = {}
+        for s_ in names:
+            _, warm, dirs, confs, out = sg._symbol_job((s_, bars[s_], times[s_][0]))
+            shadow[s_] = (warm, dirs, confs, out)
+        book = sg.make_book()
+        tapes = sg.Tapes(book, names, times, shadow)
+        hour = float(int((times[names[0]][0] + 1000 * 60) // 3600) * 3600)
+        sg.AutoFloors(book, tapes).apply(book, hour)
+        sim = dict(book.step_sl_auto)
+        mem = CompactMemory(sg).install()
+        try:
+            sg.AutoFloors(book, tapes).apply(book, hour)
+        finally:
+            mem.restore()
+        packed = dict(book.step_sl_auto)
+        rows = {}
+        for st in book.by_idx:
+            tx, te, pp = tapes.by_set[st.idx]
+            rows[st.id] = [(float(a), symbol, "LONG", 0.0, float(x), float(a - b), "x", st.id)
+                           for a, b, x, symbol in zip(tx, te, pp, tapes.symbols_by_set[st.idx])]
+        real = book._tape_rows
+        book._tape_rows = lambda key, order, cutoff, until=None: [r for r in rows.get(key, ()) if cutoff <= r[0] <= (float("inf") if until is None else until)]
+        try:
+            book._learn_step_sl_ranges(names, hour - book.lookback * se.BAR_S)
+        finally:
+            book._tape_rows = real
+        eng = dict(book.step_sl_auto)
+    finally:
+        if saved is None:
+            _os.environ.pop("STAGE_OVERLAY_PATCH", None)
+        else:
+            _os.environ["STAGE_OVERLAY_PATCH"] = saved
+    narrowed = {k: v for k, v in eng.items() if v != (0.5, 1.5)}
+    outside = next((st for st in book.by_idx if st.kind == "base" and (book.auto_step_bucket(st), st.side) in narrowed
+                    and not (narrowed[(book.auto_step_bucket(st), st.side)][0] <= st.sl_ratio <= narrowed[(book.auto_step_bucket(st), st.side)][1])), None)
+    trail = next((st for st in book.by_idx if st.kind == "trail"), None)
+    gate_ok = outside is not None and book.base_validation_reason(outside) == "slrange" and (trail is None or book.sl_auto_allows(trail))
+    ok = bool(eng) and sim == eng == packed and gate_ok
+    return ok, f"{len(eng)} steps learned (engine), simulator equal {sim == eng}, packed equal {packed == eng}; narrowed {len(narrowed)}; outside Set reason slrange {gate_ok}"
+
+
 def shipped_floors_are_all_above_one():
     """Owner 2026-11-14 ("only if stage Real has PF over 1 ... mirrored to live"): on the shipped x01 / x02 overlays every floor a window can ask is above 1 -- the
     manual step floors, the Auto candidates (minPfStepAutoLow 1.02; live x02 had three Sets valid with a Real window PF of exactly 1.00 at a learned floor of 1.00),
@@ -555,4 +644,5 @@ CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,
     auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors, the_simulator_learns_the_engines_own_floor_of_every_set,
-    shipped_floors_are_all_above_one, the_packed_simulator_floors_equal_the_plain_ones)]
+    shipped_floors_are_all_above_one, the_packed_simulator_floors_equal_the_plain_ones,
+    sl_range_is_the_widest_interval_near_the_best, the_simulator_learns_the_engines_sl_ranges_and_the_gate_reads_them)]
