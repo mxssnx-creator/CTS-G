@@ -783,7 +783,7 @@ def _redis_read_output(args: List[str], timeout: float) -> Optional[str]:
         return None
     output = p.stdout or ""
     if p.returncode != 0 or output.lstrip().startswith((
-            "(error)", "ERR ", "NOAUTH ", "WRONGTYPE ", "NOPERM ", "OOM ",
+            "(error)", "ERR ", "NOAUTH ", "WRONGTYPE ", "NOPERM ", "DENIED ", "OOM ",
             "LOADING ", "BUSY ", "MISCONF ", "CLUSTERDOWN ", "MASTERDOWN ",
             "READONLY ", "MOVED ", "ASK ", "TRYAGAIN ")):
         return None

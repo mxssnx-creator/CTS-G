@@ -19,7 +19,8 @@ class RedisReads(unittest.TestCase):
 
     def test_errors_and_nil_are_not_credentials(self):
         for code, value in [(1, 'unexpected-body'), (0, '(nil)'), (0, 'NOAUTH Authentication required.'),
-                            (0, 'ERR denied'), (0, 'WRONGTYPE wrong kind'), (0, 'NOPERM denied'), (0, '(error) ERR denied')]:
+                            (0, 'ERR denied'), (0, 'WRONGTYPE wrong kind'), (0, 'NOPERM denied'),
+                            (0, 'DENIED Redis is running in protected mode'), (0, '(error) ERR denied')]:
             with self.subTest(code=code, value=value), patch.object(mod.subprocess, 'run', return_value=SimpleNamespace(returncode=code, stdout=value)):
                 self.assertEqual(mod.redis_hget('api_secret'), '')
 
