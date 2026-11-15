@@ -504,7 +504,7 @@ def pf_defaults_match_every_shipped_overlay():
             ov = json.load(open(path, encoding="utf-8"))
             if any(ov.get(k) != value for k, value in want.items()):
                 errors.append(path)
-            book = SetBook(); book.load(ov)
+            book = SetBook(); book.load({**ov, "minPfBySize": True, "minPfByStep": False})     # the class table itself (the shipped overlays run one floor, 1.3)
             got = [book.floor_for(n, "indications") for n in (5, 10, 20, 35, 50)] + [book.floor_for(50, "signals")]
             if got != list(want.values()):
                 errors.append(f"{venue}-{conn} engine={got}")

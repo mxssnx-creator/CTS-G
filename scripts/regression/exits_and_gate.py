@@ -230,9 +230,9 @@ def gate_boundary_and_sample():
     st.active = True
     cases = [
         ("n29", (29, 2.0), False),
-        ("n30-pf1.25", (30, 1.25), True),
-        ("n30-pf1.2499", (30, 1.2499), False),
-        ("n50-pf1.30", (50, 1.30), True),
+        ("n30-pf1.35", (30, 1.35), True),
+        ("n30-pf1.3499", (30, 1.3499), False),
+        ("n50-pf1.40", (50, 1.40), True),
     ]
     bad = []
     for name, (n, pf), want in cases:

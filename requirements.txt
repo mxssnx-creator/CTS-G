@@ -1,3 +1,4 @@
 # Native local x02 runtime. SOCKS support is required on proxy-backed hosts.
 httpx[socks]>=0.28,<0.29
 websocket-client>=1.8,<2
+orjson>=3.10,<4        # fast JSON for the BingX client (bingx_fast.py falls back to json without it)

@@ -93,8 +93,8 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
-// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
-export const GATE_MIN_PF_DEFAULT = 1.25;
+// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.35).
+export const GATE_MIN_PF_DEFAULT = 1.35;
 // Floor for the general/window-size settings; explicit per-step/range rules have their own bounds.
 export const MIN_PF_FLOOR = 1.02;
 const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
@@ -683,7 +683,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaOnSets: false,
   dcaOnAxis: false,
   dcaMaxExposureX: 0,
-  dcaMinPf: 1.25,
+  dcaMinPf: 1.35,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: [
@@ -813,7 +813,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stageFullWindow: false,
   lastNBasis: "time",
   setGateShortN: 25,
-  minPfBySize: true,
+  minPfBySize: false,
   ...PF_TYPE_DEFAULTS,
   minPfMicroN: 5,
   minPfMinimalN: 10,
@@ -846,7 +846,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   holdAutoMax: 50,
   holdAutoMin: 10,
   directionMode: "split",
-  minPfByStep: true,
+  minPfByStep: false,
   minPfByRange: { micro: MICRO_RANGE_PF_DEFAULT },
   rankByLane: true,
   setScratchEnabled: false,
@@ -864,7 +864,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
   trailPick: "after",
   trailPickByPack: {},
-  minPfStepAuto: true,
+  minPfStepAuto: false,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
   minPfStepAutoMin: 1,
@@ -920,7 +920,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailHoldArmedFree: false,
   exitPfWindow: 8,
   exitDeactN: 25,
-  exitMinPf: 1.25,
+  exitMinPf: 1.35,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,

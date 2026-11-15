@@ -1439,7 +1439,7 @@ def every_validation_gate_asks_the_base_minimum_pf():
         return {"main": sb.pack_min_pf.get(pk, sb.min_pf), "coord": co.min_pf, "exit": ex.min_pf, "dca": dc.min_pf}
     own = {"minPf": 1.15, "exitMinPf": 1.12, "dcaMinPf": 1.2}
     got = {"default": gates({}), "base 1.4": gates({"setMinPf": 1.4, **own}), "unlinked": gates({"setMinPf": 1.4, "minPfLinked": False, **own})}
-    want = {"default": {k: 1.25 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
+    want = {"default": {k: 1.35 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
             "unlinked": {"main": 1.4, "coord": 1.15, "exit": 1.12, "dca": 1.2}}
     return got == want, f"{got}"
 

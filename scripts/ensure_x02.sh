@@ -8,7 +8,7 @@ if ! redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
   redis-server --daemonize yes --bind 127.0.0.1 --port 6379 --dir /var/lib/cts-g/redis --save "" --appendonly no --logfile /var/log/cts-g/redis.log >/dev/null 2>&1
   sleep 1
 fi
-python3 -c "import websocket" 2>/dev/null || python3 -m pip install --quiet --break-system-packages websocket-client
+python3 -c "import websocket, httpx, orjson" 2>/dev/null || python3 -m pip install --quiet --break-system-packages -r "$REPO/requirements.txt"
 if [ -r "$CRED" ] && [ -z "$(redis-cli -h 127.0.0.1 -p 6379 HGET connection:bingx-x02 api_key 2>/dev/null)" ]; then
 python3 - "$CRED" <<'PY' 2>/dev/null
 import json, subprocess, sys
