@@ -2501,6 +2501,11 @@ function PfWindowControls({
         Which floor a Set asks: Auto on → its own learned floor (per config Set) → its configuration's own manual floor (Signals, Micro range, an indication entry's lane policy) → the step's learned floor → 1 + TP% × ratio. Auto off → own manual floor → 1 + TP% × ratio. The Sets overview and the Stages table show the source of each floor.
       </div>
       <Toggle
+        label="Exit Sets (no take-profit, leave by stop / time): off by default since 2026-11-15 (they lost on both windows)"
+        on={overlay.exitSets === true}
+        onChange={(v) => patch("exitSets", v)}
+      />
+      <Toggle
         label="Choose among valid Sets by the lane's own Set (Real / Real Negative orders), not the raw Base tape"
         on={overlay.rankByLane !== false}
         onChange={(v) => patch("rankByLane", v)}
@@ -2579,6 +2584,15 @@ function PfWindowControls({
         step={1}
         hint="admitted orders of the Set itself before its own floor is used; fewer = the defaults"
         onChange={(v) => patch("minPfSetAutoMin", v)}
+      />
+      <Slider
+        label="Auto: relation factor PF vs orders"
+        value={overlay.minPfAutoOrdersFactor ?? 0}
+        min={0}
+        max={3}
+        step={0.05}
+        hint="0 = the lowest floor within the tolerance below of the best PF. Above 0 every candidate floor scores PF × (its admitted orders ÷ the most any floor admits) ^ factor and the best score wins: 0.5 weighs orders moderately, 1 = PF × orders share, higher favours more orders."
+        onChange={(v) => patch("minPfAutoOrdersFactor", Math.max(0, Math.min(3, Math.round(v * 100) / 100)))}
       />
       <Slider
         label="Auto: tolerance to the best PF (%)"

@@ -522,6 +522,9 @@ export type PulseOverlay = {
   minPfStepAutoScope: "step" | "set";
   minPfSetAutoMin: number;
   minPfStepAutoTol: number;
+  /** PF vs admitted orders in the Auto minimum PF (owner 2026-11-15): 0 = the lowest floor within the tolerance of the best PF; above 0 each
+   * candidate floor scores PF x (admitted / most admitted) ^ factor and the best score wins (higher = more orders). */
+  minPfAutoOrdersFactor: number;
   /** The lowest floor Auto may choose (1.00 .. 2.00). */
   minPfStepAutoLow: number;
   /** Highest floor a TP step may ask (server: set_engine.STEP_PF_AUTO_HIGH_DEFAULT); 2 = no cap. */
@@ -543,6 +546,8 @@ export type PulseOverlay = {
   trailMinStep: number;
   exitEnabled: boolean;
   exitIgnoreTp: boolean;
+  /** false = no Exit Sets at all (owner 2026-11-15); exitIgnoreTp keeps the trailing Sets' TP rule. */
+  exitSets: boolean;
   exitBestOf: boolean;
   exitLockOn: boolean;
   exitPeakOn: boolean;
@@ -835,6 +840,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfStepAutoScope: "set",
   minPfSetAutoMin: 10,
   minPfStepAutoTol: 5,
+  minPfAutoOrdersFactor: 0,
   minPfStepAutoLow: 1.02,
   minPfStepAutoHigh: 2,
   pauseMode: "auto",
@@ -853,6 +859,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailMinStep: 3,
   exitEnabled: true,
   exitIgnoreTp: true,
+  exitSets: false,
   exitBestOf: true,
   exitLockOn: true,
   exitPeakOn: true,
@@ -1118,6 +1125,7 @@ export type CtsSettings = {
   minPfStepAutoScope?: string;
   minPfSetAutoMin?: number;
   minPfStepAutoTol?: number;
+  minPfAutoOrdersFactor?: number;
   minPfStepAutoLow?: number;
   minPfStepAutoHigh?: number;
   pauseMode?: string;
@@ -1136,6 +1144,7 @@ export type CtsSettings = {
   setStepAdapt?: boolean;
   exitEnabled?: boolean;
   exitIgnoreTp?: boolean;
+  exitSets?: boolean;
   exitBestOf?: boolean;
   exitLockOn?: boolean;
   exitPeakOn?: boolean;
@@ -1697,6 +1706,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfStepAutoScope: cts.minPfStepAutoScope === "step" ? "step" : "set",
     minPfSetAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfSetAutoMin, 10)))),
     minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
+    minPfAutoOrdersFactor: Math.max(0, Math.min(3, Math.round(num(cts.minPfAutoOrdersFactor, 0) * 100) / 100)),
     minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1.02) * 100) / 100)),
     minPfStepAutoHigh: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoHigh, 2) * 100) / 100)),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
@@ -1714,6 +1724,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setStepAdapt: bool(cts.setStepAdapt, false),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),
+    exitSets: bool(cts.exitSets, false),
     exitBestOf: bool(cts.exitBestOf, true),
     exitLockOn: bool(cts.exitLockOn, true),
     exitPeakOn: bool(cts.exitPeakOn, true),

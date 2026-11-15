@@ -1648,8 +1648,11 @@ STEP_PF_CANDIDATES = tuple(round(1.0 + 0.02 * i, 2) for i in range(51))      # 1
 STEP_PF_AUTO_TOL_DEFAULT = 0.05                       # minPfStepAutoTol: the lowest floor whose delivered PF is within 5 % of the best one
 
 
+AUTO_SCORE_PF_CAP = 5.0               # minPfAutoOrdersFactor: a no-loss candidate counts as PF 5 in the score, so it cannot win on a handful of orders
+
+
 def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, tol: float,
-                     candidates: Sequence[float] = STEP_PF_CANDIDATES) -> Optional[Dict[str, Any]]:
+                     candidates: Sequence[float] = STEP_PF_CANDIDATES, orders_factor: float = 0.0) -> Optional[Dict[str, Any]]:
     """The Auto floor of one TP step from its causal pairs (the Set's PF over its last N closes at an order's entry, that order's net), independent of
     the manual ratio (owner 2026-11-03): every candidate floor F admits the pairs with PF >= F; among the candidates with at least `min_admitted`
     admitted orders, the best delivered PF is found, and the LOWEST floor whose delivered PF is within `tol` of that best is chosen -- the most valid
@@ -1667,7 +1670,12 @@ def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, to
     if not rows:
         return None
     best = max(r[1] for r in rows)
-    pick = min((r for r in rows if r[1] + 1e-12 >= best * (1.0 - tol)), key=lambda r: r[0])
+    if orders_factor > 0:
+        # the PF-vs-orders relation (minPfAutoOrdersFactor, owner 2026-11-15): score = PF x (admitted / most admitted) ^ factor; 0 = the tolerance rule
+        most = max(r[2] for r in rows)
+        pick = max(rows, key=lambda r: (min(r[1], AUTO_SCORE_PF_CAP) * (r[2] / most) ** orders_factor, -r[0]))
+    else:
+        pick = min((r for r in rows if r[1] + 1e-12 >= best * (1.0 - tol)), key=lambda r: r[0])
     return {"floor": pick[0], "pf": pick[1], "admitted": pick[2], "bestPf": best, "orders": len(prs), "pfAll": pf_of(g_[-1], l_[-1])}
 
 
@@ -2417,6 +2425,7 @@ class SetBook:
         self.step_sl_report: List[Dict[str, Any]] = []
         self.set_floor_auto: Dict[str, float] = {}             # Set id -> its own learned Auto floor (minPfStepAutoScope "set"); absent = the defaults
         self.pf_step_auto_tol = STEP_PF_AUTO_TOL_DEFAULT
+        self.pf_auto_factor = 0.0
         self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
         self.step_floor_report: List[Dict[str, Any]] = []
         self._manual_floor_cache: Dict[Tuple[int, float], float] = {}
@@ -2527,7 +2536,7 @@ class SetBook:
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
-                              self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol,
+                              self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol, self.pf_auto_factor,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -2705,7 +2714,8 @@ class SetBook:
         # hist_honor_tp decides the trailing Sets only. A base Set always takes its TP (its step is its target); ignoring TP
         # is its own strategy type: with exitIgnoreTp on, every base stop (SL ratio x step, one Set per distinct distance)
         # also runs as an Exit Set, its own lane with no TP exit, its own tape and its own Base validation.
-        self.exit_sets = bool(ov.get("exitIgnoreTp", True))
+        # exitSets false (owner 2026-11-15, "disable exit sets"): no Exit Set at all, without touching the trailing Sets' TP rule that exitIgnoreTp also sets
+        self.exit_sets = bool(ov.get("exitIgnoreTp", True)) and ov.get("exitSets", True) is not False
         # Exit Sets per indication pack (exitSetsByPack {pack: bool}, missing = on): measured 2026-11-03, the indications pack's Exit Sets executed at
         # PF 0.32 / 0.45 on two windows while its base Sets made 1.19 / 1.59, so a pack can run its Exit Sets or not on its own
         raw_xp = ov.get("exitSetsByPack")
@@ -2971,6 +2981,7 @@ class SetBook:
         self.sl_auto_tol = max(0.0, min(0.5, float(num(ov, "slAutoTol", 5)) / 100.0))
         self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", 10))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
+        self.pf_auto_factor = max(0.0, min(3.0, float(num(ov, "minPfAutoOrdersFactor", 0.0))))   # PF vs admitted orders in the Auto choice (0 = tolerance rule)
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
         self.pf_step_auto_high = max(self.pf_step_auto_low, min(2.0, float(num(ov, "minPfStepAutoHigh", STEP_PF_AUTO_HIGH_DEFAULT))))
@@ -4225,7 +4236,7 @@ class SetBook:
             memo: Dict[int, Optional[float]] = {}
             for sid, sig in own_of.items():
                 if sig not in memo:
-                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
+                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates(), self.pf_auto_factor)
                     memo[sig] = got["floor"] if got else None
                 if memo[sig] is not None:
                     own_floor[sid] = float(memo[sig])
@@ -4234,11 +4245,11 @@ class SetBook:
         report: List[Dict[str, Any]] = []
         for side in ((1, -1) if self.direction_split else (0,)):
             pooled = learn_step_floor([x for (bk, sd), v in pairs.items() if sd == side for x in v], self.pf_step_auto_min, self.pf_step_auto_tol,
-                                      self.step_auto_candidates())
+                                      self.step_auto_candidates(), self.pf_auto_factor)
             for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
                 tp = round(bucket * TP_UNIT_PCT, 3)
                 manual = manual_step_floor(tp, self.pf_step_ratio)
-                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
+                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol, self.step_auto_candidates(), self.pf_auto_factor)
                 source = "step" if got else ("pooled" if pooled else "manual")
                 use = got or pooled
                 floor = use["floor"] if use else manual

@@ -807,7 +807,7 @@ class AutoFloors:
                 continue
             if set_scope:
                 got_own = se.learn_step_floor([(p_, n_) for (t_, p_, n_) in pairs if t_ < boundary], book.pf_set_auto_min, book.pf_step_auto_tol,
-                                              book.step_auto_candidates())
+                                              book.step_auto_candidates(), getattr(book, "pf_auto_factor", 0.0))
                 if got_own:
                     own[sid] = float(got_own["floor"])
             if sig[cut - 1] in seen:
@@ -819,10 +819,10 @@ class AutoFloors:
         sides = (1, -1) if getattr(book, "direction_split", False) else (0,)
         for side in sides:
             mine = {k: v for k, v in before.items() if k[1] == side}
-            pooled = se.learn_step_floor([x for v in mine.values() for x in v], book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates())
+            pooled = se.learn_step_floor([x for v in mine.values() for x in v], book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates(), getattr(book, "pf_auto_factor", 0.0))
             lo, hi = int(round(se.STEP_PF_TP_MIN / se.TP_UNIT_PCT)), int(round(se.STEP_PF_TP_MAX / se.TP_UNIT_PCT))
             for bucket in range(lo, hi + 1):
-                got = se.learn_step_floor(mine.get((bucket, side), ()), book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates()) or pooled
+                got = se.learn_step_floor(mine.get((bucket, side), ()), book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates(), getattr(book, "pf_auto_factor", 0.0)) or pooled
                 if got:
                     learned[(bucket, side)] = got["floor"]
         book.step_floor_auto = learned

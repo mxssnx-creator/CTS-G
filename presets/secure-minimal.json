@@ -547,5 +547,7 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
-  }
+  },
+  "exitSets": false,
+  "minPfAutoOrdersFactor": 0
 }

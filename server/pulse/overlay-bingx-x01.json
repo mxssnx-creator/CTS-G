@@ -475,5 +475,7 @@
         "trail"
       ]
     }
-  ]
+  ],
+  "exitSets": false,
+  "minPfAutoOrdersFactor": 0
 }

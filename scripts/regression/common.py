@@ -101,6 +101,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     # x01 took x02's measured settings (owner 2026-11-15, "update x01 live"): fixtures keep the earlier stop floor, no config gate and no Axis Sets
     ov["minSlDistancePct"], ov["configGate"], ov["axisSets"] = 0.1, False, {}
+    ov["exitSets"], ov["minPfAutoOrdersFactor"] = True, 0.0     # fixtures keep the Exit Sets and the tolerance rule (shipped x01 / x02: Exit Sets off)
     ov.update(extra)
     return ov
 
