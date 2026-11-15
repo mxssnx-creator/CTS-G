@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 100,
+  "symbolCap": 150,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -458,5 +458,6 @@
   "minPfStepAutoLow": 1.02,
   "slAutoRange": true,
   "slAutoMin": 20,
-  "slAutoTol": 5
+  "slAutoTol": 5,
+  "trailStepMin": 3
 }
