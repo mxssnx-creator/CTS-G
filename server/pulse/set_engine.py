@@ -2107,6 +2107,7 @@ HOLD_NEVER = 10 ** 9             # a Set's hold_bars that never ends (trailing S
 SNAP_CACHE_MIN_COST_S = 0.25     # SetBook.snapshot_cached: snapshots cheaper than this are built on every call
 SNAP_CACHE_X = 20.0              # a costly snapshot is rebuilt at most every 20 x its own cost (about 5 % of one core) ...
 SNAP_CACHE_MAX_S = 60.0          # ... and at least every minute
+DISPLAY_CACHE_MIN_S = 0.05       # SetBook.display_cached: figures cheaper than this are computed on every call
 SCAN_FORK_MIN_SETS = 64          # fewer Sets than this are scanned in the replay's own thread (a fork costs more)
 SCAN_FORK_TIMEOUT_S = 1800.0
 
@@ -5316,8 +5317,29 @@ class SetBook:
                 c["busy"] = False
                 c["at"] = time.monotonic()        # a failing snapshot is retried after the usual interval, not every second
 
+    def display_cached(self, key: str, fn: Callable[[], Any]) -> Any:
+        """A display figure for the stats file (counts, stage counts): one that costs at least DISPLAY_CACHE_MIN_S is reused for SNAP_CACHE_X x its cost
+        (cap SNAP_CACHE_MAX_S) and dropped by every scoring pass; a cheap one is computed every call. Found live on x02 (2026-11-15): counts() read
+        state_of for all 16,844 Sets on every stats write (29 % of the trading loop with the stage counts and the coverage)."""
+        c = self.__dict__.setdefault("_disp_cache", {})
+        e = c.get(key)
+        now = time.monotonic()
+        if e is not None and now - e[0] < e[1]:
+            return e[2]
+        v = fn()
+        cost = time.monotonic() - now
+        c[key] = (time.monotonic(), 0.0 if cost < DISPLAY_CACHE_MIN_S else min(SNAP_CACHE_MAX_S, SNAP_CACHE_X * cost), v)
+        return v
+
+    def counts_cached(self) -> Dict[str, Any]:
+        return self.display_cached("counts", self.counts)
+
+    def stage_counts_cached(self) -> Dict[str, int]:
+        return self.display_cached("stage_counts", self.stage_counts)
+
     def _snapshot_stale(self) -> None:
         """A scoring pass changed the verdicts: the next stats write starts a rebuild (the served snapshot stays until it is done)."""
+        self.__dict__.pop("_disp_cache", None)
         c = self.__dict__.get("_snap_cache")
         if c is not None:
             c["at"] = -1e18

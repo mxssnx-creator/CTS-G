@@ -210,8 +210,35 @@ def the_pack_index_picks_what_the_plain_filter_picks():
     return not bad and valid > 0, f"{n} (phase, pack, type, side) lists, differing {bad[:4]}; valid Sets {valid}"
 
 
+def costly_display_figures_are_reused_until_the_next_pass():
+    """SetBook.display_cached (2026-11-15, x02: counts() over 16,844 Sets on every stats write): a cheap figure is computed on every call, a costly one is
+    reused within its interval and computed again after a scoring pass; the cached counts equal counts()."""
+    import set_engine as se
+    from correctness import SMALL, T0
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "holdEnabled": False}))
+    b.bars["D-USDT"] = synth_bars(5, 300, drift=.0004)
+    b.bar_t["D-USDT"] = T0 - 60
+    b.replay_all(now=T0)
+    calls = []
+    cheap = [b.display_cached("x", lambda: calls.append(1) or len(calls)) for _ in range(3)]
+    real_min, real_x = se.DISPLAY_CACHE_MIN_S, se.SNAP_CACHE_X
+    try:
+        se.DISPLAY_CACHE_MIN_S, se.SNAP_CACHE_X = 0.0, 1e9
+        n = []
+        costly = [b.display_cached("y", lambda: n.append(1) or len(n)) for _ in range(3)]
+        b._snapshot_stale()
+        after = b.display_cached("y", lambda: n.append(1) or len(n))
+        equal = b.counts_cached() == b.counts()
+    finally:
+        se.DISPLAY_CACHE_MIN_S, se.SNAP_CACHE_X = real_min, real_x
+    ok = cheap == [1, 2, 3] and costly == [1, 1, 1] and after == 2 and equal
+    return ok, f"cheap {cheap}; costly {costly}; after a pass {after}; cached counts equal {equal}"
+
+
 CHECKS = [("signalpool.parallel-signals-equal-sequential", parallel_signals_equal_sequential),
           ("signalpool.signal-memo-survives-a-restart", memo_survives_a_restart),
           ("processing.forked-lane-scans-equal-the-in-thread-scans", forked_lane_scans_equal_the_in_thread_scans),
           ("processing.the-stats-snapshot-is-cached-only-when-it-is-costly", the_stats_snapshot_is_cached_only_when_it_is_costly),
-          ("processing.the-pack-index-picks-what-the-plain-filter-picks", the_pack_index_picks_what_the_plain_filter_picks)]
+          ("processing.the-pack-index-picks-what-the-plain-filter-picks", the_pack_index_picks_what_the_plain_filter_picks),
+          ("processing.costly-display-figures-are-reused-until-the-next-pass", costly_display_figures_are_reused_until_the_next_pass)]

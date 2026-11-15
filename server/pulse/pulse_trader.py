@@ -5300,7 +5300,7 @@ class Pulse:
     def execution_snapshot(self) -> Dict[str, Any]:
         """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
         Set (a Set that stopped passing keeps its open positions until its own lane closes them), and the orders closed so far by lane."""
-        counts = self.sets.counts()
+        counts = self.sets.counts_cached() if hasattr(self.sets, "counts_cached") else self.sets.counts()   # display figure (stats file)
         reasons = counts.get("reasons", {})
         by_pack: Dict[str, Dict[str, int]] = {}
         open_sets, under_invalid, retired, no_set = set(), 0, 0, 0
@@ -5341,7 +5341,8 @@ class Pulse:
                 "cashNoLoss": complete_cash and e["cash_gain"] > 0 and e["cash_loss"] == 0,
                 "feeSources": dict(e["fee_sources"]),
             }}
-        stage_counts = self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}
+        stage_counts = (self.sets.stage_counts_cached() if hasattr(self.sets, "stage_counts_cached")
+                        else self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {})
         gate_on = bool(getattr(self.sets, "group_gate", False))
         group_rows: Dict[str, Any] = {}
         now_g = time.time()
@@ -7498,7 +7499,7 @@ class Pulse:
             "sets": {
                 "families": scov.get("families"),
                 "setCount": len(self.sets.sets),
-                "activeCount": int(self.sets.counts().get("valid", 0)),
+                "activeCount": int((self.sets.counts_cached() if hasattr(self.sets, "counts_cached") else self.sets.counts()).get("valid", 0)),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "trailCover": scov.get("trailCover"),
                 "slCover": scov.get("slCover"),
