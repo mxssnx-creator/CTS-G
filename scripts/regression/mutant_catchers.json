@@ -431,6 +431,7 @@
  "trader: venue: no backstop when the venue order does not fill": "trader.lanes-venue-order-left-to-fill",
  "trader: venue: the fill sync feeds the Set but leaves the position open": "trader.lanes-venue-close-recorded",
  "trader: venue: the software close races a venue order at the level": "trader.lanes-venue-order-left-to-fill",
+ "trail step min: the minimum arm removes nothing": "grid.trail-step-min-removes-only-short-arms",
  "venue: a second caller refetches an in-flight key": "indication.extra-book-fetches-once-in-flight",
  "windows: a secondary window may be below 8 (coordinator pfWindow)": "selftest.coord_engine",
  "windows: a window counts the Sets that pass its stage, not itself": "stages.the-statistics-relations-hold",

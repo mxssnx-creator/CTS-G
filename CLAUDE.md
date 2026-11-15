@@ -56,7 +56,9 @@
   a Set outside it is not valid (reason `slrange`), trailing Sets never. Manual grid = `setSlRatios` / `slRatiosByRange` (desk: every range now, micro .. wide) /
   `setSlMinRatio` / `maxStopLossRatio` / `slMaxByRange`. Engine and simulator (plain and packed `AutoFloors`) learn the same ranges; stats `sets.slRanges`, desk
   Settings + Insights "Stages" table. On for x01 / x02 / desk, off in the engine default and fixtures (golden unchanged). Checks `step-pf.sl-range-*`,
-  `step-pf.the-simulator-learns-the-engines-sl-ranges-and-the-gate-reads-them`; mutants `sl auto:` (3). Measured against off: pending (`simN_SA` against `simN_B0`).
+  `step-pf.the-simulator-learns-the-engines-sl-ranges-and-the-gate-reads-them`; mutants `sl auto:` (3). **Measured** (x02 overlay, 4 symbols of the 11-11 .. 11-14 snapshot, executed PF / orders / net / hours positive): off 0.962 / 130 / -4.19 % / 15 of 26 dev, 0.890 / 62 / -5.27 % / 6 of 14 sealed;
+  **on 1.054 / 127 / +5.82 % / 17 of 26 dev, 1.082 / 51 / +3.72 % / 7 of 14 sealed**: better on both windows and above 1 on both (a small sample: 4 symbols, 51-130 orders).
+  `trailStepMin` (min trailing arm in TP steps, x01 / x02 / desk 3, engine and fixtures 0; check `grid.trail-step-min-removes-only-short-arms`) and x02 at 150 symbols (2026-11-15).
   (g) **Engine stop:** SIGTERM ended only the main thread and worker threads kept trading (seen on x01 and x02); `_term` now ends the process (`os._exit(0)`), state files
   and venue-side stops / targets stay.
 
