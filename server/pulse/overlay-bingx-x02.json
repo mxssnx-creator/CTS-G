@@ -204,7 +204,10 @@
   "trailStepMax": 22,
   "trailSlRatios": [],
   "volumeByPack": {},
-  "volumeByKind": {},
+  "volumeByKind": {
+    "trail": 2.0,
+    "exit": 0.5
+  },
   "volumeByRange": {},
   "exitSetsByPack": {},
   "minPfStepAuto": true,

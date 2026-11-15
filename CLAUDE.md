@@ -2,6 +2,22 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-15 (latest), owner: "pool PF under 1 is normal, note this .. important is always post Base and exec PF!!! Doc this as infos" / "make those succeeding ones work and increase their ratio for vol".**
+  (a) **How to read PF (standing info for every session and project):** the pool PF (every Set's tape, every signal, before Base) is normally UNDER 1 -- the signals'
+  gross move per order is under the cost, so an unfiltered pool reads 0.4 - 0.9 (here: every onset of the 1,812 Inverse names 0.37 - 0.85, every slow
+  reversion onset 0.49 - 0.79, every Set tape 0.4 - 0.6). That is expected and is NOT a defect or a reason to drop anything. What decides is the **post-Base PF**
+  (the Sets that passed validation, `sets.pfBase.base`, with the validated share and the orders behind it) and above all the **executed PF** (positions the
+  engine opened, `trade_sim` exec_pf / live `execution`), read on development AND sealed. A rule is judged by the executed PF it delivers, never by the pool.
+  (b) **The succeeding group: trailing Sets.** Executed PF by Set type (x02 overlay, 4 symbols; dev / sealed / live x02): trailing **1.76 (69) / 2.03 (31) / 1.99 (23)**,
+  base 0.68 / 0.85 / 0.59, Exit 0.00 (2) / 0.00 (6) / 0.17 (51). Volume tilt on the same executed orders (volume-weighted PF / net / max drawdown): all 1 = 1.054 / +5.8 % /
+  20.9 % dev, 1.082 / +3.7 % / 21.5 % sealed; **trail 2, Exit 0.5 = 1.264 / +38.7 % / 22.6 % dev, 1.533 / +30.6 % / 23.1 % sealed**; trail 3, base 0.5, Exit 0.5 = 1.513 / 1.726 at
+  21.7 / 26.4 % drawdown; live x02 168 closes (USDT): 0.505 -> 0.648, drawdown 2.52 -> 1.94 USDT. **Shipped x01 / x02: `volumeByKind` {"trail": 2.0, "exit": 0.5}**
+  (the selection is unchanged, only the size; weighted PF, never quoted as a unit PF). Revert = `volumeByKind` {}. At volume factor 0.05 a 0.5 x Exit order is often
+  rounded up to the venue minimum lot, so the Exit cut binds only above the minimum.
+  (c) **Measured and not shipped this session** (details `docs/CHECKLIST.md`, `docs/verification/slow-indications-adaptive-20261115.md`): slow 30 min reversion packs for
+  Normal / Long (sealed 0.524), an adaptive follow / invert rule (fails on the older window), the CTS-A-O Inverse catalogue (1 of 4,025 cells >= 1.1 on four windows,
+  chance level), no trailing time exit (1.028 / 0.881), TP steps to 50 (1.012 / 0.939), trailing arms to 3.2 % (0.682 / 0.752).
+
 - **2026-11-15, owner: "Fix all performance issues completly .. async processings fully, multiple and for each" / "Check if max hold time works correctly .. For trailing no max hold time use".**
   (a) **Live x02 profile (py-spy, 150 symbols, 16,844 Sets):** the trading loop spent 61 % of its time rebuilding the stats snapshot (0.9 s, every second, under the
   book's lock, so the replay and the entry picks waited). `SetBook.snapshot_cached` (Pulse.stats): a snapshot that costs at least 0.25 s is rebuilt in a background
