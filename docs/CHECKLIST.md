@@ -50,6 +50,12 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
       (after the 15 / 30 min x relation screen on 25 symbols; same rule: four windows where data exists, then trade_sim dev + sealed against the shipped setting).
 - [ ] Trend and break indications calculated over longer distances and timeframes (owner, "later"): longer lookbacks (n 30 .. 120) and 15 / 30 / 60 min series for the
       trend / break families, for the Normal / Long / Wide targets (the CTS-A-O trend tactics on 5 min are the first lead).
+- [ ] Axis as in the other projects where it works (owner, "later"): re-read CTS-C / CTS-A-O / CTS-X / CTS-K-N Axis code and records, build the working form here
+      with its full progression, measure against no Axis and the current Axis on both windows. Current grid: shipped all four 1.000 / 0.783, prev 4 alone 1.227 / 1.084,
+      no Axis 1.054 / 1.082 (sealed cont / Block v2 arms rerunning).
+- [ ] Micro strategy with trend / break / Low-Range / Inverse indications; Low-Range direction-change calculations (owner, "later").
+- [x] 15 / 30 min x relations screen done (25 symbols): 623 of 22,388 cells >= 1.2 on dev and sealed; the top 120 pool to 0.80 (older) / 1.01 (fresh); 4 - 5 hold on all four
+      windows (`ao_rvi_n14_t15@c`, `ibs_x14@c`, `macdh_n21_t30@B15`, `ao_frama_n21_t15@C`, `psar_n21_t15@c`) -> trade_sim 25 symbols against the shipped setting (running).
 - [~] 15 / 30 min + combined votes x 21 time-activity / situation relations (13,728 names), 25 symbols x 3 days: screen running.
 - [~] CTS-A-O trend tactics (`tactic-trend-s` / `-m` 5 min, `tactic-dca-trend-8-atr-1-2-0.25` 1 min; four-window screen PF >= 1.1 everywhere) through trade_sim.
 
