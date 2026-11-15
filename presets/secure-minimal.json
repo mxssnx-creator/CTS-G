@@ -550,5 +550,11 @@
   },
   "exitSets": false,
   "minPfAutoOrdersFactor": 0,
-  "tpStepMin": 0
+  "tpStepMin": 0,
+  "configGate": false,
+  "configGateN": 5,
+  "configGatePf": 1,
+  "configGateHours": 24,
+  "configGateMin": 1,
+  "gateRecovery": true
 }

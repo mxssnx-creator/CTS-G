@@ -15,6 +15,7 @@ export function secureMinimalPreset(): PulseOverlay {
     tpStepMin: 0,
     trailStepMin: 3,
     groupGate: false,
+    configGate: false,
     groupGateN: 10,
     groupGateHours: 12,
     maxStopLossRatio: 2.5,

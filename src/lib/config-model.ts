@@ -389,6 +389,14 @@ export type PulseOverlay = {
   groupGatePf: number;
   groupGateHours: number;
   groupGateMin: number;
+  /** Config gate (owner 2026-11-15): the group gate's rule on ONE configuration Set's own executed results (Set x lane). */
+  configGate: boolean;
+  configGateN: number;
+  configGatePf: number;
+  configGateHours: number;
+  configGateMin: number;
+  /** Gate recovery (owner 2026-11-15, "never block the Sets or stuck them"): a blocked group / config scope reopens on its Set's paper results after the scope's last executed result. */
+  gateRecovery: boolean;
   stratDca: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -743,6 +751,12 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   groupGatePf: 1,
   groupGateHours: 6,
   groupGateMin: 1,
+  configGate: true,
+  configGateN: 5,
+  configGatePf: 1,
+  configGateHours: 24,
+  configGateMin: 1,
+  gateRecovery: true,
   stratDca: false,
   indTypeState: true,
   indTypeDirection: true,
@@ -875,7 +889,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinHoldS: 45,
   setSlMinRatio: 0.5,
   trailStepMin: 12,
-  tpStepMin: 26,
+  tpStepMin: 5,
   slAutoRange: true,
   slAutoMin: 20,
   slAutoTol: 5,
@@ -1029,6 +1043,12 @@ export type CtsSettings = {
   groupGatePf?: number;
   groupGateHours?: number;
   groupGateMin?: number;
+  configGate?: boolean;
+  configGateN?: number;
+  configGatePf?: number;
+  configGateHours?: number;
+  configGateMin?: number;
+  gateRecovery?: boolean;
   stratDca?: boolean;
   indTypeState?: boolean;
   indTypeDirection?: boolean;
@@ -1608,6 +1628,12 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     groupGatePf: Math.max(0.5, Math.min(3, num(cts.groupGatePf, 1))),
     groupGateHours: Math.max(1, Math.min(72, num(cts.groupGateHours, 12))),
     groupGateMin: Math.max(1, Math.min(50, Math.round(num(cts.groupGateMin, 1)))),
+    configGate: bool(cts.configGate, true),
+    configGateN: Math.max(1, Math.min(200, Math.round(num(cts.configGateN, 5)))),
+    configGatePf: Math.max(0.5, Math.min(3, Math.round(num(cts.configGatePf, 1) * 100) / 100)),
+    configGateHours: Math.max(1, Math.min(72, Math.round(num(cts.configGateHours, 24)))),
+    configGateMin: Math.max(1, Math.min(50, Math.round(num(cts.configGateMin, 1)))),
+    gateRecovery: bool(cts.gateRecovery, true),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),
@@ -1742,7 +1768,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     setSlMinRatio: num(cts.setSlMinRatio, 0.5),
     trailStepMin: Math.max(0, Math.min(50, Math.round(num(cts.trailStepMin, 12)))),
-    tpStepMin: Math.max(0, Math.min(50, Math.round(num(cts.tpStepMin, 26)))),
+    tpStepMin: Math.max(0, Math.min(50, Math.round(num(cts.tpStepMin, 5)))),
     slAutoRange: bool(cts.slAutoRange, true),
     slAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.slAutoMin, 20)))),
     slAutoTol: Math.max(0, Math.min(50, num(cts.slAutoTol, 5))),

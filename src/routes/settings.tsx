@@ -2533,6 +2533,26 @@ function PfWindowControls({
         </Grid>
       ) : null}
       <Toggle
+        label="Config gate: one configuration Set (Set × lane) opens positions only while its own newest executed results are profitable"
+        on={overlay.configGate === true}
+        onChange={(v) => patch("configGate", v)}
+      />
+      {overlay.configGate === true ? (
+        <Grid>
+          <Slider label="Config gate · newest executed results" value={overlay.configGateN} min={1} max={50} step={1}
+            hint="Shipped 5 (measured: N 3 / 5 / 10 identical; development 1.054 -> 1.129, sealed equal)." onChange={(v) => patch("configGateN", Math.max(1, Math.min(200, Math.round(v))))} />
+          <Slider label="Config gate · minimum PF" value={overlay.configGatePf} min={0.5} max={2} step={0.05}
+            hint="1.00 = break-even after costs." onChange={(v) => patch("configGatePf", Math.max(0.5, Math.min(3, Math.round(v * 100) / 100)))} />
+          <Slider label="Config gate · window (hours)" value={overlay.configGateHours} min={1} max={72} step={1}
+            hint="Results older than this are forgotten." onChange={(v) => patch("configGateHours", Math.max(1, Math.min(72, Math.round(v))))} />
+        </Grid>
+      ) : null}
+      <Toggle
+        label="Gate recovery: a blocked group or configuration reopens as soon as its Set's own paper results after its last executed result pass the same rule (never stuck until its results age out)"
+        on={overlay.gateRecovery === true}
+        onChange={(v) => patch("gateRecovery", v)}
+      />
+      <Toggle
         label="Scratch exit on Set lanes (off: a Set leaves only by its own stop, target and time; the global +0.16 % scratch cut every range's winners)"
         on={overlay.setScratchEnabled === true}
         onChange={(v) => patch("setScratchEnabled", v)}

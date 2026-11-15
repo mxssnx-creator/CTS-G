@@ -425,9 +425,9 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     # their counterfactual numbers stay the evidence they were. Still true: Micro Sets exist, no trailing pair is dropped for its lock, the pack set below is complete.
     all_packs = {"shortrange", "general", "indications", "trend", "reversion", "flow", "multi", "breakout"}
     # owner 2026-11-15 ("update min step defaults to make profit", live x02: TP Sets from 2.6 % PF 1.04 on 92 closes, all 0.77 on 264): the general packs' TP Sets start at
-    # tpStepMin 26 and the trailing arms at trailStepMin 12 (1.2 %); every pack still runs, the trailing stops keep their reference step
+    # tpStepMin 26, then 5 (owner 2026-11-15 later, "set min step to 5"), and the trailing arms at trailStepMin 12 (1.2 %); every pack still runs, the trailing stops keep their reference step
     gen = [st.step for st in base if st.pack in ("general", "indications", "trend", "reversion", "flow", "multi", "breakout")]
-    ok = (all_packs <= {st.pack for st in b.by_idx} and gen and min(gen) == 26 and b.tp_step_min == 26 and b.trail_step_min == 12
+    ok = (all_packs <= {st.pack for st in b.by_idx} and gen and min(gen) == 5 and b.tp_step_min == 5 and b.trail_step_min == 12
           and locks and b.trail_min_lock == 0.0 and b._trail_mid_step() == 17)
     return ok, f"x01 {len(b.by_idx)} Sets, lowest general TP step {min(gen) if gen else None}, trailing reference step {b._trail_mid_step()}, packs {sorted({st.pack for st in b.by_idx})[:8]}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 

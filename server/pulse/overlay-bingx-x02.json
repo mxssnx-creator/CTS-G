@@ -477,5 +477,6 @@
   "trailTimeExit": true,
   "exitSets": false,
   "minPfAutoOrdersFactor": 0,
-  "tpStepMin": 26
+  "tpStepMin": 5,
+  "gateRecovery": true
 }
