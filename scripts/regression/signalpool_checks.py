@@ -174,7 +174,44 @@ def the_stats_snapshot_is_cached_only_when_it_is_costly():
     return ok, f"cheap rebuilt each call {cheap2['rows'] is not cheap1['rows']}; costly served with live progress {cached_ok}; rebuilt after a pass {rebuilt}"
 
 
+def the_pack_index_picks_what_the_plain_filter_picks():
+    """SetBook._of_pack_kind (2026-11-15): the entry picks read an index by (pack, type) instead of filtering every Set; for every pack, type and direction
+    the valid list equals the plain filter over by_idx, also after a reload changes the grid and after the Set list is replaced."""
+    import set_engine as se
+    from correctness import SMALL, T0
+    b = SetBook()
+    loose = {**SMALL, "holdEnabled": False, "stratTrend": True, "stagesEnabled": False, "minPfByStep": False, "minPfBySize": False, "setMinPf": 1.05,
+             "setGateShortN": 0}
+    b.load(overlay(**loose))
+    b.bars["I-USDT"] = synth_bars(6, 900, drift=.0006)
+    b.bar_t["I-USDT"] = T0 - 60
+    b.replay_all(now=T0)
+    b.is_eligible = lambda x: x.idx % 3 != 0              # the index is under test, not the verdicts (a synthetic walk validates nothing)
+
+    def plain(pack, kind, side):
+        rows = [x for x in b.by_idx if x.pack == pack and x.kind == kind and (not side or x.side in (0, side)) and b.is_eligible(x)]
+        rows.sort(key=b.rank_key, reverse=True)
+        return [x.id for x in rows]
+    bad, n = [], 0
+    for phase in ("loaded", "reloaded", "replaced"):
+        if phase == "reloaded":
+            b.load(overlay(**{**loose, "setStepMax": 8}))
+            b.replay_all(now=T0)
+            b.is_eligible = lambda x: x.idx % 3 != 0
+        if phase == "replaced":
+            b.by_idx = list(reversed(b.by_idx))
+        for pack in b.packs:
+            for kind in ("base", "exit", "trail"):
+                for side in (0, 1, -1):
+                    n += 1
+                    if [x.id for x in b._valid_for(pack, kind, side)] != plain(pack, kind, side):
+                        bad.append((phase, pack, kind, side))
+    valid = sum(len(b._valid_for(p, k)) for p in b.packs for k in ("base", "exit", "trail"))
+    return not bad and valid > 0, f"{n} (phase, pack, type, side) lists, differing {bad[:4]}; valid Sets {valid}"
+
+
 CHECKS = [("signalpool.parallel-signals-equal-sequential", parallel_signals_equal_sequential),
           ("signalpool.signal-memo-survives-a-restart", memo_survives_a_restart),
           ("processing.forked-lane-scans-equal-the-in-thread-scans", forked_lane_scans_equal_the_in_thread_scans),
-          ("processing.the-stats-snapshot-is-cached-only-when-it-is-costly", the_stats_snapshot_is_cached_only_when_it_is_costly)]
+          ("processing.the-stats-snapshot-is-cached-only-when-it-is-costly", the_stats_snapshot_is_cached_only_when_it_is_costly),
+          ("processing.the-pack-index-picks-what-the-plain-filter-picks", the_pack_index_picks_what_the_plain_filter_picks)]

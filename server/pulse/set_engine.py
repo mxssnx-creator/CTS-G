@@ -4904,8 +4904,21 @@ class SetBook:
         w_ = self.win(st)
         return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(w_.real_neg_n if lane == "neg" else w_.real_n, st.pack, st), st.max_dd_s)
 
+    def _of_pack_kind(self, pack: str, kind: str) -> List[SetState]:
+        """The Sets of one pack and type in by_idx order, from an index rebuilt when the Set list changes. Found live on x02 (16,844 Sets, 2026-11-15):
+        every entry pick filtered the whole list once per pack, type and direction -- 610 of 807 samples of the entry path."""
+        by = self.by_idx
+        key = (id(by), len(by), self._topo_gen)
+        idx = self.__dict__.get("_pk_index")
+        if idx is None or idx[0] != key:
+            table: Dict[Tuple[str, str], List[SetState]] = {}
+            for st in by:
+                table.setdefault((st.pack, st.kind), []).append(st)
+            idx = self._pk_index = (key, table)
+        return idx[1].get((pack, kind), [])
+
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side)) and self.is_eligible(s)]
+        rows = [s for s in self._of_pack_kind(pack, kind) if (not side or s.side in (0, side)) and self.is_eligible(s)]
         rows.sort(key=self.rank_key, reverse=True)
         return rows
 
