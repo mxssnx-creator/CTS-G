@@ -80,7 +80,11 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 ## Gates
 - [x] Config gate (`configGate`, `configGateN` / `Pf` / `Hours` / `Min`, default off): the group gate's rule on one configuration Set's own executed results (Set x lane);
       live (both entry paths) and simulator share `set_engine.exec_gates_allow`. Check `trader.config-gate-blocks-a-losing-config-and-only-that-config`, mutant `config gate:`.
-- [~] Measured on 4 symbols, dev + sealed (N 3 / 5 / 10, floor 1.0 / 1.2, with and without the group gate): running (chain16).
+- [x] Measured (4 symbols, trade_sim, executed PF / orders): shipped 1.054 / 127 dev, 1.082 / 51 sealed; config gate N 3 / 5 / 10, floor 1.0 or 1.2, 12 h or 24 h: all **1.129 / 125 dev
+      (net +13.3 % against +5.8 %), 1.082 / 51 sealed** (the gate never bound there); config gate without the group gate 1.076 / 127, **0.646 / 57 sealed**.
+- [x] **x02: `configGate` on, N 5, PF 1.0, 24 h** (better on development, equal on sealed, two orders fewer); the group gate stays on.
+- [-] Per-Set Axis choice (stack_eval axissets, 14 settings per Set): flat 25 / 8 1.064 / 122 dev, 1.307 / 68 sealed (beats no Axis on both, not prev 4's 1.227 dev); 15 / 5 1.208 dev, 0.904 sealed;
+      volume by PF up to 3x 1.252 / 1.281 at drawdown 57 % (size, not edge). x02 keeps prev 4.
 
 ## Axis
 - [x] Measured on the current grid (stack_eval, 4 symbols; dev / sealed): no Axis 1.054 (127) / 1.082 (51); all four 1.000 (127) / 0.783 (66); **prev 4 alone 1.227 (121) / 1.084 (51)**;

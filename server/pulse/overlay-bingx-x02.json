@@ -293,6 +293,11 @@
   "groupGatePf": 1.0,
   "groupGateHours": 6,
   "groupGateMin": 1,
+  "configGate": true,
+  "configGateN": 5,
+  "configGatePf": 1.0,
+  "configGateHours": 24,
+  "configGateMin": 1,
   "stratBlock": true,
   "blockCounts": [
     {
