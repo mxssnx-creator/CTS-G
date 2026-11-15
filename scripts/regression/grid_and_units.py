@@ -22,7 +22,8 @@ def min_sl_ratio_and_exit_hold():
     allcut = _book(setSlRatios=[0.25], setSlMinRatio=0.5)
     ex = [st for st in cut.by_idx if st.kind == "exit"]
     base = [st for st in cut.by_idx if st.kind == "base"]
-    ok = full.sl_ratios == [0.25, 0.5, 0.75] and cut.sl_ratios == [0.5, 0.75] and allcut.sl_ratios == [0.25]
+    ok = full.sl_ratios == [0.25, 0.5, 0.75] and cut.sl_ratios == [0.5, 0.75] and allcut.sl_ratios == []
+    ok = ok and not any(st.kind in ("base", "exit") for st in allcut.by_idx)
     ok = ok and all(st.sl_ratio >= 0.5 - 1e-9 for st in cut.by_idx if st.kind != "trail")
     ok = ok and ex and all(cut.hold_bars_for(st) == 600 for st in ex) and all(cut.hold_bars_for(st) == 0 for st in base)
     ok = ok and all(full.hold_bars_for(st) == 0 for st in full.by_idx)
@@ -48,12 +49,20 @@ def max_sl_ratio_caps_the_grid():
     from position_cost import tp_range_of
     cap = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], maxStopLossRatio=1.4)
     free = _book(setSlRatios=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], maxStopLossRatio=0)
+    none = _book(setSlRatios=[2.0], maxStopLossRatio=0.5)
+    contradictory = _book(setSlRatios=[0.5, 1.0], setSlMinRatio=1.0, maxStopLossRatio=0.5)
     L = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
     rng = _book(setSlRatios=[0.5, 1.0, 1.5], maxStopLossRatio=1.4, slRatiosByRange={"long": L}, setStepMax=32)
     top = max(st.sl_ratio for st in cap.by_idx if st.kind != "trail")
     longs = {round(st.sl_ratio, 2) for st in rng.by_idx if st.kind != "trail" and tp_range_of(st.step) == "long"}
     ok = cap.sl_ratios == [0.5, 0.75, 1.0, 1.25] and top <= 1.4 and free.sl_ratios == [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] and longs == set(L)
-    return ok, f"cap 1.4 -> {cap.sl_ratios} (largest built {top}); no cap -> {free.sl_ratios}; long range {sorted(longs)}"
+    ok = ok and all(b.sl_ratios == [] and not any(st.kind in ("base", "exit") for st in b.by_idx) for b in (none, contradictory))
+    # Explicit per-range geometry remains local even when the global grid is
+    # empty; it cannot populate any other range as an implicit fallback.
+    own = _book(setSlRatios=[2.0], maxStopLossRatio=0.5, slRatiosByRange={"long": L}, setStepMax=32)
+    local = [st for st in own.by_idx if st.kind in ("base", "exit")]
+    ok = ok and bool(local) and all(tp_range_of(st.step) == "long" and round(st.sl_ratio, 2) in L for st in local)
+    return ok, f"cap 1.4 -> {cap.sl_ratios} (largest built {top}); no cap -> {free.sl_ratios}; long range {sorted(longs)}; entirely excluded global grid {none.sl_ratios}; isolated own-range cells {len(local)}"
 
 
 def tp_steps():

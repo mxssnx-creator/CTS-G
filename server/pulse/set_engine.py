@@ -2528,13 +2528,14 @@ class SetBook:
         self.sl_low = bool(ov.get("setSlLow", False))
         if self.sl_low:
             ratios.extend(SL_RATIOS_LOW)
-        # setSlMinRatio (0 = off): no Set is built under this SL ratio (x TP); the grid keeps what is left, never an empty grid
+        # setSlMinRatio (0 = off): keep only globally configured ratios inside the
+        # requested bounds. No remaining ratio means no global base/Exit cells.
         self.sl_min_ratio = max(0.0, min(5.0, finite(ov.get("setSlMinRatio"), 0.0)))
         # maxStopLossRatio (0 / absent = no cap): no base or Exit Set is built with an SL ratio above it; the per-range lists (slRatiosByRange) carry their own
         # bounds and the per-range ceilings (slMaxByRange) still apply on top
         self.sl_max_ratio = max(0.0, min(5.0, finite(ov.get("maxStopLossRatio"), 0.0)))
         kept = [r for r in ratios if r + 1e-9 >= self.sl_min_ratio and (not self.sl_max_ratio or r <= self.sl_max_ratio + 1e-9)]
-        self.sl_ratios = sorted(set(kept)) or sorted(set(ratios)) or list(SL_RATIOS)
+        self.sl_ratios = sorted(set(kept))
         # slRatiosByRange {range: [ratios]}: a TP range with its own SL ratios (e.g. long / wide 0.2 .. 0.8 step 0.1); it replaces the global list and the
         # minimum ratio for the cells of that range only, every other range is unchanged
         by_range: Dict[str, List[float]] = {}
