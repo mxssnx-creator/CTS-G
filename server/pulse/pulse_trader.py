@@ -3258,6 +3258,13 @@ class Pulse:
             px = self.px.get(pos.symbol) or pos.entry
             need = self.missing_controls(pos)
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{pos.symbol}", 0) and self.controls_illegal(pos)
+            # Both ids present but never verified against the venue (found on x02 2026-11-15: a position held controls_ok False for hours because
+            # missing_controls only asks for the ids, so nothing ever re-read its orders): re-verify it, at most once a minute per symbol.
+            unverified = (not need and not illegal and not pos.controls_ok and now >= self.ctrl_skip.get(f"verify:{pos.symbol}", 0))
+            if unverified:
+                self.ctrl_skip[f"verify:{pos.symbol}"] = now + 60.0
+                self.ensure_controls(pos)
+                continue
             if not need and not illegal:
                 continue
             if now < self.ctrl_skip.get(pos.symbol, 0) and not need:
@@ -6326,6 +6333,16 @@ class Pulse:
             self.did_io = True
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
+                m_min = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
+                if m_min:
+                    # learn the venue's minimum as entries and Block adds do (x02 2026-11-15: DCA re-sent the same too-small add every 25 s); the next
+                    # attempt rounds up to it within the auto plan's ceiling, or skips
+                    try:
+                        need = float(m_min.group(1))
+                    except (TypeError, ValueError, OverflowError):
+                        need = 0.0
+                    if math.isfinite(need) and need > 0:
+                        c.min_qty = max(float(c.min_qty or 0), need)
                 self.dca_fail_cd[pos.symbol] = time.time() + (180.0 if is_transient_api(msg) else 25.0)
                 if is_transient_api(msg):
                     log(f"DCA SKIP {pos.symbol} #{row['n']} {short_api_msg(msg)}", every=20.0, key=f"dcaf:{pos.symbol}")

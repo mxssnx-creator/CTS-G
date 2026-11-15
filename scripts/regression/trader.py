@@ -3674,6 +3674,65 @@ def an_armed_trail_may_outlive_the_time_exit():
     return ok, f"replay (index, plain, step) {out}; live armed / unarmed {live}"
 
 
+def an_unverified_position_gets_its_controls_reread():
+    """Found on x02 (2026-11-15): a position whose stop and target ids were known but never verified (controls_ok False, close-all, not undercovered)
+    stayed so for hours -- missing_controls asks only for the ids, so priority_controls never re-read its orders and the QA check failed every pass. Now
+    such a position is re-verified (ensure_controls), at most once a minute per symbol; a verified one is left alone."""
+    def run():
+        res = {}
+        for verified in (False, True):
+            p, sym, pos = _lane_pulse()
+            p.control_orders = True
+            pos.close_position, pos.ctrl_undercovered, pos.control_pending = True, False, {}
+            pos.controls_ok = pos.ctrl_verified = verified
+            calls = []
+            p.ensure_controls = lambda x, calls=calls: calls.append(x.symbol)
+            p.controls_illegal = lambda x: False
+            p.priority_controls()
+            p.priority_controls()                     # within the minute: not again
+            res[verified] = len(calls)
+        return res
+    res = _isolated(run)
+    return res == {False: 1, True: 0}, f"re-reads within a minute: unverified {res[False]}, verified {res[True]}"
+
+
+def a_dca_add_learns_the_venues_minimum_order():
+    """Found on x02 (2026-11-15): a DCA add under the venue's real minimum ("The minimum order amount is 45.77 XPL", it moves with the price) was re-sent every
+    25 s; entries and Block adds already learnt it. The DCA path now learns it too (the contract's min_qty), so the next add rounds up to it or skips."""
+    import types
+
+    def run():
+        p, sym, pos = _lane_pulse()
+        pos.set_id = ""                                   # DCA is for positions without a Set
+        p.halted = False
+        p.entries_blocked = lambda: False
+        p.missing_controls = lambda _p: False
+        p.dca_eligible = lambda _p: True
+        p.dca = types.SimpleNamespace(enabled=True, lanes={}, key=lambda s_, side: f"{s_}:{side}", skips=0, auto=False, max_expo=3.0,
+                                      due=lambda *a, **k: {"n": 1, "qty": 0.001, "mult": 1.0}, on_close=lambda *a, **k: None,
+                                      drop=lambda *a, **k: None, attach=lambda *a, **k: None)
+        p.dca_last_emit = 0.0
+        p.dca_fail_cd = {}
+        p.max_book_notional = lambda: 1e9
+        p.notional_cap = lambda: 1e9
+        p.available = 1e6
+        c = p.contracts[sym]
+        before = float(c.min_qty or 0)
+        sent = []
+        real_post = p.api.post
+
+        def post(path, body, *a, **k):
+            if path.endswith("/trade/order"):
+                sent.append(body.get("quantity"))
+                return {"code": 101400, "msg": "The minimum order amount is 45.77 XPL."}
+            return real_post(path, body, *a, **k)
+        p.api.post = post
+        p.maybe_dca_adds()
+        return before, float(c.min_qty or 0), sent
+    before, after, sent = _isolated(run)
+    return bool(sent) and after == 45.77 and before < 45.77, f"sent {sent}; contract minimum {before} -> {after}"
+
+
 CHECKS = [
     ("trader.alternate-lane-keeps-the-executed-group-gate", alternate_lane_keeps_the_executed_group_gate),
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
@@ -3722,6 +3781,8 @@ CHECKS = [
     ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
     ("trader.trailing-sets-have-no-time-exit-unless-asked", trailing_sets_have_no_time_exit_unless_asked),
     ("trader.an-armed-trail-may-outlive-the-time-exit", an_armed_trail_may_outlive_the_time_exit),
+    ("trader.an-unverified-position-gets-its-controls-reread", an_unverified_position_gets_its_controls_reread),
+    ("trader.a-dca-add-learns-the-venues-minimum-order", a_dca_add_learns_the_venues_minimum_order),
     ("trader.slow-cycles-alone-never-shed-the-set-history", slow_cycles_alone_never_shed_the_set_history),
     ("trader.set-lane-honours-tp-as-the-replay-does", a_set_lane_honours_tp_only_as_the_replay_does),
     ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),
