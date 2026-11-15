@@ -549,5 +549,6 @@
     "exec.controls": true
   },
   "exitSets": false,
-  "minPfAutoOrdersFactor": 0
+  "minPfAutoOrdersFactor": 0,
+  "tpStepMin": 0
 }

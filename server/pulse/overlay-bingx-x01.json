@@ -430,7 +430,7 @@
   "slAutoRange": true,
   "slAutoMin": 20,
   "slAutoTol": 5,
-  "trailStepMin": 3,
+  "trailStepMin": 12,
   "scanWorkers": 3,
   "trailTimeExit": true,
   "configGate": true,
@@ -477,5 +477,6 @@
     }
   ],
   "exitSets": false,
-  "minPfAutoOrdersFactor": 0
+  "minPfAutoOrdersFactor": 0,
+  "tpStepMin": 26
 }

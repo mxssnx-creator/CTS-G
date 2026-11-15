@@ -2747,6 +2747,7 @@ class SetBook:
         opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
+        self.tp_step_min = int(max(0, min(STEP_MAX, finite(ov.get("tpStepMin"), 0.0))))      # the TP / Exit Sets' lowest step (0 = setMinStep)
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_DEFAULT_MAX, self.min_step_cfg, STEP_MAX)
         # owner 2026-11-03: the minimum TP step is 2 and stays there; step-adapt (raise it after losing live fills) is off by default -- on x02 it had
         # raised the minimum to 11 and removed every Set from 0.2 % to 1.0 %
@@ -3084,6 +3085,9 @@ class SetBook:
         grid at 3.2 % whatever setStepMax says (the steps above belong to Wide)."""
         lo, hi = self._step_span()
         on = getattr(self, "tp_ranges", None) or TP_RANGES_DEFAULT
+        # tpStepMin (owner 2026-11-15, "update min step defaults to make profit"): the TP Sets' lowest step, applied to this grid only, so the trailing
+        # Sets' stop (_trail_mid_step, from setMinStep) does not move
+        lo = max(lo, int(getattr(self, "tp_step_min", 0) or 0))
         return [k for k in range(lo, hi + 1) if on.get(tp_range_of(k), True)]
 
     def _trail_mid_step(self) -> int:

@@ -561,6 +561,8 @@ export type PulseOverlay = {
   exitMinHoldS: number;
   setSlMinRatio: number;
   trailStepMin: number;
+  /** The TP Sets' lowest step (owner 2026-11-15, live x02: TP Sets from 2.6 % read PF 1.04 on 92 closes); 0 = setMinStep. Trailing stops do not move. */
+  tpStepMin: number;
   slAutoRange: boolean;
   slAutoMin: number;
   slAutoTol: number;
@@ -872,7 +874,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
   setSlMinRatio: 0.5,
-  trailStepMin: 3,
+  trailStepMin: 12,
+  tpStepMin: 26,
   slAutoRange: true,
   slAutoMin: 20,
   slAutoTol: 5,
@@ -1158,6 +1161,7 @@ export type CtsSettings = {
   exitMinHoldS?: number;
   setSlMinRatio?: number;
   trailStepMin?: number;
+  tpStepMin?: number;
   slAutoRange?: boolean;
   slAutoMin?: number;
   slAutoTol?: number;
@@ -1737,7 +1741,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitOptSlMax: num(cts.exitOptSlMax, 0.9),
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     setSlMinRatio: num(cts.setSlMinRatio, 0.5),
-    trailStepMin: Math.max(0, Math.min(50, Math.round(num(cts.trailStepMin, 3)))),
+    trailStepMin: Math.max(0, Math.min(50, Math.round(num(cts.trailStepMin, 12)))),
+    tpStepMin: Math.max(0, Math.min(50, Math.round(num(cts.tpStepMin, 26)))),
     slAutoRange: bool(cts.slAutoRange, true),
     slAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.slAutoMin, 20)))),
     slAutoTol: Math.max(0, Math.min(50, num(cts.slAutoTol, 5))),
