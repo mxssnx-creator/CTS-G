@@ -2,6 +2,27 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-15 (evening), owner: "exec last N 10 to 30 step 5, 50 symbols", "block steps increasing and remaining at the last until net positive for lane, best vol
+  increment ratio", "test Relate", "update x01 live, 120 symbols, DCA off, Axis, Block on", "axis with all possible multiple configs, auto PF, vol ratios to the base set".**
+  (a) **Execution last N** (trade_sim, 50 symbols, fresh 3 days 11-12 10:00 .. 11-15 10:00, x02 overlay with Axis prev 4; executed PF / orders): off 1.630 / 694 dev,
+  1.019 / 392 sealed; 10 1.466 / 711 dev (sealed run killed by the OOM killer twice); 15 1.669 / 702, 0.957 / 402; 20 = off (equal to the Real window 20); 25 1.458 / 724,
+  0.965 / 366; 30 1.463 / 744, 0.943 / 364. No N better than off on both windows: `execGateN` stays 0. 5 / 8 / 15 are being re-measured with the config gate (25 symbols).
+  (b) **Block rounds** (`block_study50.py` / `block_auto50.py`, the same 50-symbol executed parents, the engine's RoundsBook; weighted PF / net / max drawdown, net points): without
+  1.630 / +252 / 20.7 dev, 1.019 / +5 / 96.3 sealed; 115 of 630 single procedures better on both, all relation step, ratio 1.0. **Shipped: counts 1 + 2 of relation step, ratio
+  1.0, step to level 3 held until the lane's net is back at zero, ceiling x4, Auto on: 1.669 / +380 / 34.8 dev, 1.152 / +50 / 75.8 sealed** (147 / 33 entries raised; the
+  previous count 5 / level 2 / x3: 1.654 / 1.035). Higher drawdown on development, lower on sealed. Weighted PF, never a unit PF.
+  (c) **Relate** (RelateBook over the same parents in time order, the book carried from development into sealed; 810 settings): 162 better on both, but every one raises about
+  one position on development (a relation needs 60 closed parents first); of those raising 20 or more on development none is better on both. **Relate stays off.**
+  (d) **x01 restarted by the owner** (marker removed, 17:32 UTC): equity 29.98 USDT (the account was funded), not halted (session basis 29.98, halt 80 %), symbolCap 120,
+  DCA off, Axis prev 4, Block (rounds) on, config gate, Auto min PF, Signals, exitSetsByPack {} (x02's measured setting); the hourly keep-alive covers x01 and x02 again.
+  Fixtures pin the earlier `minSlDistancePct` 0.1, config gate off and no Axis Sets (`common.overlay`), so the golden is unchanged.
+  (e) **Axis Sets** (`axisSets`, `server/pulse/axis_sets.py`, off by default): per configuration Set and lane, every Axis setting (last 1-4, prev 4-12, pause 1-8, with
+  `combos` every pair of two kinds: 78 settings) is a derived Set of its Real / Real Negative Set judged on the orders closed before each entry; the Auto choice takes the
+  best PF of the newest `n` admitted (at least `minN`, margin over no Axis); volume `flat` / `base` (chosen PF over the lane Set's own PF) / `floor`, bounded. Engine
+  (`SetBook.axis_set_verdict`, `Pulse._scope_choice`, `Pulse.place`) and trade_sim share it; check `lane_rank.axis-sets-judge-each-set-on-its-own-lane-with-entry-times`.
+  Measurement running (25 symbols, dev + sealed).
+  (f) **Live x02 audit** (284 closes since the 10:38 restart): 118 distinct Sets, every close on its own Set and lane (147 negative / 137 positive), Block rounds raised 30
+  entries (max x3); PF 0.507 per close (multi positive lane 0.32 on 71, flow 0.33 / 0.39, reversion positive lane 1.60 on 18).
 - **2026-11-15 (newest), owner: "Block to auto eval for each block count and set by last n30 but minimal 15 .. add to settings" / "add top menus (submenus) for sections".**
   (a) `blockRounds.auto` (+ `autoN` 30, `autoMin` 15, `autoPf` 1.0, `autoRatio` 1.0; `block_rounds.RoundsBook.auto_verdict`): every block count of every selected relation
   decides by itself whether it raises. Evidence = level x net (volume 1) of every position that opened while one of that count's procedures stood raised -- recorded for a
