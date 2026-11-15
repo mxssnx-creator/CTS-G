@@ -26,6 +26,12 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 - [-] No trailing time exit: 1.028 / 0.881 (worse on both). Armed-free: identical to it.
 - [~] Trailing own holds 180 / 720 / 1440 min (rerun with the corrected base, chain10).
 
+## Volume by type (owner: "increase their ratio for vol .. relationally")
+- [x] Trailing Sets are the group above 1 everywhere (executed PF dev 1.76 / sealed 2.03 / live 1.99); `volumeByKind` {"trail": 2.0, "exit": 0.5} shipped x01 / x02
+      (volume-weighted PF 1.054 -> 1.264 dev, 1.082 -> 1.533 sealed; live x02 USDT 0.505 -> 0.648). Revert = {}.
+- [x] Rule documented (CLAUDE.md, every project): pool PF under 1 is normal; post-Base and executed PF decide.
+- [x] Same note in the other projects: draft PRs CTS-A-O #274, CTS-K-N #573, CTS-C #25, CTS-X #11 (CTS-A: attaching was refused by the permission check).
+
 ## Grid / ranges / SL
 - [x] Auto SL range per TP step (on): 1.054 / 1.082 against 0.962 / 0.890 off.
 - [x] Min step 2, min trailing arm 3 (Settings).
