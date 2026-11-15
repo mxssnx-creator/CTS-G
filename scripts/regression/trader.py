@@ -2565,6 +2565,10 @@ def _signal_book():
     # the shipped x01 now runs every signal pack, so some pack signals on nearly every bar of this synthetic trend and the "quiet bar" half of the check disappears; the check
     # pins the packs it was written for (the signal transport is the same for every pack)
     ov["stratReversion"] = ov["stratFlow"] = ov["stratMulti"] = ov["stratTrend"] = False
+    # the signal packs (stratSignals, shipped on 2026-11-14) signal on this trend too; the check pins the packs it was written for
+    ov["stratSignals"] = False
+    # the Exit order type (exitSets, shipped off 2026-11-15): this check needs one Exit Set to compare with a base Set's TP
+    ov["exitSets"], ov["exitSetsByPack"] = True, {}
     b.load(ov)
     return b, se
 
