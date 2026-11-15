@@ -621,6 +621,29 @@ def micro_tactics_fire_on_their_pattern_are_causal_and_leave_group_votes_alone()
         ("burstfade_n8_t1", noisy + [[o, o, o * 0.985 * 0.999, o * 0.985, 900.0]], 1),
         ("exhaust_n8_t1", down + [[last, last + 0.2, last - 0.01, last + 0.15, 1000.0]], 1),
     ]
+    # trend and break tactics (owner 2026-11-14): each fires on its pattern, long and short, and is causal like the rest
+    def bar(o, c, h=None, l=None, v=1000.0):
+        return [o, h if h is not None else max(o, c) + 0.02, l if l is not None else min(o, c) - 0.02, c, v]
+    upt = [bar(100 + i * 0.15, 100 + i * 0.15 + 0.15) for i in range(40)]
+    lu = upt[-1][3]
+    dnt = [bar(100 - i * 0.15, 100 - i * 0.15 - 0.15) for i in range(40)]
+    ld = dnt[-1][3]
+    fl = [bar(100, 100, 100.05, 99.95) for _ in range(60)]
+    imp = fl + [bar(100 + j * 0.4, 100 + (j + 1) * 0.4) for j in range(5)]
+    tp_ = imp[-1][3]
+    cons = [bar(tp_ - 0.05 * (j % 2), tp_ + 0.05 * (1 - j % 2)) for j in range(5)]
+    rt = fl + [[100, 100.5, 100, 100.45, 2000.0], [100.45, 100.5, 100.12, 100.2, 1000.0], [100.2, 100.3, 100.1, 100.15, 1000.0],
+               [100.15, 100.3, 100.12, 100.14, 1000.0], [100.14, 100.35, 100.1, 100.3, 1200.0]]
+    cases += [
+        ("trendpb_n8_t1", upt + [bar(lu, lu - 0.12), bar(lu - 0.12, lu - 0.25), bar(lu - 0.25, lu - 0.3), bar(lu - 0.3, lu - 0.05)], 1),
+        ("trendpb_n8_t1", dnt + [bar(ld, ld + 0.12), bar(ld + 0.12, ld + 0.25), bar(ld + 0.25, ld + 0.3), bar(ld + 0.3, ld + 0.05)], -1),
+        ("trendflag_n8_t1", imp + cons + [bar(tp_, tp_ + 0.3, tp_ + 0.32, tp_ - 0.01)], 1),
+        ("brkvol_n8_t1", fl + [[100, 100.6, 99.99, 100.58, 3000.0]], 1),
+        ("brkvol_n8_t1", fl + [[100, 100.01, 99.4, 99.42, 3000.0]], -1),
+        ("rangebrk_n8_t1", fl + [[100, 100.4, 100.0, 100.38, 1500.0]], 1),
+        ("rangebrk_n8_t1", fl + [[100, 100.0, 99.6, 99.62, 1500.0]], -1),
+        ("brkretest_n8_t1", rt, 1),
+    ]
     bad = []
     for name, rows, want in cases:
         got = L.LIB[name](rows)
@@ -637,7 +660,7 @@ def micro_tactics_fire_on_their_pattern_are_causal_and_leave_group_votes_alone()
     # the all-family vote is built without the micro families: its member count equals the voted groups' families
     voted = sum(len(m) for m in members.values()) + sum(1 for f, (g, _) in L.FAMILIES.items() if g in ("price",))
     allfam = sum(1 for f, (g, _) in L.FAMILIES.items() if not g.startswith("micro"))
-    ok = not bad and not missing and not leaked and len(micro) == 9 and voted == allfam
+    ok = not bad and not missing and not leaked and len(micro) == 14 and voted == allfam
     return ok, f"{len(cases)} patterns fire as written{(' bad ' + str(bad)) if bad else ''}; {len(micro)} micro families at every range/timeframe (missing {missing[:3]}); voted groups unchanged (leaked {leaked}); all-vote families {allfam}"
 
 

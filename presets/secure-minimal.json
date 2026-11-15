@@ -261,6 +261,8 @@
   "strategyProcessingByRange": {},
   "stratGeneral": true,
   "stratShortRange": true,
+  "stratSignals": false,
+  "signalConfigs": [],
   "stratTrend": false,
   "stratBreakout": false,
   "stratReversion": false,
@@ -421,8 +423,10 @@
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
+  "minPfStepAutoScope": "set",
+  "minPfSetAutoMin": 10,
   "minPfStepAutoTol": 5,
-  "minPfStepAutoLow": 1,
+  "minPfStepAutoLow": 1.02,
   "minPfStepAutoHigh": 2,
   "pauseMode": "auto",
   "pauseFixedMin": 10,
@@ -487,6 +491,29 @@
   "exitOptSlMin": 0.1,
   "exitOptSlMax": 0.9,
   "exitMinHoldS": 45,
+  "setSlMinRatio": 0.5,
+  "execGateN": 0,
+  "slRatiosByRange": {
+    "long": [
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8
+    ],
+    "wide": [
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8
+    ]
+  },
+  "exitSetHoldBars": 720,
   "exitPfWindow": 8,
   "exitDeactN": 25,
   "exitMinPf": 1.25,
@@ -508,19 +535,5 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
-  },
-  "strategyProcessingByRange": {},
-  "relationalVolumeRatios": {
-    "enabled": true,
-    "overall": 1,
-    "maxMultiplier": 25,
-    "indicationTypes": {},
-    "indications": {},
-    "strategies": {},
-    "ranges": {},
-    "symbols": {}
-  },
-  "lastNDisjoint": false,
-  "setGateShortMode": "positive",
-  "mainShortMode": "positive"
+  }
 }

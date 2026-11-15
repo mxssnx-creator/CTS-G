@@ -364,6 +364,8 @@ export type PulseOverlay = {
   stratGeneral: boolean;
   /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
   stratShortRange: boolean;
+  stratSignals: boolean;
+  signalConfigs: SignalConfig[];
   stratTrend: boolean;
   stratBreakout: boolean;
   stratReversion: boolean;
@@ -517,6 +519,8 @@ export type PulseOverlay = {
   minPfStepRatio: number;
   minPfStepAutoN: number;
   minPfStepAutoMin: number;
+  minPfStepAutoScope: "step" | "set";
+  minPfSetAutoMin: number;
   minPfStepAutoTol: number;
   /** The lowest floor Auto may choose (1.00 .. 2.00). */
   minPfStepAutoLow: number;
@@ -550,6 +554,10 @@ export type PulseOverlay = {
   exitOptSlMin: number;
   exitOptSlMax: number;
   exitMinHoldS: number;
+  setSlMinRatio: number;
+  execGateN: number;
+  slRatiosByRange: Record<string, number[]>;
+  exitSetHoldBars: number;
   exitPfWindow: number;
   exitDeactN: number;
   exitMinPf: number;
@@ -658,10 +666,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseEnabled: true,
   axisPauseMaxWindow: 8,
   minPf: GATE_MIN_PF_DEFAULT,
-  positionCostPct: 0.176,
-  slippageAllowancePct: 0.016,
-  makerFeeRate: 0.0005,
-  takerFeeRate: 0.0008,
+  positionCostPct: 0.11,
+  slippageAllowancePct: 0.01,
+  makerFeeRate: 0.0002,
+  takerFeeRate: 0.0005,
   slippageFeeRatio: 0.1,
   windowsLinked: true,
   pfWindow: 8,
@@ -696,11 +704,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   strategyProcessingByRange: {},
   stratGeneral: true,
   stratShortRange: true,
-  stratTrend: false,
+  stratSignals: false,
+  signalConfigs: [],
+  stratTrend: true,
   stratBreakout: false,
-  stratReversion: false,
-  stratFlow: false,
-  stratMulti: false,
+  stratReversion: true,
+  stratFlow: true,
+  stratMulti: true,
   shortRangeStepMin: 2,
   shortRangeStepMax: 6,
   shortRangeMinPf: 1.1,
@@ -708,10 +718,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   microMinSlDistancePct: .1, microMinTrailDistancePct: .05,
   trailMinSteps: 2,
   trailMinLockPct: 0,
-  groupGate: false,
-  groupGateN: 10,
+  groupGate: true,
+  groupGateN: 3,
   groupGatePf: 1,
-  groupGateHours: 12,
+  groupGateHours: 6,
   groupGateMin: 1,
   stratDca: false,
   indTypeState: true,
@@ -723,7 +733,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   noise: 0.05,
   volWeight: 0.3,
   minStep: 10,
-  maxStopLossRatio: 2.5,
+  maxStopLossRatio: 1.4,
   trailingMinStep: 6,
   posCountsVolumeRatio: 0.05,
   rearrange: true,
@@ -739,7 +749,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indRewardRisk: 1.8,
   indExtraSources: true,
   histEnabled: true,
-  histLookbackBars: 4320,
+  histLookbackBars: 1920,
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 120,
@@ -775,10 +785,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   mainNegEnabled: true,
   mainNegWindows: [5, 10],
   realGateEnabled: true,
-  realGateN: 15,
+  realGateN: 20,
   realStagePaper: true,
   minPfLinked: true,
-  histLookbackAuto: true,
+  histLookbackAuto: false,
   histLookbackMax: 4320,
   histLookbackTargetN: 12,
   setUseHistoricGate: true,
@@ -809,8 +819,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
   minPfStepAutoMin: 1,
+  minPfStepAutoScope: "set",
+  minPfSetAutoMin: 10,
   minPfStepAutoTol: 5,
-  minPfStepAutoLow: 1,
+  minPfStepAutoLow: 1.02,
   minPfStepAutoHigh: 2,
   pauseMode: "auto",
   pauseFixedMin: 10,
@@ -839,6 +851,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
+  setSlMinRatio: 0.5,
+  execGateN: 0,
+  slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
+  exitSetHoldBars: 720,
   exitPfWindow: 8,
   exitDeactN: 25,
   exitMinPf: 1.25,
@@ -963,6 +979,8 @@ export type CtsSettings = {
   strategyProcessingByRange?: Record<string, { normal?: boolean; trailing?: boolean }>;
   stratGeneral?: boolean;
   stratShortRange?: boolean;
+  stratSignals?: boolean;
+  signalConfigs?: Partial<SignalConfig>[];
   stratTrend?: boolean;
   stratBreakout?: boolean;
   stratReversion?: boolean;
@@ -1077,6 +1095,8 @@ export type CtsSettings = {
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
   minPfStepAutoMin?: number;
+  minPfStepAutoScope?: string;
+  minPfSetAutoMin?: number;
   minPfStepAutoTol?: number;
   minPfStepAutoLow?: number;
   minPfStepAutoHigh?: number;
@@ -1107,6 +1127,10 @@ export type CtsSettings = {
   exitOptSlMin?: number;
   exitOptSlMax?: number;
   exitMinHoldS?: number;
+  setSlMinRatio?: number;
+  execGateN?: number;
+  slRatiosByRange?: Record<string, number[]>;
+  exitSetHoldBars?: number;
   exitPfWindow?: number;
   exitDeactN?: number;
   exitMinPf?: number;
@@ -1196,6 +1220,51 @@ const strList = (v: unknown): string[] =>
 const numList = (v: unknown, lo: number, hi: number): number[] =>
   [...new Set((Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;\s]+/) : []).map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x) && x >= lo && x <= hi))];
 /** Normalise the saved range configurations; the engine expands and validates the names, so an unknown family is reported there, not silently kept here. */
+/** Signals packs (engine `signal_packs`): every source x range x timeframe is its own pack sig-<source>-<range>-t<tf> with this entry's Set geometry. */
+export const SIGNAL_SOURCES = ["ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian", "bb-bounce", "cci-reversal", "obv-trend"] as const;
+export const SIGNAL_RANGES = ["short", "medium"] as const;
+export const SIGNAL_TIMEFRAMES = [1, 5, 15, 30] as const;
+export interface SignalConfig {
+  label: string;
+  enabled: boolean;
+  sources: string[];
+  ranges: string[];
+  timeframes: number[];
+  stepMin: number;
+  stepMax: number;
+  slRatios: number[];
+  types: string[];
+}
+export const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
+  label: "signals", enabled: true, sources: [...SIGNAL_SOURCES], ranges: [...SIGNAL_RANGES], timeframes: [5, 15],
+  stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"],
+};
+export function signalConfigList(v: unknown): SignalConfig[] {
+  if (!Array.isArray(v)) return [];
+  const words = (x: unknown): string[] => (Array.isArray(x) ? x : typeof x === "string" ? x.split(/[,;\s]+/) : []).map((y) => String(y).trim().toLowerCase()).filter(Boolean);
+  return v.slice(0, 32).map((raw, i) => {
+    const e = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const lo = Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMin) || DEFAULT_SIGNAL_CONFIG.stepMin)));
+    const hi = Math.max(lo, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMax) || DEFAULT_SIGNAL_CONFIG.stepMax)));
+    const sources = words(e.sources).filter((s) => (SIGNAL_SOURCES as readonly string[]).includes(s));
+    const ranges = words(e.ranges).filter((s) => (SIGNAL_RANGES as readonly string[]).includes(s));
+    const tfs = words(e.timeframes).map(Number).filter((x) => (SIGNAL_TIMEFRAMES as readonly number[]).includes(x));
+    const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.05 && x <= 5);
+    const types = words(e.types).filter((t) => (SET_TYPES as readonly string[]).includes(t));
+    return {
+      label: String(e.label ?? `signals ${i + 1}`).slice(0, 60),
+      enabled: e.enabled !== false,
+      sources: sources.length ? sources : [...SIGNAL_SOURCES],
+      ranges: ranges.length ? ranges : [...SIGNAL_RANGES],
+      timeframes: tfs.length ? tfs : [...DEFAULT_SIGNAL_CONFIG.timeframes],
+      stepMin: lo,
+      stepMax: hi,
+      slRatios: ratios.length ? ratios : [...DEFAULT_SIGNAL_CONFIG.slRatios],
+      types: types.length ? types : [...DEFAULT_SIGNAL_CONFIG.types],
+    };
+  });
+}
+
 export function indicationConfigList(v: unknown): IndicationConfig[] {
   if (!Array.isArray(v)) return [];
   return v.slice(0, 64).map((raw, i) => {
@@ -1441,8 +1510,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     minPf: pfFloor(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
-    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.176),
-    slippageAllowancePct: num(cts.slippageAllowancePct, 0.016),
+    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.11),
+    slippageAllowancePct: num(cts.slippageAllowancePct, 0.01),
     makerFeeRate: num(cts.makerFeeRate, 0.0005),
     takerFeeRate: num(cts.takerFeeRate, 0.0008),
     slippageFeeRatio: num(cts.slippageFeeRatio, 0.1),
@@ -1479,6 +1548,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     strategyProcessingByRange: processingByRangeOf(cts.strategyProcessingByRange),
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
+    stratSignals: bool(cts.stratSignals, false),
+    signalConfigs: signalConfigList(cts.signalConfigs),
     stratTrend: bool(cts.stratTrend, false),
     stratBreakout: bool(cts.stratBreakout, false),
     stratReversion: bool(cts.stratReversion, false),
@@ -1556,7 +1627,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     mainNegEnabled: bool(cts.mainNegEnabled, true),
     mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
     realGateEnabled: bool(cts.realGateEnabled, true),
-    realGateN: Math.max(1, Math.min(200, Math.round(num(cts.realGateN, 15)))),
+    realGateN: Math.max(1, Math.min(200, Math.round(num(cts.realGateN, 20)))),
     realStagePaper: bool(cts.realStagePaper, true),
     minPfLinked: bool(cts.minPfLinked, true),
     histLookbackAuto: bool(cts.histLookbackAuto, true),
@@ -1596,8 +1667,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),
     minPfStepAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfStepAutoMin, 1)))),
+    minPfStepAutoScope: cts.minPfStepAutoScope === "step" ? "step" : "set",
+    minPfSetAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfSetAutoMin, 10)))),
     minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
-    minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1) * 100) / 100)),
+    minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1.02) * 100) / 100)),
     minPfStepAutoHigh: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoHigh, 2) * 100) / 100)),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
     pauseFixedMin: pauseMinutes(cts.pauseFixedMin, DEFAULT_OVERLAY.pauseFixedMin),
@@ -1625,6 +1698,18 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitOptSlMin: num(cts.exitOptSlMin, 0.1),
     exitOptSlMax: num(cts.exitOptSlMax, 0.9),
     exitMinHoldS: num(cts.exitMinHoldS, 45),
+    setSlMinRatio: num(cts.setSlMinRatio, 0.5),
+    execGateN: Math.max(0, Math.min(200, Math.round(num(cts.execGateN, 0)))),
+    slRatiosByRange: ((raw: unknown): Record<string, number[]> => {
+      if (!raw || typeof raw !== "object") return { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] };
+      const out: Record<string, number[]> = {};
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        const xs = Array.isArray(v) ? v.filter((x): x is number => typeof x === "number" && Number.isFinite(x) && x >= 0.05 && x <= 5) : [];
+        if (xs.length) out[k] = [...new Set(xs.map((x) => Math.round(x * 100) / 100))].sort((a, b) => a - b);
+      }
+      return out;
+    })(cts.slRatiosByRange),
+    exitSetHoldBars: num(cts.exitSetHoldBars, 720),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
     exitMinPf: pfFloor(num(cts.exitMinPf, GATE_MIN_PF_DEFAULT)),

@@ -105,10 +105,11 @@ MEMO_CAP = 4096                 # entries of the per-thread memo before it is cl
 
 class _AggregatedBars(list):
     """Owned, read-only indicator input; derived features share its lifetime."""
-    __slots__ = ('true_ranges',)
+    __slots__ = ('true_ranges', 'closes')
     def __init__(self,values):
         super().__init__(values)
         self.true_ranges = None
+        self.closes = None
 
 
 def _memo() -> Dict:
@@ -188,6 +189,7 @@ def _ema(vals: Sequence[float], n: int) -> List[float]:
     return out
 
 
+@_vector_memo
 def _wma(vals: Sequence[float], n: int) -> List[float]:
     out = []
     for i in range(len(vals)):
@@ -220,6 +222,11 @@ def _rsi(c: Sequence[float], n: int) -> List[float]:
 
 
 def _cl(b):
+    if isinstance(b, _AggregatedBars):
+        c = b.closes
+        if c is None:
+            c = b.closes = [float(x[3]) for x in b]
+        return list(c)                 # a fresh list each call: a caller may change its copy
     return [float(x[3]) for x in b]
 
 
@@ -1359,6 +1366,108 @@ def f_mpull(b, n):
     return None
 
 
+def f_trendpb(b, n):
+    """Trend pullback resume: an n-bar trend (the close n bars before the last k bars to the close k bars ago moved 1.5 ATR or more, k = max(2, n // 3)), then a
+    pullback of 0.4 .. 1.5 ATR over the last k bars, and the newest close turns back with the trend into the upper (lower) half of the pullback -> go with the trend."""
+    k = max(2, n // 3)
+    if len(b) < 2 * n + 2:
+        return None
+    c, h, l = _cl(b), _hi(b), _lo(b)
+    atr = _atr(b[:-1], n)
+    if atr <= 0:
+        return None
+    lead = c[-1 - k] - c[-1 - k - n]
+    if lead >= 1.5 * atr:
+        top = max(h[-1 - k : -1])
+        pb = top - min(l[-1 - k : -1])
+        if 0.4 * atr <= pb <= 1.5 * atr and c[-1] > c[-2] and c[-1] > top - pb * 0.5:
+            return 1, _conf(0.6, min(0.2, (lead / atr - 1.5) * 0.04))
+    if lead <= -1.5 * atr:
+        bot = min(l[-1 - k : -1])
+        pb = max(h[-1 - k : -1]) - bot
+        if 0.4 * atr <= pb <= 1.5 * atr and c[-1] < c[-2] and c[-1] < bot + pb * 0.5:
+            return -1, _conf(0.6, min(0.2, (-lead / atr - 1.5) * 0.04))
+    return None
+
+
+def f_trendflag(b, n):
+    """Flag continuation: an impulse of 2 ATR or more over m = max(3, n // 2) bars, then k = m bars of consolidation no wider than 0.6 of the impulse, and
+    the newest close breaks the consolidation in the impulse direction."""
+    m = k = max(3, n // 2)
+    if len(b) < m + k + n + 2:
+        return None
+    c, h, l = _cl(b), _hi(b), _lo(b)
+    atr = _atr(b[: -k - 1], n)
+    if atr <= 0:
+        return None
+    imp = c[-1 - k] - c[-1 - k - m]
+    rng_hi, rng_lo = max(h[-1 - k : -1]), min(l[-1 - k : -1])
+    if abs(imp) >= 2.0 * atr and (rng_hi - rng_lo) <= 0.6 * abs(imp):
+        if imp > 0 and c[-1] > rng_hi:
+            return 1, _conf(0.6, min(0.2, (abs(imp) / atr - 2.0) * 0.04))
+        if imp < 0 and c[-1] < rng_lo:
+            return -1, _conf(0.6, min(0.2, (abs(imp) / atr - 2.0) * 0.04))
+    return None
+
+
+def f_brkvol(b, n):
+    """Volume break: the newest close is beyond the prior n-bar extreme on 1.5 x the average volume or more, closing in the outer quarter of its own range."""
+    if len(b) < n + 2:
+        return None
+    c, h, l, v = _cl(b), _hi(b), _lo(b), _vo(b)
+    hi_, lo_ = max(h[-n - 1 : -1]), min(l[-n - 1 : -1])
+    mv = sum(v[-n - 1 : -1]) / n
+    rng = h[-1] - l[-1]
+    if mv <= 0 or rng <= 0 or v[-1] < 1.5 * mv:
+        return None
+    pos = (c[-1] - l[-1]) / rng
+    if c[-1] > hi_ and pos >= 0.75:
+        return 1, _conf(0.6, min(0.2, (v[-1] / mv - 1.5) * 0.04))
+    if c[-1] < lo_ and pos <= 0.25:
+        return -1, _conf(0.6, min(0.2, (v[-1] / mv - 1.5) * 0.04))
+    return None
+
+
+def f_brkretest(b, n):
+    """Break and retest: within the last k = max(3, n // 2) bars a close went beyond the n-bar extreme before it, the price came back to within 0.3 ATR of
+    that level without closing back inside, and the newest close is again away from the level in the break direction."""
+    k = max(3, n // 2)
+    if len(b) < n + k + 2:
+        return None
+    c, h, l = _cl(b), _hi(b), _lo(b)
+    atr = _atr(b[:-1], n)
+    if atr <= 0:
+        return None
+    base_hi = max(h[-n - k - 1 : -k - 1])
+    base_lo = min(l[-n - k - 1 : -k - 1])
+    if any(x > base_hi for x in c[-k:-1]) and all(x >= base_hi - 0.3 * atr for x in c[-k:]):
+        if min(l[-k:-1]) <= base_hi + 0.3 * atr and c[-1] > c[-2] and c[-1] > base_hi:
+            return 1, _conf(0.6, 0.05)
+    if any(x < base_lo for x in c[-k:-1]) and all(x <= base_lo + 0.3 * atr for x in c[-k:]):
+        if max(h[-k:-1]) >= base_lo - 0.3 * atr and c[-1] < c[-2] and c[-1] < base_lo:
+            return -1, _conf(0.6, 0.05)
+    return None
+
+
+def f_rangebrk(b, n):
+    """Range break: the last n bars before the newest were a contraction (high-low range at most 1.5 ATR of the n bars before them) and the newest close is
+    beyond that range by 0.1 ATR or more."""
+    if len(b) < 2 * n + 2:
+        return None
+    c, h, l = _cl(b), _hi(b), _lo(b)
+    atr = _atr(b[: -n - 1], n)
+    if atr <= 0:
+        return None
+    hi_, lo_ = max(h[-n - 1 : -1]), min(l[-n - 1 : -1])
+    if hi_ - lo_ > 1.5 * atr:
+        return None
+    if c[-1] >= hi_ + 0.1 * atr:
+        return 1, _conf(0.58, min(0.2, (c[-1] - hi_) / atr * 0.1))
+    if c[-1] <= lo_ - 0.1 * atr:
+        return -1, _conf(0.58, min(0.2, (lo_ - c[-1]) / atr * 0.1))
+    return None
+
+
 FAMILIES: Dict[str, Tuple[str, Callable]] = {
     # name: (group, function)
     "ker": ("trend", f_ker), "chop": ("trend", f_chop), "aroon": ("trend", f_aroon), "vortex": ("trend", f_vortex),
@@ -1380,6 +1489,9 @@ FAMILIES: Dict[str, Tuple[str, Callable]] = {
     "sweep": ("microrev", f_sweep), "wickrev": ("microrev", f_wickrev), "burstfade": ("microrev", f_burstfade), "exhaust": ("microrev", f_exhaust),
     "volclimax": ("microrev", f_volclimax), "burstgo": ("microgo", f_burstgo), "momchg": ("microgo", f_momchg), "vwapx": ("microgo", f_vwapx),
     "mpull": ("microgo", f_mpull),
+    # trend and break tactics (owner 2026-11-14); groups starting with "micro" are outside every voted group
+    "trendpb": ("microtrend", f_trendpb), "trendflag": ("microtrend", f_trendflag),
+    "brkvol": ("microbreak", f_brkvol), "brkretest": ("microbreak", f_brkretest), "rangebrk": ("microbreak", f_rangebrk),
 }
 
 

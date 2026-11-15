@@ -1,6 +1,8 @@
 """Logistics suite: configuration, deploy pin, repository hygiene and the scripts the repo relies on."""
 from __future__ import annotations
 
+import os as _os_stop
+_os_stop.environ["X01_OWNER_OFF"] = "/nonexistent"      # the owner-stop marker of this host must not change what the fixtures see
 import json
 import configparser
 import math
@@ -14,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "48aff970ad20394e6b93ee20fd988aa9a4ee6a73"
+PIN_WANT = "192bd9b975f01b4c0e9dcc1ed726858ef9d30209"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -24,7 +26,7 @@ def overlays_share_grid_contract():
     detail = []
     for path in (X01, X02):
         ov = json.load(open(path))
-        want = {"setMinStep": 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 4320,
+        want = {"setMinStep": 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.25, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
@@ -35,7 +37,7 @@ def overlays_share_grid_contract():
 
 def desk_defaults_match_engine():
     src = open(CONFIG_MODEL, encoding="utf-8").read()
-    need = [r"setMinStep: 2,", r"setStepMax: TP_STEP_DEFAULT_MAX,", r"export const TP_STEP_DEFAULT_MAX = 32;", r"export const TP_STEP_MAX = 50;", r"trailMinStep: 3,", r"histLookbackBars: 4320",
+    need = [r"setMinStep: 2,", r"setStepMax: TP_STEP_DEFAULT_MAX,", r"export const TP_STEP_DEFAULT_MAX = 32;", r"export const TP_STEP_MAX = 50;", r"trailMinStep: 3,", r"histLookbackBars: 1920",
             r"setMinPf: GATE_MIN_PF_DEFAULT,", r"export const SL_SET_RATIOS"]
     missing = [p for p in need if not re.search(p, src)]
     # the desk fallback and the engine gate default are one number kept in two files
@@ -223,10 +225,16 @@ def dca_is_off_by_default_with_set_and_axis_options_off_everywhere():
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
     hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
     ok_all, detail = hard, [f"kill_switch_not_thrown={hard}"]
+    # owner 2026-11-14 ("run always all ... the evals decide"): the x02 demo runs DCA behind its own Axis gate (dcaOnAxis), never unconditionally on Sets;
+    # x01 keeps it off
     for path in (X01, X02):
         ov = json.load(open(path))
-        good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
-                and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
+        if path == X02:
+            good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
+                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is True)
+        else:
+            good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
+                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
         ok_all = ok_all and good
         detail.append(f"{os.path.basename(path)}: enabled={ov.get('dcaEnabled')} auto={ov.get('dcaAuto')} onSets={ov.get('dcaOnSets')} onAxis={ov.get('dcaOnAxis')}")
     return ok_all, " ".join(detail)

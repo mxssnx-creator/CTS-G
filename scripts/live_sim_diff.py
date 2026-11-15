@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only: simulated against live results of the settled Set closes in a trades file (see server/pulse/sim_diff.py).
 
-usage: live_sim_diff.py [--trades PATH] [--overlay PATH] [--cost-pct 0.12] [--json]
-Nothing is written and no API is called. PositionCost comes from --cost-pct, else the overlay's positionCostPct, else 0.12 (percent)."""
+usage: live_sim_diff.py [--trades PATH] [--stats PATH] [--overlay PATH] [--cost-pct 0.12] [--json]
+Nothing is written and no API is called. PositionCost comes from --cost-pct, else the stats file's costModel.paperCostPct, else the overlay's positionCostPct, else 0.12 (percent)."""
 from __future__ import annotations
 
 import argparse
@@ -20,9 +20,13 @@ def main() -> int:
     ap.add_argument("--trades", default="/opt/grok-x01-pulse/trades-bingx-x02.jsonl")
     ap.add_argument("--overlay")
     ap.add_argument("--cost-pct", type=float)
+    ap.add_argument("--stats", help="the engine stats file: its costModel.paperCostPct is the cost the replay charges (preferred over the overlay value)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     cost = a.cost_pct
+    if cost is None and a.stats and os.path.exists(a.stats):
+        # the engine's own paper cost: the account's commission rates read from the exchange (taker round trip) plus the slippage allowance, floored by the configured cost
+        cost = ((json.load(open(a.stats)).get("costModel") or {}).get("paperCostPct"))
     if cost is None and a.overlay:
         cost = json.load(open(a.overlay)).get("positionCostPct")
     cost = 0.12 if cost is None else float(cost)

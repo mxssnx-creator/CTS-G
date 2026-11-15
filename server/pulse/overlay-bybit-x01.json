@@ -134,7 +134,7 @@
   "setStepMax": 32,
   "setStepAdapt": false,
   "trailMinStep": 3,
-  "histLookbackBars": 4320,
+  "histLookbackBars": 1920,
   "histRefreshS": 120,
   "exitRevOn": false,
   "exitMinHoldS": 45,
