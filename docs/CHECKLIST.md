@@ -45,6 +45,12 @@ Shipped x02 reference (4 symbols, x02 overlay): executed PF / orders / net **1.0
 - [~] CTS-A-O Tactic catalogue (9,256 names): four-window screen running; survivors go through trade_sim on dev + sealed.
 - [ ] Quarter-hour effect (arXiv 2607.09426) as a time-of-hour indication: not built yet.
 
+## Queued by the owner (2026-11-15, "later")
+- [ ] Indications completely for Normal / Long / Wide strategies: additional indications, ranges, tactics, configs, relations and specialities
+      (after the 15 / 30 min x relation screen on 25 symbols; same rule: four windows where data exists, then trade_sim dev + sealed against the shipped setting).
+- [~] 15 / 30 min + combined votes x 21 time-activity / situation relations (13,728 names), 25 symbols x 3 days: screen running.
+- [~] CTS-A-O trend tactics (`tactic-trend-s` / `-m` 5 min, `tactic-dca-trend-8-atr-1-2-0.25` 1 min; four-window screen PF >= 1.1 everywhere) through trade_sim.
+
 ## Tactics / coordinations (chain10, corrected base)
 - [~] Trailing first (`trailPick` first-any), trailing + fixed together, Real Negative lane first, Base minimal window "newest negative",
       group gate off, Auto floor low 1.2, execution last-10 check, flow pack off, multi pack off.
