@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 0.05,
+  "volumeFactor": 0.15,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
