@@ -51,7 +51,7 @@ subprocess.run(["redis-cli", "-h", "127.0.0.1", "-p", "6379", "HSET", "connectio
 PY
   fi
 fi
-python3 -c "import websocket" 2>/dev/null || python3 -m pip install --quiet --break-system-packages websocket-client
+python3 -c "import websocket, httpx, orjson" 2>/dev/null || python3 -m pip install --quiet --break-system-packages -r "$REPO/requirements.txt"
 PULSE_CONN=bingx-x01 PYTHONUNBUFFERED=1 nohup python3 -B server/pulse/pulse_trader.py >> "$DIR/x01_live.log" 2>&1 &
 echo "x01 engine started (pid $!)"
 watchdog
