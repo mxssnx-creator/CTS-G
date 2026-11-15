@@ -31,6 +31,11 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("relate recovery: requested quantity becomes a confirmed fill", "pulse_trader.py", "            qty = executed_qty(row)  # requested/original quantity is never a fill receipt", "            qty = filled_qty(row, 0)  # wrong: an acknowledgement is not a fill"),
+    ("relate recovery: foreign order scope is accepted", "pulse_trader.py", "            if (not isinstance(row, dict) or self.order_cid(row) != cid\n                    or row.get(\"symbol\") != pos.symbol or row.get(\"positionSide\") != pos.side\n                    or row.get(\"side\") != (\"BUY\" if pos.side == \"LONG\" else \"SELL\")):", "            if not isinstance(row, dict) or self.order_cid(row) != cid:"),
+    ("relate recovery: the entry fee leg is lost on restart", "pulse_trader.py", "            fee, source = self.fill_cost(row, qty, avg, pos.symbol, pos)", "            fee, source = self.fill_cost(row, qty, avg, pos.symbol)"),
+    ("relate recovery: a new hold clock hides the original commission", "venue_fill_fees.py", "            since=min(pos.opened_at,float(leg.get('at',pos.opened_at)))", "            since=pos.opened_at"),
+    ("relate recovery: nonfinite prices become entry evidence", "pulse_trader.py", "            if (not oid or qty is None or qty <= 0 or not math.isfinite(avg) or avg <= 0", "            if (not oid or qty is None or qty <= 0 or avg <= 0"),
     ("axis disjoint: the previous window reads the last window's closes again",
      "coord_engine.py", "            before = list(closed_rows)[:-last_w] if last_w > 0 else list(closed_rows)", "            before = list(closed_rows)"),
     ("axis disjoint: the last window's outcome is never asked",

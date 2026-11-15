@@ -69,7 +69,11 @@ def reconcile_position_fees(pos, reader):
     reported={}
     for oid,leg in legs.items():
         try:
-            fee=leg['fee'] if leg['source']=='reported-fee' else reader(leg,pos.opened_at)
+            # Restart probes can have a newer hold clock than their entry.
+            # Keep the exact order's persisted fee-query boundary independent.
+            since=min(pos.opened_at,float(leg.get('at',pos.opened_at)))
+            if not math.isfinite(since) or since<0:return False
+            fee=leg['fee'] if leg['source']=='reported-fee' else reader(leg,since)
             if fee is None or not math.isfinite(float(fee)):return False
             reported[oid]=float(fee)
         except Exception:
