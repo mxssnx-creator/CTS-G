@@ -326,6 +326,8 @@
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
   "blockGuard": true,
+  "blockAddLastN": 0,
+  "blockAddAutoMin": 15,
   "blockTargetShare": 0.5,
   "blockKinds": [
     "base",

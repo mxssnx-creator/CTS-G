@@ -1505,6 +1505,13 @@ export function trailSlRatiosOf(raw: unknown): number[] {
   return [...ok].sort((a, b) => a - b);
 }
 
+function blockAddAutoSettings(last: unknown, minimum: unknown): Pick<PulseOverlay, "blockAddLastN" | "blockAddAutoMin"> {
+  const n = Math.trunc(num(last, DEFAULT_OVERLAY.blockAddLastN));
+  const blockAddLastN = n > 0 ? Math.max(3, Math.min(100, n)) : 0;
+  const blockAddAutoMin = Math.max(3, Math.min(blockAddLastN || 100, Math.trunc(num(minimum, DEFAULT_OVERLAY.blockAddAutoMin))));
+  return { blockAddLastN, blockAddAutoMin };
+}
+
 export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): PulseOverlay {
   const coord = (cts.coordination_settings ?? cts.coordinationSettings ?? {}) as Record<string, unknown>;
   const trails = arr<string>(cts.strategyBaseTrailingVariants ?? coord.trailingVariants, [
@@ -1532,11 +1539,6 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockPauseSteps: Math.max(0, Math.min(20, Math.round(num(cts.blockPauseSteps, 1)))),
     blockSkipFirst: Math.max(0, Math.min(12, Math.round(num(cts.blockSkipFirst, 1)))),
     blockGuard: bool(cts.blockGuard, true),
-    blockAddLastN: (() => {
-      const lastN = Math.min(100, Math.round(num(cts.blockAddLastN, 0)));
-      return lastN > 0 ? Math.max(3, lastN) : 0;
-    })(),
-    blockAddAutoMin: Math.max(3, Math.min(100, Math.round(num(cts.blockAddAutoMin, 15)))),
     blockTargetShare: Math.max(0, Math.min(1, num(cts.blockTargetShare, 0.5))),
     blockKinds: blockKindsOf(cts.blockKinds),
     blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
@@ -1804,6 +1806,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
+    ...blockAddAutoSettings(live?.blockAddLastN ?? cts.blockAddLastN, live?.blockAddAutoMin ?? cts.blockAddAutoMin),
   };
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
   out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);
@@ -1898,6 +1901,7 @@ export async function fetchCtsSettings(conn = "overall"): Promise<CtsSettings | 
 export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
+    ...blockAddAutoSettings(overlay.blockAddLastN, overlay.blockAddAutoMin),
     relateConfigs: relateConfigs(overlay.relateConfigs),
     relationLanes: relationLanesOf(overlay.relationLanes),
     blockRounds: blockRoundsOf(overlay.blockRounds),

@@ -30,6 +30,17 @@ test("Micro range PF survives loading and saving independently of window-size fl
     { micro: 1.001, short: 2 });
 });
 
+test("Set Block add evaluation uses cumulative defaults and bounds a saved rolling window", () => {
+  const defaults = overlayFromCts(cts());
+  assert.deepEqual([defaults.blockAddLastN, defaults.blockAddAutoMin], [0, 15]);
+  const loaded = overlayFromCts(cts({ blockAddLastN: 30 }), { blockAddLastN: 8, blockAddAutoMin: 12 });
+  assert.deepEqual([loaded.blockAddLastN, loaded.blockAddAutoMin], [8, 8]);
+  const saved = syncOverlayFlags({ ...loaded, blockAddLastN: 2 });
+  assert.deepEqual([saved.blockAddLastN, saved.blockAddAutoMin], [3, 3]);
+  const cycled = overlayFromCts(cts(), saved);
+  assert.deepEqual([cycled.blockAddLastN, cycled.blockAddAutoMin], [3, 3]);
+});
+
 test("SL grids normalize legacy ratios once and empty grids retain the ten defaults", () => {
   const all = Array.from({length:10},(_,i)=>(i+1)/4);
   for (const v of [undefined, [], [NaN, Infinity, "wrong"]]) assert.deepEqual(overlayFromCts(cts({setSlRatios:v})).setSlRatios, all);
