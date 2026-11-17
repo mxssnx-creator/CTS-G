@@ -36,6 +36,18 @@ class SetBlockScopeTests(unittest.TestCase):
         self.assertNotEqual(a[0], same_set_new_symbol[0])  # symbol relation
         self.assertEqual(a[1:], same_set_new_symbol[1:])  # other relations remain within Set
 
+    def test_key_cache_is_bounded_and_preserves_escaped_identities(self):
+        br._scoped_relation_key.cache_clear()
+        cfg = self.cfg()
+        set_id = 'set|with "quotes" and tabs\t'
+        expected = br.relation_keys(cfg, set_id, 'pos', 'LONG', 'BTC-USDT', 'test', 2)
+        self.assertEqual(json.loads(expected[0])[1], set_id)
+        self.assertEqual(br.relation_keys(cfg, set_id, 'pos', 'LONG', 'BTC-USDT', 'test', 2), expected)
+        for i in range(17000):
+            br.relation_keys(cfg, f'set-{i}', 'pos', 'LONG', 'BTC-USDT', 'test', 2)
+        self.assertLessEqual(br._scoped_relation_key.cache_info().currsize, 16384)
+        self.assertEqual(br.relation_keys(cfg, set_id, 'pos', 'LONG', 'BTC-USDT', 'test', 2), expected)
+
     def test_losing_count_does_not_hold_another_count_or_set_after_restart(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "book.json")

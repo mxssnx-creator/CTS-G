@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import re
@@ -252,21 +253,26 @@ def guard_after_close(cfg: BlockCfg, guard: Optional[Dict[str, Any]], executed_p
 
 # ---- relations --------------------------------------------------------------------------------------------------------------------------------------
 
+@lru_cache(maxsize=16384)
+def _scoped_relation_key(set_id: str, lane: str, side: str, part: Tuple[Any, ...]) -> str:
+    """Bound the cache while avoiding repeated JSON encoding on active lanes."""
+    return json.dumps([3, set_id, lane, side, *part], separators=(",", ":"))
+
 def relation_keys(cfg: BlockCfg, set_id: str, lane: str, side: str, symbol: str, pack: str, step: int) -> List[str]:
     """Each relation is contained within the parent Set, lane and direction."""
     out = []
     for r in cfg.relations:
         if r == "symbol":
-            part = [r, symbol]
+            part = (r, symbol)
         elif r == "indication":
-            part = [r, pack]
+            part = (r, pack)
         elif r == "set":
-            part = [r]
+            part = (r,)
         elif r == "step":
-            part = [r, pack, int(step)]
+            part = (r, pack, int(step))
         else:
             continue
-        out.append(json.dumps([3, set_id, lane, side, *part], separators=(",", ":")))
+        out.append(_scoped_relation_key(set_id, lane, side, part))
     return out
 
 
