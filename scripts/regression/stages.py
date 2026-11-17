@@ -688,6 +688,27 @@ def decision_clock_excludes_simultaneous_paper_close():
     return ok, f"decision={at_decision}; paper streams={paper_streams}; displayed={displayed}; after={after}; implicit={no_explicit_clock}; actual close count={live_count}"
 
 
+def owned_execution_windows_survive_earlier_paper_refresh():
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "directionMode": "split", "histKeepLastComplete": False, "realGateN": 1}))
+    long = next(st for st in b.by_idx if st.side > 0)
+    short = next(st for st in b.by_idx if st.side < 0)
+    row = {"t": T0 + 10, "set_id": long.id, "ours": True, "symbol": "S-USDT",
+           "side": "LONG", "lane": "pos", "client_id": "owned", "pnl_pct": -.01}
+    b.on_live_close({**row, "side": "SHORT"})
+    b.on_live_close({**row, "lane": "unrecognized"})
+    b.on_live_close(row)
+    b.on_live_close({**row, "set_id": short.id, "side": "SHORT", "lane": "neg", "pnl_pct": .02})
+    b._score_one(long, now=T0)
+    current = b.execution_stats(long, "pos")
+    prior = b.execution_stats(long, "pos", now=T0)
+    other = b.execution_stats(short, "neg")
+    ok = (b.live_unmatched == 2 and current["n"] == 1 and not current["allow"] and prior["n"] == 0
+          and b.execution_stats(long, "neg")["n"] == 0 and b.execution_stats(short, "pos")["n"] == 0
+          and other["n"] == 1 and other["allow"] and long.score_at == T0)
+    return ok, f"unmatched={b.live_unmatched}, current={current['n'],current['allow']}, prior={prior['n']}, short negative={other['n']}"
+
+
 def replay_decision_clock_excludes_simultaneous_close():
     """A full replay must not retain equal-time or future rows in a decision."""
     b = SetBook()
@@ -867,6 +888,7 @@ CHECKS = [
     ("stages.hold-selection-ignores-expired-candidate-evidence", hold_selection_ignores_expired_candidate_evidence),
     ("stages.context-budget-includes-configured-hold", context_budget_includes_configured_hold),
     ("stages.decision-clock-excludes-simultaneous-paper-close", decision_clock_excludes_simultaneous_paper_close),
+    ("stages.owned-execution-windows-survive-earlier-paper-refresh", owned_execution_windows_survive_earlier_paper_refresh),
     ("stages.replay-clock-excludes-simultaneous-close", replay_decision_clock_excludes_simultaneous_close),
     ("stages.decision-clock-matches-independent-base", decision_clock_matches_independent_base_windows),
     ("stages.replay-and-current-verdict-use-same-pf-rounding", replay_and_current_verdict_use_the_same_pf_rounding),
