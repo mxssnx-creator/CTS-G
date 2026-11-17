@@ -1476,6 +1476,7 @@ class SetState:
     deact_reason: str = ""          # the gate reason of the last evaluation ('' when valid)
     evaluated_at: float = 0.0       # wall time of the last successful evaluation (freshness, live only)
     score_at: float = 0.0           # event-time clock of the last scoring pass
+    live_score_at: float = 0.0      # newest accepted actual close, independent of replay clocks
     score_before: bool = False      # decision-time paper windows exclude closes at this clock
     locked: bool = False
     source_n: int = 0
@@ -3553,8 +3554,9 @@ class SetBook:
         # Stored closes describe the aggregate exchange position. Recover the
         # original Set component on restart when Block/DCA changed its average.
         ref, qty, exit_price = finite(get("base_entry")), finite(get("base_qty")), finite(get("exit"))
-        if sid and ref > 0 and qty > 0 and exit_price > 0 and get("side") in ("LONG", "SHORT"):
-            pct_raw = (exit_price / ref - 1) * (1 if get("side") == "LONG" else -1)
+        side = str(get("side") or "").upper()
+        if sid and ref > 0 and qty > 0 and exit_price > 0 and side in ("LONG", "SHORT"):
+            pct_raw = (exit_price / ref - 1) * (1 if side == "LONG" else -1)
         try:
             pct = float(pct_raw)
         except (TypeError, ValueError, OverflowError):
@@ -3566,6 +3568,11 @@ class SetBook:
         if closed_at <= 0:
             # A close without a time cannot be placed in any causal last-N window.
             self.live_skipped += 1
+            return
+        lane = str(get("lane") or "pos")
+        if lane not in ("pos", "neg") or (st_bound is not None and st_bound.side and side and
+                                             side != ("LONG" if st_bound.side > 0 else "SHORT")):
+            self.live_unmatched += 1
             return
         component_net = get("base_net_pnl_pct") if ref > 0 and qty > 0 else get("net_pnl_pct")
         try:
@@ -3584,13 +3591,13 @@ class SetBook:
         row = {
             "t": closed_at,
             "symbol": str(get("symbol") or ""),
-            "side": str(get("side") or ""),
+            "side": side,
             "pnl_pct": pct,
             "pnl_usdt": finite(get("pnl")),
             "hold_s": finite(get("hold_s")),
             "reason": str(get("reason") or ""),
             "client_id": str(get("client_id") or get("clientId") or ""),
-            "lane": str(get("lane") or "pos"),
+            "lane": lane,
             # Aggregate net cannot be attributed to the base when add-on fills
             # changed its cost basis. Old records without component fees use an
             # explicit configured estimate for that base only.
@@ -3621,6 +3628,7 @@ class SetBook:
             while len(self._live_seen) > LIVE_SEEN_MAX:
                 self._live_seen.pop(next(iter(self._live_seen)))
             st.live.append(row)
+            st.live_score_at = max(st.live_score_at, closed_at)
             # Keep enough recent live closes for the independent 200-order positive and Negative Real windows.
             # Sort first: venue history can be delivered out of order.
             ordered = sorted(st.live, key=lambda r: finite(r.get("t")))
@@ -4584,8 +4592,10 @@ class SetBook:
         fresh assessment. The paper chain keeps running while this gate is closed.
         """
         anchor = finite(now) if now is not None else st.score_at
-        if now is None and self.hist_keep_last_complete:
-            anchor = max(anchor, max((finite(r.get("t")) for r in st.live), default=0.0))
+        if now is None:
+            # A paper refresh can finish at an earlier candle boundary than an
+            # already observed venue close. Keep the live gate on current evidence.
+            anchor = max(anchor, st.live_score_at)
         upper = anchor if anchor > 0 else float("inf")
         effective_lookback = self._evidence_lookback()
         cutoff = upper - effective_lookback * BAR_S if anchor > 0 else float("-inf")
@@ -6288,7 +6298,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # R2: a repeated close (same client id, or none) and a repeated seed add nothing
     n_before = len(sl1.live)
     lv.on_live_close({"set_id": sl1.id, "t": 1_700_000_000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "c1"})
-    row_nocid = {"set_id": sl1.id, "t": 1_700_000_500, "symbol": "M-USDT", "side": "SHORT", "pnl": -0.1, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl"}
+    row_nocid = {"set_id": sl1.id, "t": 1_700_000_500, "symbol": "M-USDT", "side": "LONG", "pnl": -0.1, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl"}
     lv.on_live_close(row_nocid); lv.on_live_close(row_nocid)
     seeded = [{"set_id": sl1.id, "t": 1_700_000_900, "symbol": "N-USDT", "side": "LONG", "pnl": 0.1, "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": "c9"}]
     lv.seed_live(seeded); n_mid = len(sl1.live); lv.seed_live(seeded)
