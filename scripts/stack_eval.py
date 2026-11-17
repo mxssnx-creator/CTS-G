@@ -551,13 +551,13 @@ def main() -> int:
             r = m["r"]
             if order == 1:
                 if cfg.carry:
-                    m["scale"] = max([br.carried_scale(cfg, led(k)["life"]) for k in m["rk"]] or [1.0])
+                    m["scale"] = max([br.relation_scale(cfg, led(k)) for k in m["rk"]] or [1.0])
                 continue
             if order == 2:
                 if not cfg.active(n) or not br.kind_allowed(cfg, m["st"].kind):
                     continue
                 books = [led(k) for k in m["rk"]]
-                if any(int(b["life"].get("pause", 0)) > 0 for b in books):
+                if cfg.carry and any(br.count_life(b, str(n))["pause"] > 0 for b in books):
                     continue
                 if not parent_ok(r, t, coordinator):
                     continue
@@ -571,10 +571,12 @@ def main() -> int:
                 floor = floor_memo[fk][1 if r["lane"] == "neg" else 0]       # the parent's own lane window, as Pulse.set_axis_floor
                 fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
                 held_keys = {k for k in m["rk"] if br.guard_holds(cfg, guards.get(br.guard_key(k, n)))}
-                held = bool(held_keys)
-                execs = [b.get("qualification", b["executed"]).get(str(n)) for b in books]
+                papers = [br.evidence_record(cfg, b, str(n), paper=True) for b in books]
+                execs = [br.evidence_record(cfg, b, str(n), paper=False) for b in books]
                 available_execs = [rec for key, rec in zip(m["rk"], execs) if key not in held_keys]
-                if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], available_execs, floor, fired_ratio):
+                passed = br.count_passes(cfg, n, papers, available_execs, floor, fired_ratio)
+                retry = bool(cfg.last_n) and not passed and br.count_passes(cfg, n, papers, (), floor, fired_ratio)
+                if not passed and not retry:
                     continue
                 lvl = m["hits"][n - 1][2]
                 from set_engine import lane_honors_tp
@@ -585,8 +587,8 @@ def main() -> int:
                     if not br.target_covers_cost(lvl, target, m["side"], cf) or not br.share_allows(cfg, m["entry"], lvl, target, m["side"]):
                         continue
                 net = (m["exit"] - lvl) / lvl * m["side"] - cf
-                if held:
-                    m.setdefault("shadow", {})[n] = net      # in deficit: followed on paper, not sent
+                if held_keys or retry:
+                    m.setdefault("shadow", {})[n] = (net, held_keys)
                 else:
                     m["fired"][n] = net
                 continue
@@ -601,9 +603,12 @@ def main() -> int:
                 adds += 1
                 add_parts[n] = weight * net
                 add_part += add_parts[n]
-            shadow_parts = {n: net * br.base_return_contribution(1.0, m["hits"][n - 1][2], cfg.target_ratio(n), m["entry"])
-                            for n, net in (m.get("shadow") or {}).items()}
+            shadows = m.get("shadow", {})
             for k in m["rk"]:
+                shadow_parts = {
+                    n: br.base_return_contribution(net, m["hits"][n - 1][2], cfg.target_ratio(n), m["entry"])
+                    for n, (net, held_keys) in shadows.items() if k in held_keys
+                }
                 for count in add_parts.keys() | shadow_parts.keys():
                     gk = br.guard_key(k, count)
                     was_held = br.guard_holds(cfg, guards.get(gk))
@@ -616,11 +621,13 @@ def main() -> int:
             for k in m["rk"]:
                 b = led(k)
                 for hn, _now, lvl in m["hits"]:
-                    br.add_obs(b["paper"].setdefault(str(hn), br.new_record()), (m["exit"] / lvl - 1) * m["side"] - cf)
+                    br.add_observation(cfg, b, str(hn), (m["exit"] / lvl - 1) * m["side"] - cf, "paper")
+                for hn, (net, _held_keys) in shadows.items():
+                    br.add_observation(cfg, b, str(hn), net, "shadow")
                 for hn, net in m["fired"].items():
-                    br.add_obs(b["executed"].setdefault(str(hn), br.new_record()), net)
-                    br.add_obs(b.setdefault("qualification", {}).setdefault(str(hn), br.new_record()), net)
+                    br.add_observation(cfg, b, str(hn), net, "executed")
                 b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
+                br.update_count_lives(cfg, b, float(r["net"]), {str(n): v for n, v in add_parts.items()})
         return events, adds, add_nets
 
     if "block2" in parts:

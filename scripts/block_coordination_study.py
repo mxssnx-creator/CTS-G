@@ -207,6 +207,7 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
     for t, order, i, n in ev:
         m, r = meta[i], ps[i]
         if order == 1:
+            m["scale"] = max([br.relation_scale(cfg, led(k)) for k in m["rk"]] or [1.0]) if cfg.carry else 1.0
             continue
         if order == 2:
             if not m["eligible"] or not cfg.active(n):
@@ -215,18 +216,23 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
             if not ok:
                 continue
             books = [led(k) for k in m["rk"]]
-            if any(int(b["life"].get("pause", 0)) > 0 for b in books):
+            if cfg.carry and any(br.count_life(b, str(n))["pause"] > 0 for b in books):
                 continue
             if net_gate and any(float(b["life"].get("net", 0.0)) < 0 for b in books):
                 continue
             fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
             held_keys = {k for k in m["rk"] if br.guard_holds(cfg, guards.get(br.guard_key(k, n)))}
-            held = bool(held_keys)
+            papers = [br.evidence_record(cfg, b, str(n), paper=True) for b in books]
+            execs = [br.evidence_record(cfg, b, str(n), paper=False) for b in books]
             if mode == "any":
-                passed = any(br.count_passes(cfg, n, [b["paper"].get(str(n))], [] if k in held_keys else [b.get("qualification", b["executed"]).get(str(n))], floor, fired_ratio) for k, b in zip(m["rk"], books))
+                passed = any(br.count_passes(cfg, n, [paper], () if k in held_keys else [ex], floor, fired_ratio)
+                             for k, paper, ex in zip(m["rk"], papers, execs))
+                paper_only = any(br.count_passes(cfg, n, [paper], (), floor, fired_ratio) for paper in papers)
             else:
-                passed = br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b.get("qualification", b["executed"]).get(str(n)) for k, b in zip(m["rk"], books) if k not in held_keys], floor, fired_ratio)
-            if not passed:
+                passed = br.count_passes(cfg, n, papers, [ex for k, ex in zip(m["rk"], execs) if k not in held_keys], floor, fired_ratio)
+                paper_only = br.count_passes(cfg, n, papers, (), floor, fired_ratio)
+            retry = bool(cfg.last_n) and not passed and paper_only
+            if not passed and not retry:
                 continue
             lvl = r["entry"] * (1 + r["side"] * lv * cf)
             if r["honor_tp"]:
@@ -238,19 +244,20 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
                 if not br.share_allows(cfg, r["entry"], lvl, target, r["side"]):       # the level at most its share of the way to the target
                     continue
             add_net_ = (r["exit"] - lvl) / lvl * r["side"] - cf
-            if held:
-                m.setdefault("shadow", {})[n] = add_net_          # in deficit: followed on paper, not sent
+            if held_keys or retry:
+                m.setdefault("shadow", {})[n] = (add_net_, held_keys)
             else:
                 m["fired"][n] = add_net_
             continue
         # close: the parent, its adds, then the evidence and the lifecycle
         net = r["net"]
+        scale = m["scale"]
         if net > 0:
             bg += net
-            wg += net
+            wg += net * scale
         elif net < 0:
             bl -= net
-            wl -= net
+            wl -= net * scale
         add_part = 0.0
         add_parts = {}
         for n, add_net in m["fired"].items():
@@ -261,16 +268,18 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
             add_parts[n] = v
             add_part += v
             if v > 0:
-                wg += v
-                ag += v
+                wg += v * scale
+                ag += v * scale
             elif v < 0:
-                wl -= v
-                al -= v
-        shadow_parts = {}
-        for n, add_net in (m.get("shadow") or {}).items():
-            lv = m["hits"][n - 1][2]
-            shadow_parts[n] = add_net * br.base_return_contribution(1.0, r["entry"] * (1 + r["side"] * lv * cf), cfg.target_ratio(n), r["entry"])
+                wl -= v * scale
+                al -= v * scale
+        shadows = m.get("shadow", {})
         for k in m["rk"]:
+            shadow_parts = {
+                n: br.base_return_contribution(add_net, r["entry"] * (1 + r["side"] * m["hits"][n - 1][2] * cf),
+                                               cfg.target_ratio(n), r["entry"])
+                for n, (add_net, held_keys) in shadows.items() if k in held_keys
+            }
             for count in add_parts.keys() | shadow_parts.keys():
                 gk = br.guard_key(k, count)
                 was_held = br.guard_holds(cfg, guards.get(gk))
@@ -279,17 +288,19 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
                     led(k).setdefault("qualification", {})[str(count)] = br.new_record()
         if capture is not None:
             capture.append({"parent": i, "t": t, "without": net,
-                            "with": net + add_part, "adds": len(m["fired"])})
+                            "with": (net + add_part) * scale, "adds": len(m["fired"])})
         highest = max(m["fired"]) if m["fired"] else 0
         for k in m["rk"]:
             b = led(k)
             for hn, _now, lv, _ok, _fl in m["hits"]:
                 lvl = r["entry"] * (1 + r["side"] * lv * cf)
-                br.add_obs(b["paper"].setdefault(str(hn), br.new_record()), (r["exit"] / lvl - 1) * r["side"] - cf)
+                br.add_observation(cfg, b, str(hn), (r["exit"] / lvl - 1) * r["side"] - cf, "paper")
+            for hn, (add_net, _held_keys) in shadows.items():
+                br.add_observation(cfg, b, str(hn), add_net, "shadow")
             for hn, add_net in m["fired"].items():
-                br.add_obs(b["executed"].setdefault(str(hn), br.new_record()), add_net)
-                br.add_obs(b.setdefault("qualification", {}).setdefault(str(hn), br.new_record()), add_net)
+                br.add_observation(cfg, b, str(hn), add_net, "executed")
             b["life"] = br.life_after_close(cfg, b["life"], net + add_part, highest)
+            br.update_count_lives(cfg, b, net, {str(n): v for n, v in add_parts.items()})
     return {"parents": len(ps), "adds": adds, "pfWithout": pf_of(bg, bl), "pfWith": pf_of(wg, wl), "netWithout": 100 * (bg - bl), "netWith": 100 * (wg - wl),
             "addsNet": 100 * (ag - al), "addsPf": pf_of(ag, al), "g": (bg, bl, wg, wl, ag, al)}
 

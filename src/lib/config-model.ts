@@ -255,6 +255,8 @@ export type PulseOverlay = {
   blockSkipFirst: number;
   /** Deficit guard: each Set, relation and count resumes after its paper adds earn back its own executed deficit. */
   blockGuard: boolean;
+  blockAddLastN: number;
+  blockAddAutoMin: number;
   /** A count of a fixed-target parent adds only up to this share of the way to the target (0 = no rule). */
   blockTargetShare: number;
   /** Parent Set types that may receive adds. */
@@ -617,6 +619,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockPauseSteps: 1,
   blockSkipFirst: 1,
   blockGuard: true,
+  blockAddLastN: 0,
+  blockAddAutoMin: 15,
   blockTargetShare: 0.5,
   blockKinds: ["base", "trail"],
   maxOpen: 0,
@@ -946,6 +950,8 @@ export type CtsSettings = {
   blockPauseSteps?: number;
   blockSkipFirst?: number;
   blockGuard?: boolean;
+  blockAddLastN?: number;
+  blockAddAutoMin?: number;
   blockTargetShare?: number;
   blockKinds?: string[];
   blockWindow?: number;
@@ -1526,6 +1532,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockPauseSteps: Math.max(0, Math.min(20, Math.round(num(cts.blockPauseSteps, 1)))),
     blockSkipFirst: Math.max(0, Math.min(12, Math.round(num(cts.blockSkipFirst, 1)))),
     blockGuard: bool(cts.blockGuard, true),
+    blockAddLastN: (() => {
+      const lastN = Math.min(100, Math.round(num(cts.blockAddLastN, 0)));
+      return lastN > 0 ? Math.max(3, lastN) : 0;
+    })(),
+    blockAddAutoMin: Math.max(3, Math.min(100, Math.round(num(cts.blockAddAutoMin, 15)))),
     blockTargetShare: Math.max(0, Math.min(1, num(cts.blockTargetShare, 0.5))),
     blockKinds: blockKindsOf(cts.blockKinds),
     blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),

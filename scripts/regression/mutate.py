@@ -155,7 +155,7 @@ MUTATIONS = [
     ("exec gate: the last check before execution never blocks",
      "set_engine.py", "    r_ok = r_ok and x_ok", "    r_ok = r_ok"),
     ("block guard: adds are sent while the book's executed adds are in deficit",
-     "set_block.py", "            if legacy_holds or held:", "            if False:"),
+     "set_block.py", "            if legacy_holds or held or shadow_retry:", "            if False:"),
     ("block guard: paper adds never earn the deficit back",
      "block_rules.py", "        if out[\"net\"] + out[\"shadow\"] >= 0:", "        if False:"),
     ("block guard: the executed adds' result never reaches the guard",

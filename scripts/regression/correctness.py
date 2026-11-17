@@ -476,9 +476,12 @@ def block_relations_are_independent_and_all_must_agree():
         for _ in range(4):
             br.add_obs(book.ledgers[keys[1]]["paper"].setdefault("1", br.new_record()), 0.01)          # now the step relation too
         both = book.candidate(replace(pos, client_id="b"), 100.15, T0 + 701, cfg, .12, 86400)
-        sym = br.relation_keys(br.clean_cfg({"blockRelations": ["symbol", "indication"]}), "pack:1m:sl1:st4", "pos", "LONG", "X", "pack", 4)
-        expected = [[3, "pack:1m:sl1:st4", "pos", "LONG", "set"], [3, "pack:1m:sl1:st4", "pos", "LONG", "step", "pack", 4],
-                    [3, "pack:1m:sl1:st4", "pos", "LONG", "symbol", "X"], [3, "pack:1m:sl1:st4", "pos", "LONG", "indication", "pack"]]
+        sym_cfg = br.clean_cfg({"blockRelations": ["symbol", "indication"]})
+        sym = br.relation_keys(sym_cfg, "pack:1m:sl1:st4", "pos", "LONG", "X", "pack", 4)
+        expected = [[4, "pack:1m:sl1:st4", "pos", "LONG", book.cfg.policy, "set"],
+                    [4, "pack:1m:sl1:st4", "pos", "LONG", book.cfg.policy, "step", "pack", 4],
+                    [4, "pack:1m:sl1:st4", "pos", "LONG", sym_cfg.policy, "symbol", "X"],
+                    [4, "pack:1m:sl1:st4", "pos", "LONG", sym_cfg.policy, "indication", "pack"]]
         ok = one is None and both is not None and both["group"] == 1 and [json.loads(k) for k in keys + sym] == expected
         return ok, f"one relation proven -> {one and one['group']}; both -> {both and both['group']}; keys {keys + sym}"
 
