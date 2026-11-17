@@ -2922,7 +2922,10 @@ def the_entry_loop_places_the_set_signal_and_not_the_live_score():
     try:
         pt.SYMBOLS = [sym]
         pt.ENTRY_FRESH_S = 61.0                              # the check must not depend on the second of the minute it runs in
-        p.maybe_entries()
+        # Keep the fixture and entry decision on the same completed minute even if the wall clock rolls over.
+        from unittest.mock import patch
+        with patch.object(pt.time, "time", return_value=t_open + 60.5):
+            p.maybe_entries()
     finally:
         pt.SYMBOLS, pt.ENTRY_FRESH_S = old_syms, old_fresh
     want = [(sym, sig[1], None, round(sig[2], 6))]
