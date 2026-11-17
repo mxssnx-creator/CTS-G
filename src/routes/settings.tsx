@@ -1327,7 +1327,7 @@ function SettingsPage() {
           {section === "block" && (
             <Card
               title="Block rounds"
-              hint="A group's positions form blocks of N. A losing block raises the group's next entries by ratio × level of the original volume, until the volume-weighted net since that block is back at zero. Every block count 1–6 runs its own procedure on its own blocks."
+              hint="Each Set and lane forms its own blocks for every selected relation and count. A losing block raises only that procedure's next entries until its weighted net recovers."
             >
               {(() => {
                 const cfg = blockRoundsOf(overlay.blockRounds);
@@ -1340,7 +1340,7 @@ function SettingsPage() {
                       <Num label="Volume multiple ceiling" value={cfg.maxMult} min={1} max={ROUND_MULT_MAX} step={0.25} hint="1 + the raised procedures' ratio × level, never above this" onChange={(maxMult) => update({ maxMult })} />
                       <Toggle label="Auto: every block count decides by its own newest results" on={cfg.auto} onChange={(auto) => update({ auto })} />
                       <Num label="Auto · newest results judged (last N)" value={cfg.autoN} min={1} max={ROUND_AUTO_N_MAX} step={1}
-                        hint="per block count and relation: level × net of every position that opened while one of its procedures stood raised (on paper for a count that does not raise)"
+                        hint="per Set, lane, relation group and count: level × net of positions opened while that procedure was raised, including paper observations"
                         onChange={(autoN) => update({ autoN, autoMin: Math.min(cfg.autoMin, autoN) })} />
                       <Num label="Auto · results needed (minimum)" value={cfg.autoMin} min={1} max={cfg.autoN} step={1}
                         hint="fewer results: the count's manual switch (Raises column) holds" onChange={(autoMin) => update({ autoMin })} />
@@ -1387,8 +1387,7 @@ function SettingsPage() {
                     <BlockRoundsAutoTable stats={stats ?? null} />
                     <p className="mt-3 text-xs opacity-70">
                       Largest multiple of one entry with these settings: ×{blockRoundsMax(cfg).toFixed(2)}. A count that does not raise still forms its blocks and keeps its record.
-                      Shipped (2026-11-15): relation Step, block counts 1 and 2, ratio 1.0, step to level 3 held until the lane's net is back at zero, ceiling ×4, Auto on
-                      (50 symbols, volume-weighted PF 1.669 / 1.152 development / sealed against 1.630 / 1.019 without). A raise weights results; it does not change a per-order PF.
+                      Historical results for the former pooled scope do not establish performance for these independent Set-level procedures. A raise changes monetary exposure and can change monetary PF.
                     </p>
                   </div>
                 );
@@ -2890,18 +2889,21 @@ function IndicationConfigEditor({
   );
 }
 
-type RoundsAutoRow = { relation: string; count: number; raises: boolean; source: string; pf: number; results: number; ratio: number };
+type RoundsAutoRow = { set?: string; lane?: string; relation: string; key?: string; count: number; raises: boolean; source: string; pf: number | null; results: number; ratio: number };
 
 /** The live Auto verdict of every block count (execution.blockRounds.auto from the engine): which counts raise now, on what evidence. */
 function BlockRoundsAutoTable({ stats }: { stats: LiveStats | null }) {
-  const raw = (stats?.execution?.blockRounds as { auto?: RoundsAutoRow[] } | undefined)?.auto;
+  const rounds = stats?.execution?.blockRounds as { auto?: RoundsAutoRow[]; autoTotal?: number; legacyGroups?: number } | undefined;
+  const raw = rounds?.auto;
   if (!Array.isArray(raw) || !raw.length) return <p className="mt-3 font-mono text-[11px] text-muted">Auto verdicts appear once the engine reports them.</p>;
   return (
     <div className="mt-3 overflow-x-auto" data-testid="block-rounds-auto">
-      <table className="w-full min-w-[520px] text-left text-sm">
+      <p className="mb-2 font-mono text-[11px] text-muted">Showing {raw.length} of {rounds?.autoTotal ?? raw.length} Set / lane / relation / count verdicts. Older pooled histories cannot qualify a Set.</p>
+      <table className="w-full min-w-[740px] text-left text-sm">
         <thead className="font-mono text-[11px] text-muted">
           <tr>
-            <th className="pb-2 font-medium">Relation</th>
+            <th className="pb-2 font-medium">Set / lane</th>
+            <th className="pb-2 font-medium">Relation / group</th>
             <th className="pb-2 font-medium">Count</th>
             <th className="pb-2 font-medium">Results</th>
             <th className="pb-2 font-medium">PF of its raises</th>
@@ -2912,11 +2914,12 @@ function BlockRoundsAutoTable({ stats }: { stats: LiveStats | null }) {
         </thead>
         <tbody>
           {raw.map((r) => (
-            <tr key={`${r.relation}-${r.count}`} className="border-t border-border font-mono tabular-nums">
-              <td className="py-1">{r.relation}</td>
+            <tr key={JSON.stringify([r.set,r.lane,r.relation,r.key,r.count])} className="border-t border-border font-mono tabular-nums">
+              <td className="py-1">{r.set ?? "legacy scope"} / {r.lane ?? "—"}</td>
+              <td className="py-1">{r.relation} / {r.key ?? "—"}</td>
               <td className="py-1">{r.count}</td>
               <td className="py-1">{r.results}</td>
-              <td className="py-1">{r.results ? r.pf.toFixed(3) : "—"}</td>
+              <td className="py-1">{r.results && r.pf != null ? r.pf.toFixed(3) : "—"}</td>
               <td className="py-1">{r.source}</td>
               <td className={`py-1 ${r.raises ? "text-fg" : "text-muted"}`}>{r.raises ? "yes" : "no"}</td>
               <td className="py-1">{r.ratio.toFixed(2)}</td>
