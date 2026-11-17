@@ -159,7 +159,7 @@ MUTATIONS = [
     ("block guard: paper adds never earn the deficit back",
      "block_rules.py", "        if out[\"net\"] + out[\"shadow\"] >= 0:", "        if False:"),
     ("block guard: the executed adds' result never reaches the guard",
-     "set_block.py", "self.guards.get(gk), add_parts.get(n, 0.0), shadow_parts.get(n, 0.0))", "self.guards.get(gk), 0.0, shadow_parts.get(n, 0.0))"),
+     "set_block.py", "self.guards.get(gk), add_parts.get(n, 0.0), shadow.get(n, 0.0))", "self.guards.get(gk), 0.0, shadow.get(n, 0.0))"),
     ("block guard: the record is lost at a restart",
      "set_block.py", "self.guards = {str(k): read_guard(g) for k, g in raw_guards.items()}", "self.guards = {}"),
     ("block share: a count adds past its share of the way to the target",

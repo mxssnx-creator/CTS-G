@@ -274,21 +274,10 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
                 wl -= v * scale
                 al -= v * scale
         shadows = m.get("shadow", {})
-        for k in m["rk"]:
-            shadow_parts = {
-                n: br.base_return_contribution(add_net, r["entry"] * (1 + r["side"] * m["hits"][n - 1][2] * cf),
-                                               cfg.target_ratio(n), r["entry"])
-                for n, (add_net, held_keys) in shadows.items() if k in held_keys
-            }
-            for count in add_parts.keys() | shadow_parts.keys():
-                gk = br.guard_key(k, count)
-                was_held = br.guard_holds(cfg, guards.get(gk))
-                guards[gk] = br.guard_after_close(cfg, guards.get(gk), add_parts.get(count, 0.0), shadow_parts.get(count, 0.0))
-                if was_held and not br.guard_holds(cfg, guards[gk]):
-                    led(k).setdefault("qualification", {})[str(count)] = br.new_record()
+        carry_parts = {str(n): v for n, v in add_parts.items()}
         if capture is not None:
-            capture.append({"parent": i, "t": t, "without": net,
-                            "with": (net + add_part) * scale, "adds": len(m["fired"])})
+            capture.append({"parent": i, "t": t, "without": net, "with": (net + add_part) * scale,
+                            "adds": len(m["fired"]), "addParts": {n: v * scale for n, v in add_parts.items()}})
         highest = max(m["fired"]) if m["fired"] else 0
         for k in m["rk"]:
             b = led(k)
@@ -299,8 +288,20 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
                 br.add_observation(cfg, b, str(hn), add_net, "shadow")
             for hn, add_net in m["fired"].items():
                 br.add_observation(cfg, b, str(hn), add_net, "executed")
-            b["life"] = br.life_after_close(cfg, b["life"], net + add_part, highest)
-            br.update_count_lives(cfg, b, net, {str(n): v for n, v in add_parts.items()})
+            if net_gate:
+                b["life"] = br.life_after_close(cfg, b["life"], net + add_part, highest)
+            br.update_count_lives(cfg, b, net, carry_parts)
+            shadow_parts = {
+                n: br.base_return_contribution(add_net, r["entry"] * (1 + r["side"] * m["hits"][n - 1][2] * cf),
+                                               cfg.target_ratio(n), r["entry"])
+                for n, (add_net, held_keys) in shadows.items() if k in held_keys
+            }
+            for count in add_parts.keys() | shadow_parts.keys():
+                gk = br.guard_key(k, count)
+                was_held = br.guard_holds(cfg, guards.get(gk))
+                guards[gk] = br.guard_after_close(cfg, guards.get(gk), add_parts.get(count, 0.0), shadow_parts.get(count, 0.0))
+                if was_held and not br.guard_holds(cfg, guards[gk]):
+                    b.setdefault("qualification", {})[str(count)] = br.new_record()
     return {"parents": len(ps), "adds": adds, "pfWithout": pf_of(bg, bl), "pfWith": pf_of(wg, wl), "netWithout": 100 * (bg - bl), "netWith": 100 * (wg - wl),
             "addsNet": 100 * (ag - al), "addsPf": pf_of(ag, al), "g": (bg, bl, wg, wl, ag, al)}
 

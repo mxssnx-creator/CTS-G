@@ -593,7 +593,6 @@ def main() -> int:
                     m["fired"][n] = net
                 continue
             # close
-            add_part = 0.0
             add_parts = {}
             for n, net in m["fired"].items():
                 ratio = cfg.target_ratio(n)
@@ -602,9 +601,18 @@ def main() -> int:
                 add_nets.append(net * weight * m["scale"])
                 adds += 1
                 add_parts[n] = weight * net
-                add_part += add_parts[n]
             shadows = m.get("shadow", {})
+            events.append((float(r["t"]), float(r["net"]), m["scale"]))
+            carry_parts = {str(n): v for n, v in add_parts.items()}
             for k in m["rk"]:
+                b = led(k)
+                for hn, _now, lvl in m["hits"]:
+                    br.add_observation(cfg, b, str(hn), (m["exit"] / lvl - 1) * m["side"] - cf, "paper")
+                for hn, (net, _held_keys) in shadows.items():
+                    br.add_observation(cfg, b, str(hn), net, "shadow")
+                for hn, net in m["fired"].items():
+                    br.add_observation(cfg, b, str(hn), net, "executed")
+                br.update_count_lives(cfg, b, float(r["net"]), carry_parts)
                 shadow_parts = {
                     n: br.base_return_contribution(net, m["hits"][n - 1][2], cfg.target_ratio(n), m["entry"])
                     for n, (net, held_keys) in shadows.items() if k in held_keys
@@ -614,20 +622,7 @@ def main() -> int:
                     was_held = br.guard_holds(cfg, guards.get(gk))
                     guards[gk] = br.guard_after_close(cfg, guards.get(gk), add_parts.get(count, 0.0), shadow_parts.get(count, 0.0))
                     if was_held and not br.guard_holds(cfg, guards[gk]):
-                        led(k).setdefault("qualification", {})[str(count)] = br.new_record()
-            events.append((float(r["t"]), float(r["net"]), m["scale"]))
-            parent_net = float(r["net"]) + add_part
-            highest = max(m["fired"]) if m["fired"] else 0
-            for k in m["rk"]:
-                b = led(k)
-                for hn, _now, lvl in m["hits"]:
-                    br.add_observation(cfg, b, str(hn), (m["exit"] / lvl - 1) * m["side"] - cf, "paper")
-                for hn, (net, _held_keys) in shadows.items():
-                    br.add_observation(cfg, b, str(hn), net, "shadow")
-                for hn, net in m["fired"].items():
-                    br.add_observation(cfg, b, str(hn), net, "executed")
-                b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
-                br.update_count_lives(cfg, b, float(r["net"]), {str(n): v for n, v in add_parts.items()})
+                        b.setdefault("qualification", {})[str(count)] = br.new_record()
         return events, adds, add_nets
 
     if "block2" in parts:
