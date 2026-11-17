@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {blockPolicies,blockPrefix,evaluateBlocks,blockPolicyKey,DEFAULT_BLOCK_POLICY,LONG_COUNTS,SHORT_COUNTS,MINIMAL_COUNTS} from './blocks.ts';
+import {blockPolicies,blockPrefix,blockWindow,evaluateBlocks,blockPolicyKey,DEFAULT_BLOCK_POLICY,LONG_COUNTS,SHORT_COUNTS,MINIMAL_COUNTS} from './blocks.ts';
 test('20/10/3 uses 33 disjoint closes and a negative tail cannot contaminate the long PF',()=>{
   const v=[-1,-1,-1,...Array(10).fill(-2),...Array(20).fill(3)];
   const p={...DEFAULT_BLOCK_POLICY,shortPolarity:'negative' as const,minimalPolarity:'negative' as const};
@@ -36,4 +36,20 @@ test('zero, unknown, insufficient and signed alternatives remain separate; sizin
   const values=Array.from({length:33},(_,i)=>i%4===0?-1:2);
   const a=evaluateBlocks(blockPrefix(values),p,1.1),b=evaluateBlocks(blockPrefix(values.map(x=>x*3)),p,1.1);
   assert.equal(a.long.pf,b.long.pf);assert.equal(a.state,b.state);
+});
+test('disjoint windows retain small returns after much larger earlier gains and losses',()=>{
+  const losing=[-0.1,1e-18,-2e-18,1e-18];
+  const win=blockWindow(blockPrefix(losing),1,2,1.1);
+  assert.equal(win.gp,1e-18);assert.equal(win.gl,2e-18);assert.equal(win.pf,0.5);assert.equal(win.state,'failed');
+  const policy={long:1,short:2,minimal:1,shortPolarity:'positive' as const,minimalPolarity:'negative' as const};
+  assert.equal(evaluateBlocks(blockPrefix(losing),policy,1.1).state,'failed');
+
+  const gaining=[0.1,2e-18,-1e-18,1e-18];
+  const gain=blockWindow(blockPrefix(gaining),1,2,1.1);
+  assert.equal(gain.gp,2e-18);assert.equal(gain.gl,1e-18);assert.equal(gain.pf,2);assert.equal(gain.state,'qualified');
+  assert.equal(evaluateBlocks(blockPrefix(gaining),{...policy,minimalPolarity:'positive'},1.1).state,'qualified');
+
+  const almostFlat=blockWindow(blockPrefix([0.1,1e-18,-0.1]),0,3,1.1,'positive',true);
+  assert.equal(almostFlat.net,1e-18);assert.equal(almostFlat.state,'qualified');
+  assert.equal(blockWindow(blockPrefix([-0.1,1e-18,null]),1,2,1.1).state,'unknown');
 });
