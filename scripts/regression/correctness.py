@@ -197,23 +197,23 @@ def block_lifecycle_matches_cash_and_actual_fees():
                 b.observe(pos, add_px, T0 + 10, cfg, .12, 86400)
                 # Keep the cumulative life negative to inspect the exact contribution.
                 led = b.ledger(b.rel_keys(b.cfg, pos)[0], create=True)
-                led["life"] = {"level": 1, "net": -.1, "pause": 0}
+                led["carryByCount"] = {"1": {"level": 1, "net": -.1, "pause": 0}}
                 b.close(pos, exit_px, T0 + 60, cfg, .12)
                 sd = 1 if side == "LONG" else -1
                 gross = ((exit_px - 100) + (exit_px - add_px)) * sd
                 fees = .09 if actual else .0012 * (100 + add_px)
                 expected = -.1 + (gross - fees) / 100
-                got = led["life"]["net"]
+                got = br.count_life(led, "1")["net"]
                 snap = json.dumps(b.ledgers, sort_keys=True)
                 b.close(pos, exit_px, T0 + 61, cfg, .12)
                 outcomes.append(abs(got - expected) < 1e-12 and snap == json.dumps(b.ledgers, sort_keys=True))
     # Without an existing deficit the LONG modeled result is still a loss, not recovery.
     with tempfile.TemporaryDirectory() as d:
-        b = SetBlockBook(os.path.join(d, "b.json")); b.cfg = br.clean_cfg({"blockRelations": ["set"], "blockCarry": True})
+        b = SetBlockBook(os.path.join(d, "b.json")); b.cfg = br.clean_cfg({"blockRelations": ["set"], "blockCarry": True, "blockSkipFirst": 0})
         pos = _parent(); pos.qty = 2; pos.block_fills = [{"group": 1, "qty": 1., "price": 104.}]
         b.observe(pos, 104, T0 + 10, _block_cfg(), .12, 86400)
         b.close(pos, 102.1, T0 + 60, _block_cfg(), .12)
-        life = b.ledgers[b.rel_keys(b.cfg, pos)[0]]["life"]
+        life = br.count_life(b.ledgers[b.rel_keys(b.cfg, pos)[0]], "1")
         outcomes.append(life["level"] == 1 and life["net"] < 0 and life["pause"] == 0)
     return all(outcomes), f"cash/fee oracle LONG/SHORT modeled/actual and false recovery={outcomes}"
 
@@ -228,7 +228,7 @@ def block_unscored_close_does_not_change_evidence_or_lifecycle():
             pos, cfg = _parent(), _block_cfg()
             b.observe(pos, 101, T0 + 10, cfg, .12, 86400)
             led = b.ledger(b.rel_keys(b.cfg, pos)[0], create=True)
-            led["life"] = {"level": 1, "net": -.01, "pause": 2}
+            led["carryByCount"] = {"1": {"level": 1, "net": -.01, "pause": 2}}
             before = json.dumps(b.ledgers, sort_keys=True)
             b.close(pos, price, T0 + 60, cfg, .12, score=score)
             results.append(before == json.dumps(b.ledgers, sort_keys=True) and not b.parents[b.key(pos)]["parent"])
@@ -390,9 +390,8 @@ def block_engine_matches_a_plain_reading_of_the_rules():
 
 
 def block_carry_sizes_the_next_parent_of_the_relation():
-    """With blockCarry on, a parent that fired count 2 and closed at a net loss raises its relation's level: the NEXT parent of that Set opens at V0 x (1 + r1 +
-    r2) (SetBlockBook.entry_scale, used by Pulse.place), another Set at 1.0, carry off at 1.0; after a parent whose net brings the relation back to or above zero
-    the scale returns to 1.0 and the relation pauses (no add) for `blockPauseSteps` parents."""
+    """A loss with counts 1 and 2 filled raises the next parent of that Set by both ratios.
+    Counts 1 and 2 pause after each deficit recovers. Count 3 stays independent."""
     import block_rules as br
     out = {}
     for carry in (True, False):
@@ -414,9 +413,10 @@ def block_carry_sizes_the_next_parent_of_the_relation():
             nxt = _parent(2)
             book.observe(nxt, 100.4, nxt.opened_at + 10, blk, .12, 86400)
             book.candidate(nxt, 100.4, nxt.opened_at + 11, blk, .12, 86400)
-            paused = max(int(led["life"].get("pause", 0)) for led in book.ledgers.values())    # the relation's pause counter (parents left)
+            ledger = book.ledger(book.rel_keys(book.cfg, pos)[0])
+            paused = tuple(br.count_life(ledger, str(n))["pause"] for n in range(1, 4))
             out[carry] = (lost, back, paused)
-    ok = out[True] == ((1.7, 1.0), 1.0, 1) and out[False] == ((1.0, 1.0), 1.0, 0)
+    ok = out[True] == ((1.7, 1.0), 1.0, (1, 1, 0)) and out[False] == ((1.0, 1.0), 1.0, (0, 0, 0))
     return ok, f"carry on: (scale after a loss, other Set), back at zero, paused {out[True]}; carry off {out[False]}"
 
 
@@ -476,9 +476,12 @@ def block_relations_are_independent_and_all_must_agree():
         for _ in range(4):
             br.add_obs(book.ledgers[keys[1]]["paper"].setdefault("1", br.new_record()), 0.01)          # now the step relation too
         both = book.candidate(replace(pos, client_id="b"), 100.15, T0 + 701, cfg, .12, 86400)
-        sym = br.relation_keys(br.clean_cfg({"blockRelations": ["symbol", "indication"]}), "pack:1m:sl1:st4", "pos", "LONG", "X", "pack", 4)
-        expected = [[3, "pack:1m:sl1:st4", "pos", "LONG", "set"], [3, "pack:1m:sl1:st4", "pos", "LONG", "step", "pack", 4],
-                    [3, "pack:1m:sl1:st4", "pos", "LONG", "symbol", "X"], [3, "pack:1m:sl1:st4", "pos", "LONG", "indication", "pack"]]
+        sym_cfg = br.clean_cfg({"blockRelations": ["symbol", "indication"]})
+        sym = br.relation_keys(sym_cfg, "pack:1m:sl1:st4", "pos", "LONG", "X", "pack", 4)
+        expected = [[4, "pack:1m:sl1:st4", "pos", "LONG", book.cfg.policy, "set"],
+                    [4, "pack:1m:sl1:st4", "pos", "LONG", book.cfg.policy, "step", "pack", 4],
+                    [4, "pack:1m:sl1:st4", "pos", "LONG", sym_cfg.policy, "symbol", "X"],
+                    [4, "pack:1m:sl1:st4", "pos", "LONG", sym_cfg.policy, "indication", "pack"]]
         ok = one is None and both is not None and both["group"] == 1 and [json.loads(k) for k in keys + sym] == expected
         return ok, f"one relation proven -> {one and one['group']}; both -> {both and both['group']}; keys {keys + sym}"
 

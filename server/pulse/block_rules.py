@@ -2,8 +2,8 @@
 
 Owner 2026-11-03 ("make Block fully work ... dont use windows ... each block count independent ... Shared, Additive"):
 
-- No window. A relation's evidence for count n is the CUMULATIVE record of every observation since the book started: {obs, gains, losses} of the
-  observations' net results (one PositionCost each). PF = gains / losses (99 with gains and no loss, 1.0 neutral when every result is exactly zero, 0 empty).
+- Evidence for count n can be cumulative or an optional rolling last-N evaluated after costs. PF = gains / losses
+  (99 with gains and no loss, 1.0 neutral when every result is exactly zero, 0 empty).
 - Each block COUNT n (1..N) is independent: its own trigger step (in PositionCosts in the parent's favour, measured from the previous count's level: steps
   2 + 2 + 2 = three counts at 2, 4 and 6 PositionCosts), its own volume ratio (0.1 .. 1.0 of the parent's ORIGINAL volume V0), its own evidence record and its
   own on / off. One count's record never moves another's.
@@ -12,9 +12,8 @@ Owner 2026-11-03 ("make Block fully work ... dont use windows ... each block cou
 - A count adds only when every enabled RELATION agrees: every relation is scoped to the Set, lane and direction and is independent of the others -
   "symbol" (the symbol and side), "indication" (the pack, lane and side), "set" (the strategy configuration: Set, lane, side; the ordinary Block on Main /
   Real Set parents) and "step" (the pack, the TP step, lane and side; the overall Block at stage Real). Each relation holds its own ledgers and lifecycle.
-- Lifecycle per relation (opt-in carry): a parent that closes net negative keeps the highest count it fired as the relation's `level` (the next parent is sized
-  at V0 x (1 + the ratios up to that level)); when the relation's net is back at or above zero the level resets and the relation pauses `pause_steps` parents
-  before it starts again. `skip_first` counts are never added (they still collect evidence). Without carry nothing is inherited between parents.
+- Carry (opt-in) keeps separate recovery and pause state for each count. A losing parent with an actual count add may start carry for that count.
+  Recovery uses the base result plus only that count's cash contribution. `skip_first` counts still collect evidence and never add.
 
 Owner 2026-11-11 ("make Block ... working with high PF as without"; measured on seven windows, docs/verification/block-coordinations-20261111.md): an add's
 result follows its parent's, so no evidence rule made the adds pay out of sample. Three rules keep Block from costing what it cannot earn; each only ever
@@ -31,6 +30,8 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from functools import cached_property
+from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import re
@@ -64,6 +65,28 @@ class BlockCfg:
     guard: bool = False                 # deficit guard on the book's own executed adds (blockGuard)
     target_share: float = 0.0           # largest share of the way to a fixed target a count may add at (blockTargetShare; 0 = no rule)
     kinds: Tuple[str, ...] = ()         # parent Set types that may receive adds (blockKinds; empty = every type)
+    last_n: int = 0                    # zero preserves cumulative qualification
+    auto_min: int = 15
+
+    def settings(self) -> Dict[str, Any]:
+        return {
+            "blockCounts": [dict(c) for c in self.counts],
+            "blockStackType": self.stack_type, "blockSharedTotal": self.shared_total,
+            "blockMinObservations": self.min_obs, "blockProfitFactorRatio": self.pf_ratio,
+            "blockRelations": list(self.relations), "blockCarry": self.carry,
+            "blockPauseSteps": self.pause_steps, "blockSkipFirst": self.skip_first,
+            "blockGuard": self.guard, "blockTargetShare": self.target_share, "blockKinds": list(self.kinds),
+            "blockAddLastN": self.last_n, "blockAddAutoMin": self.auto_min,
+        }
+
+    @cached_property
+    def policy(self) -> str:
+        """Identity for the loaded settings. A settings reload constructs a new BlockCfg."""
+        settings = self.settings()
+        settings["blockRelations"] = sorted(self.relations)
+        if not self.last_n:
+            settings.pop("blockAddAutoMin")
+        return sha256(json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]
 
     def levels(self) -> List[float]:
         """The cumulative trigger of every count in PositionCosts (the sum of the steps up to it)."""
@@ -122,11 +145,14 @@ def clean_cfg(raw: Any = None, **legacy: Any) -> BlockCfg:
     kinds = tuple(k for k in KINDS if k in {str(x).lower() for x in raw_kinds}) if isinstance(raw_kinds, (list, tuple)) else ()
     if len(kinds) == len(KINDS):
         kinds = ()                      # every type = no rule
+    last_n = int(num("blockAddLastN", 0, 0, 100))
+    last_n = max(3, last_n) if last_n else 0
     return BlockCfg(counts=counts, stack_type=st if st in STACK_TYPES else "additive", shared_total=round(num("blockSharedTotal", 1.0, 0.1, 3.0), 4),
                     min_obs=int(num("blockMinObservations", 1, 1, 200)), pf_ratio=num("blockProfitFactorRatio", 0.8, PF_RATIO_MIN, PF_RATIO_MAX),
                     relations=rel, carry=bool(ov.get("blockCarry", False)), pause_steps=int(num("blockPauseSteps", 1, 0, 20)),
                     skip_first=int(num("blockSkipFirst", 1, 0, COUNTS_MAX)),
-                    guard=ov.get("blockGuard") is True, target_share=round(num("blockTargetShare", 0.0, 0.0, 1.0), 4), kinds=kinds)
+                    guard=ov.get("blockGuard") is True, target_share=round(num("blockTargetShare", 0.0, 0.0, 1.0), 4), kinds=kinds,
+                    last_n=last_n, auto_min=int(num("blockAddAutoMin", min(15, last_n or 100), 3, last_n or 100)))
 
 
 # ---- evidence ---------------------------------------------------------------------------------------------------------------------------------------
@@ -185,15 +211,42 @@ def count_passes(cfg: BlockCfg, n: int, records: Iterable[Optional[Sequence[floa
     """Count n may add when EVERY relation's paper record has at least min_obs observations at a PF >= the threshold, and no relation's executed record
     (when it has min_obs adds) is under it."""
     thr = threshold(cfg, floor, fired_ratio + cfg.target_ratio(n))
+    minimum = cfg.auto_min if cfg.last_n else cfg.min_obs
     seen = False
     for rec in records:
         seen = True
-        if rec is None or int(rec[0]) < cfg.min_obs or record_pf(rec) + 1e-9 < thr:
+        if rec is None or int(rec[0]) < minimum or not all(math.isfinite(v) for v in rec) or record_pf(rec) + 1e-9 < thr:
             return False
     for rec in executed:
-        if rec is not None and int(rec[0]) >= cfg.min_obs and record_pf(rec) + 1e-9 < thr:
+        if rec is not None and (not all(math.isfinite(v) for v in rec) or (int(rec[0]) >= minimum and record_pf(rec) + 1e-9 < thr)):
             return False
     return seen
+
+
+def add_observation(cfg: BlockCfg, book: Dict, count: str, net: Optional[float], source: str) -> None:
+    """Keep actual lifetime results apart from rolling add decisions and price probes."""
+    known = net is not None and math.isfinite(net)
+    if known and source in ("paper", "executed"):
+        add_obs(book[source].setdefault(count, new_record()), net)
+    if known and source == "executed":
+        add_obs(book.setdefault("qualification", {}).setdefault(count, new_record()), net)
+    if cfg.last_n:
+        recent = "paperRecent" if source == "paper" else "decisionRecent"
+        tape = book.setdefault(recent, {}).setdefault(count, [])
+        tape.append(net if known else None)
+        del tape[:-cfg.last_n]
+
+
+def evidence_record(cfg: BlockCfg, book: Dict, count: str, paper: bool) -> Optional[List[float]]:
+    if not cfg.last_n:
+        return book["paper"].get(count) if paper else book.get("qualification", book["executed"]).get(count)
+    tape = book.get("paperRecent" if paper else "decisionRecent", {}).get(count, ())
+    if any(net is None for net in tape):
+        return [len(tape), float("nan"), float("nan")]
+    record = new_record()
+    for net in tape:
+        add_obs(record, net)
+    return record
 
 
 # ---- rules that only remove adds: parent type, share of the way to the target, deficit guard ------------------------------------------------------------
@@ -235,8 +288,7 @@ def guard_holds(cfg: BlockCfg, guard: Optional[Dict[str, Any]]) -> bool:
 
 def guard_after_close(cfg: BlockCfg, guard: Optional[Dict[str, Any]], executed_part: float, shadow_part: float) -> Dict[str, float]:
     """The guard after a parent's close: its executed adds' net joins `net`, its paper adds' net (the adds held back while in deficit) joins `shadow`; once
-    the paper adds have earned the deficit back both restart at zero and adding resumes. The record is kept with the guard off too (switching it on later
-    starts from what the adds really did); unreadable parts change nothing."""
+    the paper adds have earned the deficit back both restart at zero and adding resumes. Unreadable parts change nothing."""
     out = {"net": float((guard or {}).get("net", 0.0)), "shadow": float((guard or {}).get("shadow", 0.0))}
     if math.isfinite(executed_part):
         out["net"] += executed_part
@@ -266,13 +318,47 @@ def relation_keys(cfg: BlockCfg, set_id: str, lane: str, side: str, symbol: str,
             part = [r, pack, int(step)]
         else:
             continue
-        out.append(json.dumps([3, set_id, lane, side, *part], separators=(",", ":")))
+        out.append(json.dumps([4, set_id, lane, side, cfg.policy, *part], separators=(",", ":")))
     return out
 
 
 def guard_key(relation_key: str, count: int) -> str:
     """A deficit belongs to one exact relation and one add count."""
     return json.dumps([relation_key, int(count)], separators=(",", ":"))
+
+
+def count_life(book: Dict, count: str) -> Dict:
+    return book.get("carryByCount", {}).get(count) or new_life()
+
+
+def update_count_lives(cfg: BlockCfg, book: Dict, base_net: float, add_parts: Dict[str, float]) -> None:
+    """Each carry is earned back against base plus that count's own fills."""
+    if not cfg.carry:
+        return
+    lives = book.setdefault("carryByCount", {})
+    for n in range(1, len(cfg.counts) + 1):
+        if not cfg.active(n):
+            continue
+        count = str(n)
+        own = base_net + add_parts.get(count, 0.0)
+        life = lives.get(count)
+        if life is None:
+            if count in add_parts and own < 0:
+                lives[count] = {"level": 1, "net": own, "pause": 0}
+            continue
+        if life["pause"] > 0:
+            life["pause"] -= 1
+        elif life["level"] > 0:
+            life["net"] += own
+            if life["net"] >= 0:
+                life.update(level=0, net=0.0, pause=cfg.pause_steps)
+        if life["level"] == 0 and life["pause"] == 0:
+            lives.pop(count)
+
+
+def relation_scale(cfg: BlockCfg, book: Dict) -> float:
+    return 1.0 + sum(cfg.target_ratio(n) for n in range(1, len(cfg.counts) + 1)
+                     if cfg.active(n) and count_life(book, str(n))["level"] > 0)
 
 
 # ---- lifecycle --------------------------------------------------------------------------------------------------------------------------------------
