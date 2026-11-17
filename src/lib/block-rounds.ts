@@ -18,7 +18,20 @@ export const ROUND_LEVEL_MAX = 6;
 export const ROUND_PAUSE_MAX = 6;
 export const ROUND_MULT_MAX = 5;
 export type RoundCount = { on: boolean; ratio: number; step: boolean; maxLevel: number; pause: number };
-export type BlockRoundsConfig = { enabled: boolean; relations: RoundRelation[]; maxMult: number; counts: Record<string, RoundCount> };
+export type BlockRoundsConfig = {
+  enabled: boolean;
+  relations: RoundRelation[];
+  maxMult: number;
+  /** Auto (owner 2026-11-15): every block count of every relation raises while the PF of its newest autoN raise results is at least autoPf;
+   * with fewer than autoMin results its manual switch holds. A count Auto switches on without a ratio of its own raises by autoRatio. */
+  auto: boolean;
+  autoN: number;
+  autoMin: number;
+  autoPf: number;
+  autoRatio: number;
+  counts: Record<string, RoundCount>;
+};
+export const ROUND_AUTO_N_MAX = 200;
 
 const OFF: RoundCount = { on: false, ratio: 0, step: false, maxLevel: 1, pause: 0 };
 /** The desk default = what the shipped overlays carry: the one procedure that measured at or above "without" on all nine windows
@@ -26,8 +39,20 @@ const OFF: RoundCount = { on: false, ratio: 0, step: false, maxLevel: 1, pause: 
 export const DEFAULT_BLOCK_ROUNDS: BlockRoundsConfig = {
   enabled: true,
   relations: ["step"],
-  maxMult: 3,
-  counts: { "1": { ...OFF }, "2": { ...OFF }, "3": { ...OFF }, "4": { ...OFF }, "5": { on: true, ratio: 1, step: true, maxLevel: 2, pause: 0 }, "6": { ...OFF } },
+  maxMult: 4,
+  auto: true,
+  autoN: 30,
+  autoMin: 15,
+  autoPf: 1,
+  autoRatio: 1,
+  counts: {
+    "1": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 },
+    "2": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 },
+    "3": { ...OFF },
+    "4": { ...OFF },
+    "5": { ...OFF },
+    "6": { ...OFF },
+  },
 };
 
 function bounded(v: unknown, lo: number, hi: number, fallback: number): number {
@@ -55,7 +80,18 @@ export function blockRoundsOf(raw: unknown): BlockRoundsConfig {
       };
     } else counts[String(n)] = { ...OFF };
   }
-  return { enabled: r.enabled === true, relations: picked.length ? picked : ["step"], maxMult: bounded(r.maxMult, 1, ROUND_MULT_MAX, 2), counts };
+  const autoN = Math.trunc(bounded(r.autoN, 1, ROUND_AUTO_N_MAX, 30));
+  return {
+    enabled: r.enabled === true,
+    relations: picked.length ? picked : ["step"],
+    maxMult: bounded(r.maxMult, 1, ROUND_MULT_MAX, 2),
+    auto: r.auto === true,
+    autoN,
+    autoMin: Math.min(autoN, Math.trunc(bounded(r.autoMin, 1, ROUND_AUTO_N_MAX, 15))),
+    autoPf: bounded(r.autoPf, 0.5, 3, 1),
+    autoRatio: bounded(r.autoRatio, 0.05, ROUND_RATIO_MAX, 1),
+    counts,
+  };
 }
 
 /** The largest multiple one entry can get: 1 + every switched-on count at its top level, for every selected relation, under the ceiling. */
@@ -64,7 +100,9 @@ export function blockRoundsMax(cfg: BlockRoundsConfig): number {
   let add = 0;
   for (const n of ROUND_COUNTS) {
     const c = cfg.counts[String(n)];
-    if (c?.on && c.ratio > 0) add += c.ratio * (c.step ? c.maxLevel : 1);
+    // with Auto any count may raise (its own ratio, else the Auto ratio)
+    const ratio = c?.ratio && c.ratio > 0 ? c.ratio : cfg.auto ? cfg.autoRatio : 0;
+    if (c && (c.on || cfg.auto) && ratio > 0) add += ratio * (c.step ? c.maxLevel : 1);
   }
   return Math.min(cfg.maxMult, 1 + add * cfg.relations.length);
 }

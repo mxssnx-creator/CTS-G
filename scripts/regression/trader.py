@@ -849,7 +849,8 @@ def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
             snap = p.rounds.snapshot()
             out["counts"] = {r["count"]: (r["groups"], r["blocks"], r["raises"], r["recovered"]) for r in snap["byCount"]}
             p.close_pos(pos5, 99.0, "test")
-            g3 = p.rounds.groups.get(p.rounds.gid("step", "indications|15|pos|L", 3)) or {}
+            g3_key = block_rounds.keys_of(syms[4], 1, "indications", "base", 15, "pos", st.id)["step"]
+            g3 = p.rounds.groups.get(p.rounds.gid("step", g3_key, 3)) or {}
             out["count 3 (off, its own blocks) level"] = g3.get("level")
             u, uapi = make(td, "unscored")                                     # a close made while the engine was down is recorded and teaches nothing
             u.rounds.cfg = block_rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "counts": {"1": {"on": True, "ratio": 1.0}}})
@@ -871,6 +872,7 @@ def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
             _n, gpos3 = enter(u, uapi, syms[4])
             os.remove(pt.OPEN_PATH)                                             # a restart whose book no longer holds the position
             u2, _a2 = make(td, "unscored")
+            u2.rounds.cfg = u.rounds.cfg
             out["restart without the position"] = (len(u.rounds.members), len(u2.rounds.members), len(u2.rounds.groups[u2.rounds.gid("step", ukeys["step"], 1)]["open"]))
             q, _api = make(td, "off")
             notional, pos = enter(q, _api, syms[0])
@@ -2565,6 +2567,10 @@ def _signal_book():
     # the shipped x01 now runs every signal pack, so some pack signals on nearly every bar of this synthetic trend and the "quiet bar" half of the check disappears; the check
     # pins the packs it was written for (the signal transport is the same for every pack)
     ov["stratReversion"] = ov["stratFlow"] = ov["stratMulti"] = ov["stratTrend"] = False
+    # the signal packs (stratSignals, shipped on 2026-11-14) signal on this trend too; the check pins the packs it was written for
+    ov["stratSignals"] = False
+    # the Exit order type (exitSets, shipped off 2026-11-15): this check needs one Exit Set to compare with a base Set's TP
+    ov["exitSets"], ov["exitSetsByPack"] = True, {}
     b.load(ov)
     return b, se
 
@@ -3223,7 +3229,10 @@ def the_side_aware_group_gate_judges_long_and_short_groups_apart():
     default_book = SetBook()
     default_book.load({"groupGate": True})
     src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
-    wired = src.count("group_gate_side") >= 4
+    import inspect as _insp
+    import set_engine as _se
+    # the live paths read the side through set_engine.exec_gates_allow (shared with the config gate, 2026-11-15) and record it in _exec_note
+    wired = (src.count("group_gate_side") >= 1 and "exec_gates_allow(" in src and "group_gate_side" in _insp.getsource(_se.exec_gates_allow))
     # pooled scope (groupGateScope "side", CTS-A-O's engine direction acceptance): one record per direction, whatever the pack, kind, range or lane
     pooled_rec = {set_group(long_id, "pos", "pooled"): list(losses)}
     other_long, other_short = "flow:L:1m:tr0.80:0.70", "flow:S:1m:tr0.80:0.70"
@@ -3547,12 +3556,257 @@ def alternate_lane_keeps_the_executed_group_gate():
     return ok, f"healthy alternative={allowed[0] is rows[2]}, all losing denied={denied[0] is None}, gate off={disabled[0] is rows[1]}"
 
 
+def trailing_sets_have_no_time_exit_unless_asked():
+    from common import overlay
+    """trailTimeExit (owner 2026-11-15 "for trailing no max hold time use"): off, a trailing Set's lane has no time exit -- in the replay (its tape holds no
+    "time" exit on a market that never arms the trail nor reaches the stop) and live (a trailing position held past the hold stays open, also one opened
+    before the switch); base and Exit Sets keep theirs. On (the engine default, fixtures) every lane keeps the earlier time exit."""
+    import set_engine as se
+    from common import synth_bars, T0
+    tapes = {}
+    for flag in (True, False):
+        b = se.SetBook()
+        b.load(overlay(**{"stratGeneral": True, "stratIndications": False, "setStepMax": 12, "trailTimeExit": flag, "timeStopS": 1800}))
+        b.bars["Q-USDT"] = synth_bars(3, 900, drift=0.0, vol=0.0004)
+        b.bar_t["Q-USDT"] = T0 - 60
+        b.replay_all(now=T0)
+        reasons = {"trail": set(), "base": set()}
+        for st in b.by_idx:
+            if st.kind in reasons:
+                reasons[st.kind].update(r[6] for r in b._hist_rows.get("Q-USDT", {}).get(st.id, ()))
+        holds = {st.hold_bars for st in b.by_idx if st.kind == "trail"}
+        tapes[flag] = (reasons, holds)
+
+    def run():
+        out = {}
+        for flag in (True, False):
+            for name, sid in (("trail", "indications:1m:tr0.48:0.36"), ("base", "indications:1m:sl1.00:st4")):
+                p, sym, pos = _lane_pulse(sid)
+                p.exits.enabled = False
+                p.sets.trail_time_exit = flag
+                if name == "trail":
+                    pos.trail_set_id = sid
+                pos.set_hold_bars = int(p.sets.hist_time_bars)          # held with the earlier hold
+                pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+                p.px[sym] = pos.entry * 0.9999
+                p.manage()
+                out[(name, flag)] = (sym in p.open, [c.reason for c in p.closed])
+        p, sym, pos = _lane_pulse("indications:1m:tr0.48:0.36")        # opened while the switch was off, then switched back on
+        p.exits.enabled = False
+        p.sets.trail_time_exit = True
+        pos.trail_set_id = pos.set_id
+        pos.set_hold_bars = se.HOLD_NEVER
+        pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+        p.px[sym] = pos.entry * 0.9999
+        p.manage()
+        out["never, back on"] = (sym in p.open, [c.reason for c in p.closed])
+        return out
+    live = _isolated(run)
+    on, off = tapes[True], tapes[False]
+    ok = ("time" in on[0]["trail"] and "time" not in off[0]["trail"] and "time" in on[0]["base"] and "time" in off[0]["base"]
+          and off[1] == {se.HOLD_NEVER} and HOLD_ok(on[1])
+          and live[("trail", True)] == (False, ["time"]) and live[("trail", False)] == (True, [])
+          and live[("base", True)] == (False, ["time"]) and live[("base", False)] == (False, ["time"]) and live["never, back on"] == (False, ["time"]))
+    return ok, f"replay exits on / off: {on[0]} / {off[0]}; trailing holds off {off[1]}; live {live}"
+
+
+def HOLD_ok(holds):
+    import set_engine as se
+    return se.HOLD_NEVER not in holds
+
+
+def slow_cycles_alone_never_shed_the_set_history():
+    """Found live on x02 after a restart (2026-11-15): a loop cycle counts as an overrun only while the history fetch is not busy, and eight overruns made the
+    governor critical, which shed the history fetch -- so every cycle stayed an overrun, the level stayed critical and the Set replay never started. Overruns
+    alone (memory under the hard limit) now keep the history running; memory over the hard limit still sheds it."""
+    import load_engine as le
+    g = le.LoadGovernor()
+    for _ in range(20):
+        b = g.observe(n_sym=150, n_open=20, hot_ms=1600, warm_ms=3500, cycle_overrun=True, rss_mb=500.0)
+    over = g.observe(n_sym=150, n_open=20, hot_ms=1600, warm_ms=3500, cycle_overrun=True, rss_mb=g.crit_limit(150) + 10)
+    ok = b.level == "critical" and b.hist_run and "hist" not in b.shed and not over.hist_run and "hist" in over.shed
+    return ok, f"overruns only: level {b.level}, history {b.hist_run}, shed {b.shed}; memory over the limit: history {over.hist_run}"
+
+
+def an_armed_trail_may_outlive_the_time_exit():
+    """trailHoldArmedFree (2026-11-15, owner "try multiple solutions .. it can dynamically vary"): the time exit applies to a trailing Set only while its trail has
+    not armed. On hand-made bars: an armed trail that is never hit stays open past the hold, an unarmed one leaves at the hold; the bar walk (step), the scan with
+    the bar index and the scan without it agree; off, both leave at the hold. Live: an armed trailing position past its hold stays open, an unarmed one closes."""
+    import set_engine as se
+    from common import overlay
+    b = se.SetBook()
+    b.load(overlay(**{"stratGeneral": True, "stratIndications": False, "setStepMax": 12}))
+    st = next(x for x in b.by_idx if x.kind == "trail" and x.side >= 0)
+    arm = st.trail_arm / 100.0
+    up = [[100.0, 100.0, 100.0, 100.0, 1.0]] + [[100.0 * (1 + arm * 2 * k / 5), 100.0 * (1 + arm * 2 * k / 5), 100.0 * (1 + arm * 2 * (k - 1) / 5), 100.0 * (1 + arm * 2 * k / 5), 1.0]
+                                                for k in range(1, 6)]
+    top = up[-1][3]
+    armed_bars = up + [[top, top, top, top, 1.0]] * 60
+    flat_bars = [[100.0, 100.0, 100.0, 100.0, 1.0]] * 66
+    out = {}
+    for name, bars in (("armed", armed_bars), ("unarmed", flat_bars)):
+        for free in (False, True):
+            cfg = {"entry_conf": 0.5, "time_bars": 20, "scratch_bars": 10 ** 6, "scratch_min": 1.0, "cooldown": 0, "cost_pct": 0.12, "honor_tp": False,
+                   "trail_armed_free": free}
+            dirs = [1] + [0] * (len(bars) - 1)
+            confs = [1.0] + [0.0] * (len(bars) - 1)
+            got = []
+            for mode in ("index", "plain", "step"):
+                lane = se.SetLane(st, "T")
+                if mode == "step":
+                    rows = []
+                    for i, bar in enumerate(bars):
+                        r = lane.step(i, bar, dirs[i], confs[i], True, cfg)
+                        if r:
+                            rows.append(r)
+                else:
+                    rows = lane.scan(0, len(bars), bars, dirs, confs, True, cfg, [0], se.BarIndex(bars) if mode == "index" else None)
+                got.append([(r["reason"], r["exit_i"]) for r in rows])
+            out[(name, free)] = got
+    replay_ok = (all(len({tuple(g) for g in v}) == 1 for v in out.values())
+                 and out[("armed", False)][0] == [("time", 20)] and out[("armed", True)][0] == []
+                 and out[("unarmed", False)][0] == [("time", 20)] and out[("unarmed", True)][0] == [("time", 20)])
+
+    def run():
+        res = {}
+        for armed in (True, False):
+            p, sym, pos = _lane_pulse("indications:1m:tr0.48:0.36")
+            p.exits.enabled = False
+            p.sets.trail_armed_free = True
+            pos.trail_set_id = pos.set_id
+            pos.trail_armed = armed
+            pos.set_hold_bars = int(p.sets.hist_time_bars)
+            pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+            p.px[sym] = pos.entry * 1.0001
+            p.manage()
+            res[armed] = (sym in p.open, [c.reason for c in p.closed])
+        return res
+    live = _isolated(run)
+    ok = replay_ok and live[True] == (True, []) and live[False] == (False, ["time"])
+    return ok, f"replay (index, plain, step) {out}; live armed / unarmed {live}"
+
+
+def an_unverified_position_gets_its_controls_reread():
+    """Found on x02 (2026-11-15): a position whose stop and target ids were known but never verified (controls_ok False, close-all, not undercovered)
+    stayed so for hours -- missing_controls asks only for the ids, so priority_controls never re-read its orders and the QA check failed every pass. Now
+    such a position is re-verified (ensure_controls), at most once a minute per symbol; a verified one is left alone."""
+    def run():
+        res = {}
+        for verified in (False, True):
+            p, sym, pos = _lane_pulse()
+            p.control_orders = True
+            pos.close_position, pos.ctrl_undercovered, pos.control_pending = True, False, {}
+            pos.controls_ok = pos.ctrl_verified = verified
+            calls = []
+            p.ensure_controls = lambda x, calls=calls: calls.append(x.symbol)
+            p.controls_illegal = lambda x: False
+            p.priority_controls()
+            p.priority_controls()                     # within the minute: not again
+            res[verified] = len(calls)
+        return res
+    res = _isolated(run)
+    return res == {False: 1, True: 0}, f"re-reads within a minute: unverified {res[False]}, verified {res[True]}"
+
+
+def a_dca_add_learns_the_venues_minimum_order():
+    """Found on x02 (2026-11-15): a DCA add under the venue's real minimum ("The minimum order amount is 45.77 XPL", it moves with the price) was re-sent every
+    25 s; entries and Block adds already learnt it. The DCA path now learns it too (the contract's min_qty), so the next add rounds up to it or skips."""
+    import types
+
+    def run():
+        p, sym, pos = _lane_pulse()
+        pos.set_id = ""                                   # DCA is for positions without a Set
+        p.halted = False
+        p.entries_blocked = lambda: False
+        p.missing_controls = lambda _p: False
+        p.dca_eligible = lambda _p: True
+        p.dca = types.SimpleNamespace(enabled=True, lanes={}, key=lambda s_, side: f"{s_}:{side}", skips=0, auto=False, max_expo=3.0,
+                                      due=lambda *a, **k: {"n": 1, "qty": 0.001, "mult": 1.0}, on_close=lambda *a, **k: None,
+                                      drop=lambda *a, **k: None, attach=lambda *a, **k: None)
+        p.dca_last_emit = 0.0
+        p.dca_fail_cd = {}
+        p.max_book_notional = lambda: 1e9
+        p.notional_cap = lambda: 1e9
+        p.available = 1e6
+        c = p.contracts[sym]
+        before = float(c.min_qty or 0)
+        sent = []
+        real_post = p.api.post
+
+        def post(path, body, *a, **k):
+            if path.endswith("/trade/order"):
+                sent.append(body.get("quantity"))
+                return {"code": 101400, "msg": "The minimum order amount is 45.77 XPL."}
+            return real_post(path, body, *a, **k)
+        p.api.post = post
+        p.maybe_dca_adds()
+        return before, float(c.min_qty or 0), sent
+    before, after, sent = _isolated(run)
+    return bool(sent) and after == 45.77 and before < 45.77, f"sent {sent}; contract minimum {before} -> {after}"
+
+
+def the_config_gate_blocks_a_losing_config_and_only_that_config():
+    """configGate (owner 2026-11-15 "create also config gates not only group gates"): the group gate's rule on ONE configuration Set's own executed results
+    (config_key = Set id x lane). Two Sets of the same group: the losing one stops opening, its sibling of the same group keeps opening (the group gate would close both);
+    with the Axis on and off; off by default; the simulator reads the same exec_gates_allow."""
+    from coord_engine import Coordinator
+    from set_engine import SetBook, config_key, exec_gates_allow, set_group
+    from position_cost import tp_range_of
+    import time as _t
+
+    def build(cfg_gate, grp_gate, axes):
+        book = SetBook()
+        book.load({"stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0, "minPfBySize": False, "minPfByStep": False, "directionMode": "both", "pauseMode": "off",
+                   "setMinPf": 1.1, "setMinStep": 2, "setStepMax": 3, "setSlRatios": [0.5], "trailVariants": ["0.3:0.1"], "stratGeneral": True, "stratIndications": False,
+                   "groupGate": grp_gate, "groupGateN": 5, "groupGatePf": 1.0, "groupGateHours": 12,
+                   "configGate": cfg_gate, "configGateN": 5, "configGatePf": 1.0, "configGateHours": 12})
+        rows = [st for st in book.by_idx if st.pack == "general" and st.kind == "base" and tp_range_of(st.step) == "micro"]
+        a, b = rows[0], rows[1]
+        book.by_idx = [a, b]
+        book.sets = {st.id: st for st in book.by_idx}
+        now = _t.time()
+        for st, score in ((a, 2.0), (b, 1.5)):
+            st.active, st.locked, st.last_error = True, False, ""
+            st.gate_n, st.gate_pf, st.n = 20, score, 20
+            st.max_dd_s, st.score_at = 0, now
+            st.exe = [(now - 60 * i, 0.004) for i in range(4, 0, -1)]
+        coord = Coordinator()
+        coord.load({}, {"axisLastEnabled": axes, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": False, "minPf": 1.1})
+        p = _bare_pulse()
+        p.sets, p.coord, p.open, p.position_cost_pct = book, coord, {}, 0.12
+        return p, a, b, now
+
+    def close(p, st, net, t_):
+        p._exec_note(pt.Closed(t_, "A-USDT", "LONG", 1.0, 1.0, 1.0, net, 0.0, "sl" if net < 0 else "tp", 60.0, set_id=st.id, pack="general", lane="pos", net_pnl_pct=net))
+    out = {}
+    for axes in (True, False):
+        res = {}
+        for name, cfg_gate, grp_gate in (("config", True, False), ("group", False, True), ("off", False, False)):
+            p, a, b, now = build(cfg_gate, grp_gate, axes)
+            same_group = set_group(a.id) == set_group(b.id)
+            for i in range(3):
+                close(p, a, -0.02, now - 600 + i)
+            res[name] = (same_group, getattr(p._scope_choice("general")[0], "id", None) == b.id, p._scope_choice("general")[0] is None,
+                         getattr(p._scope_choice("general")[0], "id", None) == a.id)
+        out[axes] = res
+    book = SetBook()
+    book.load({"configGate": True, "configGateN": 3})
+    store = {config_key("x:1", "pos"): [(100.0, -0.01), (110.0, -0.02)]}
+    sim_block = exec_gates_allow(book, store.get, "x:1", "pos", 120.0)
+    sim_other = exec_gates_allow(book, store.get, "x:2", "pos", 120.0)
+    default_off = SetBook().config_gate is False
+    ok = (all(r["config"][0] and r["config"][1] and r["group"][2] and r["off"][3] for r in out.values())
+          and not sim_block[0] and sim_block[1] == config_key("x:1", "pos") and sim_other[0] and default_off)
+    return ok, f"(same group, sibling runs / none runs / losing runs): {out}; simulator rule block {sim_block[:2]}, other {sim_other[0]}; off by default {default_off}"
+
+
 CHECKS = [
     ("trader.alternate-lane-keeps-the-executed-group-gate", alternate_lane_keeps_the_executed_group_gate),
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
     ("trader.closes-made-while-the-engine-was-down-are-recorded-but-not-scored", closes_made_while_the_engine_was_down_are_recorded_but_not_scored),
     ("trader.live-executed-pf-equals-the-plain-reading-of-the-trades-file", live_executed_pf_equals_the_plain_reading_of_the_trades_file),
     ("trader.group-gate-blocks-a-losing-group-and-only-that-group", the_group_gate_blocks_a_losing_group_and_only_that_group),
+    ("trader.config-gate-blocks-a-losing-config-and-only-that-config", the_config_gate_blocks_a_losing_config_and_only_that_config),
     ("trader.side-aware-group-gate-judges-long-and-short-groups-apart", the_side_aware_group_gate_judges_long_and_short_groups_apart),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
@@ -3593,6 +3847,11 @@ CHECKS = [
     ("trader.set-lane-does-not-read-the-exit-strategies", the_set_lane_does_not_read_the_exit_strategies),
     ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),
     ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
+    ("trader.trailing-sets-have-no-time-exit-unless-asked", trailing_sets_have_no_time_exit_unless_asked),
+    ("trader.an-armed-trail-may-outlive-the-time-exit", an_armed_trail_may_outlive_the_time_exit),
+    ("trader.an-unverified-position-gets-its-controls-reread", an_unverified_position_gets_its_controls_reread),
+    ("trader.a-dca-add-learns-the-venues-minimum-order", a_dca_add_learns_the_venues_minimum_order),
+    ("trader.slow-cycles-alone-never-shed-the-set-history", slow_cycles_alone_never_shed_the_set_history),
     ("trader.set-lane-honours-tp-as-the-replay-does", a_set_lane_honours_tp_only_as_the_replay_does),
     ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),
     ("trader.exit-lane-scores-only-its-own-closes", exit_lane_scores_only_its_own_closes),
@@ -3647,3 +3906,33 @@ CHECKS = [
     ("trader.padding-is-not-readiness", padding_does_not_count_as_readiness),
     ("trader.only-main-loop-pings-watchdog", only_the_main_loop_pings_the_watchdog),
 ]
+
+
+def blocked_gates_recover_on_paper_results_after_their_last_executed_one():
+    """gateRecovery (owner 2026-11-15, "never block then, no stuck"): a scope blocked by its executed results reopens for a candidate whose own lane Set's
+    paper results that closed AFTER the scope's newest executed result pass the same rule; paper results from before that, or failing ones, keep it shut;
+    recovery off keeps the earlier behaviour (blocked until the executed results age out)."""
+    from set_engine import exec_gates_allow, config_key, set_group
+    class B:
+        group_gate, group_gate_side, group_gate_n, group_gate_pf, group_gate_hours, group_gate_min = True, False, 3, 1.0, 6.0, 1
+        config_gate, config_gate_n, config_gate_pf, config_gate_hours, config_gate_min = True, 5, 1.0, 24.0, 1
+        gate_recovery = True
+    sid, now = "general:1m:sl1.00:st5", 100000.0
+    gkey = set_group(sid, "pos", False)
+    hist = {gkey: [(now - 3000, -1.0), (now - 2000, -1.0), (now - 1000, -1.0)]}
+    rows_of = hist.get
+    b = B()
+    before_only = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 1500, 2.0)])[0]           # paper before the last executed result
+    losing = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 500, -0.5), (now - 400, 0.2)])[0]
+    passing = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 500, -0.5), (now - 400, 1.0)])
+    b.gate_recovery = False
+    off = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 500, 1.0)])[0]
+    b.gate_recovery = True
+    hist[config_key(sid, "pos")] = [(now - 600, -1.0)]
+    cfg_after = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 300, 1.0)])[0]
+    cfg_between = exec_gates_allow(b, rows_of, sid, "pos", now, paper=lambda: [(now - 800, 1.0)])     # passes the group, not the config gate
+    ok = not before_only and not losing and passing[0] and not off and cfg_after and not cfg_between[0] and cfg_between[1].startswith("cfg:")
+    return ok, f"paper before the block {before_only}, losing paper {losing}, passing paper {passing}, recovery off {off}, config after {cfg_after}, config between {cfg_between}"
+
+
+CHECKS.append(("trader.blocked-gates-recover-on-paper-results-after-their-last-executed-one", blocked_gates_recover_on_paper_results_after_their_last_executed_one))

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-LOGS = {"bingx-x01": ["x01_live.log"], "bingx-x02": ["/var/log/cts-g/bingx-x02.log"]}
+LOGS = {"bingx-x01": ["x01_live.log", "pulse-bingx-x01.log"], "bingx-x02": ["x02_live.log", "pulse-bingx-x02.log"]}   # ensure_x0N.sh writes x0N_live.log in the pulse dir (2026-11-15: x02 read a stale /var/log copy)
 
 
 def pids_of(conn: str):

@@ -39,16 +39,17 @@ from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
+from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, config_key, exec_gates_allow, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
 from conn_guard import ConnGuardError, mode_of, resolve_base
+from redis_reads import read_output as _redis_read_output
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
 BASE, _INITIAL_MODE = resolve_base(CONN_SHORT, env_base=os.environ.get("PULSE_BASE", ""))
-DIR = "/opt/grok-x01-pulse"
+DIR = os.environ.get("CTSG_RUNTIME_DIR") or "/opt/grok-x01-pulse"   # the regression runner points this at a private temp directory; the live engines never set it
 STATS_PATH = os.path.join(DIR, f"stats-{CONN_SHORT}.json")
 TRADES_PATH = os.path.join(DIR, f"trades-{CONN_SHORT}.jsonl")
 STOP_PATH = os.path.join(DIR, f"STOP-{CONN_SHORT}")
@@ -776,8 +777,9 @@ def rss_mb() -> float:
 
 
 def redis_hget(field: str) -> str:
-    p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
-    return (p.stdout or "").strip()
+    output = _redis_read_output(["HGET", REDIS_CONN, field], 6)
+    value = (output or "").strip()
+    return "" if value == "(nil)" else value
 
 
 def cred_file_path() -> str:
@@ -823,11 +825,14 @@ def dump_cts_settings() -> dict:
     if now - float(_CTS_CACHE["t"]) < 60.0:
         return dict(_CTS_CACHE["data"])
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True, timeout=3)
+        output = _redis_read_output(["HGETALL", f"settings:connection_settings:{CONN_SHORT}"], 3)
     except Exception:
         _CTS_CACHE.update(t=now, data={})
         return {}
-    lines = (p.stdout or "").splitlines()
+    if output is None:
+        _CTS_CACHE.update(t=now, data={})
+        return {}
+    lines = output.splitlines()
     out = {}
     for i in range(0, len(lines) - 1, 2):
         v = lines[i + 1]
@@ -3258,6 +3263,13 @@ class Pulse:
             px = self.px.get(pos.symbol) or pos.entry
             need = self.missing_controls(pos)
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{pos.symbol}", 0) and self.controls_illegal(pos)
+            # Both ids present but never verified against the venue (found on x02 2026-11-15: a position held controls_ok False for hours because
+            # missing_controls only asks for the ids, so nothing ever re-read its orders): re-verify it, at most once a minute per symbol.
+            unverified = (not need and not illegal and not pos.controls_ok and now >= self.ctrl_skip.get(f"verify:{pos.symbol}", 0))
+            if unverified:
+                self.ctrl_skip[f"verify:{pos.symbol}"] = now + 60.0
+                self.ensure_controls(pos)
+                continue
             if not need and not illegal:
                 continue
             if now < self.ctrl_skip.get(pos.symbol, 0) and not need:
@@ -3827,16 +3839,17 @@ class Pulse:
         another pack or a blocked positive lane cannot mask a valid alternative."""
         if symbol and isinstance(self.sets, SetBook) and not self.sets.symbol_allows(pack, symbol):
             return None, "", "symbol-lane"
-        if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and any(ax.enabled for ax in self.coord.axes.values()):
+        ax_sets = isinstance(self.sets, SetBook) and getattr(getattr(self.sets, "axis_sets", None), "enabled", False)
+        if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and (ax_sets or any(ax.enabled for ax in self.coord.axes.values())):
             blocked = []
             def allows(st, lane):
-                if self.sets.group_gate:
-                    gkey = set_group(st.id, lane, getattr(self.sets, "group_gate_side", False))
-                    g_ok, g_pf, g_k = group_verdict(self.__dict__.get("group_exec", {}).get(gkey, ()), time.time(), self.sets.group_gate_n,
-                                                    self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)
-                    self.coord.scopes[gkey] = {"allow": g_ok, "orders": g_k, "pf": g_pf, "source": "executed", "minPf": self.sets.group_gate_pf,
-                                               "reasons": [] if g_ok else [f"group newest {g_k} PF {g_pf:.2f}<{self.sets.group_gate_pf:g}"]}
+                if self.sets.group_gate or getattr(self.sets, "config_gate", False):
+                    g_ok, gkey, g_pf, g_k = exec_gates_allow(self.sets, self.__dict__.get("group_exec", {}).get, st.id, lane, time.time(),
+                                                             paper=lambda: (st.neg if lane == "neg" else st.exe) or ())
                     if not g_ok:
+                        floor_g = self.sets.config_gate_pf if gkey.startswith("cfg:") else self.sets.group_gate_pf
+                        self.coord.scopes[gkey] = {"allow": False, "orders": g_k, "pf": g_pf, "source": "executed", "minPf": floor_g,
+                                                   "reasons": [f"{'config' if gkey.startswith('cfg:') else 'group'} newest {g_k} PF {g_pf:.2f}<{floor_g:g}"]}
                         blocked.append(gkey)
                         return False
                 source = st.neg if lane == "neg" else st.exe
@@ -3846,6 +3859,19 @@ class Pulse:
                 rows = [{"t": t, "pnl_pct": value + cf} for t, value in source
                         if cutoff <= t <= now]
                 floor = self.set_axis_floor(st, lane)
+                if ax_sets:
+                    # Axis Sets (axisSets): the Set's own Auto choice among every Axis setting, judged on its lane Set; the volume ratio rides to place()
+                    v = self.sets.axis_set_verdict(st, lane, now, cutoff, float(floor if floor is not None else self.sets.floor_for(15, st.pack, st)))
+                    if v is not None:
+                        key = f"set:{st.id}:{lane}"
+                        self.coord.scopes[key] = {"allow": v["allow"], "orders": len(rows), "pf": v["pf"], "basePf": v["basePf"], "source": "axisSet",
+                                                  "setting": v["setting"], "vol": v["vol"], "minPf": floor,
+                                                  "reasons": [] if v["allow"] else [f"axis set {v['setting']} does not admit"]}
+                        if not v["allow"]:
+                            blocked.append(key)
+                            return False
+                        self.__dict__.setdefault("axis_vol", {})[(st.id, lane)] = float(v["vol"])
+                        return True
                 result = self.coord.judge(rows, self.coord.net_streak(rows), min_pf=floor)
                 key = f"set:{st.id}:{lane}"
                 scope = {"allow": result["allow"], "reasons": result["reasons"], "orders": len(rows),
@@ -3865,14 +3891,19 @@ class Pulse:
         group_blocked = ""
         try:
             chosen = self.sets.pick_any(pack, side=side)
-            if chosen is not None and getattr(self.sets, "group_gate", False):
-                # the profit group gate: skip the Sets whose group is losing, the next-ranked Set of another group runs instead
+            if chosen is not None and (getattr(self.sets, "group_gate", False) or getattr(self.sets, "config_gate", False)):
+                # the profit group gate and the config gate: skip the Sets whose group (or own configuration) is losing, the next-ranked Set runs instead
                 now_g = time.time()
+                rows_of = self.__dict__.get("group_exec", {}).get
+                def paper_of(st_, lane_):
+                    return lambda: (st_.neg if lane_ == "neg" else st_.exe) or ()
                 def group_open(st_):
-                    return group_verdict(self.__dict__.get("group_exec", {}).get(set_group(st_.id, self.sets.lane_of(st_) or "pos", getattr(self.sets, "group_gate_side", False)), ()), now_g,
-                                         self.sets.group_gate_n, self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)[0]
-                if not group_open(chosen):
-                    group_blocked = set_group(chosen.id, self.sets.lane_of(chosen) or "pos", getattr(self.sets, "group_gate_side", False))
+                    lane_ = self.sets.lane_of(st_) or "pos"
+                    return exec_gates_allow(self.sets, rows_of, st_.id, lane_, now_g, paper=paper_of(st_, lane_))[0]
+                lane_c = self.sets.lane_of(chosen) or "pos"
+                first = exec_gates_allow(self.sets, rows_of, chosen.id, lane_c, now_g, paper=paper_of(chosen, lane_c))
+                if not first[0]:
+                    group_blocked = first[1]
                     chosen = self.sets.pick_any(pack, side=side, predicate=group_open)
         except Exception:
             return None, "", ""
@@ -4056,6 +4087,8 @@ class Pulse:
             # balance carries; the venue minimum lot still applies
             vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}),
                                  getattr(self, "volume_by_pack_kind", {}))*relational_set_factor(getattr(self,"relational_volume_ratios",None),chosen,sym,"axis" if any(ax.enabled for ax in self.coord.axes.values()) else None)
+            if getattr(getattr(self.sets, "axis_sets", None), "enabled", False):
+                vm *= float(self.__dict__.get("axis_vol", {}).get((chosen.id, chosen_lane or "pos"), 1.0))   # the Axis Set's volume ratio to its base Set
             # Block v2 carry (blockCarry, off by default): a Set parent opens at V0 x (1 + the ratios up to the level its relation carries), never above the book
             # room or the hard size ceiling; its adds stay fractions of that parent's own (original) volume
             sb_ = getattr(self, "set_block", None)
@@ -5049,7 +5082,16 @@ class Pulse:
                         pos.trail = prev
         own = self.sets.sets.get(pos.set_id)            # the Set's own hold (stepHoldOn / stepHoldMin), else the global time stop
         hold_bars = pos.set_hold_bars or int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
-        if age >= float(hold_bars) * 60.0:
+        trailing = getattr(own, "kind", "") == "trail" if own is not None else bool(pos.trail_set_id and pos.trail_set_id == pos.set_id)
+        if trailing and not getattr(self.sets, "trail_time_exit", True):
+            hold_bars = 0                                # trailTimeExit off (owner 2026-11-15): no time exit for a trailing Set, also for one opened before the switch
+        elif trailing and hold_bars >= 10 ** 9:
+            # opened while trailTimeExit was off (a hold that never ends); switched back on (owner 2026-11-15), it takes the Set's current hold
+            hold_bars = int(getattr(own, "hold_bars", 0) or 0) if own is not None and int(getattr(own, "hold_bars", 0) or 0) < 10 ** 9 else 0
+            hold_bars = hold_bars or int(self.sets.hist_time_bars)
+        if trailing and pos.trail_armed and getattr(self.sets, "trail_armed_free", False):
+            hold_bars = 0                                # trailHoldArmedFree: an armed trail has no time exit, as in the replay
+        if hold_bars and age >= float(hold_bars) * 60.0:
             self.close_pos(pos, px, "time")
             return
         # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m
@@ -5280,11 +5322,16 @@ class Pulse:
                     if gq is None:
                         gq = gx[set_group(rec.set_id, lane, gside)] = collections.deque(maxlen=200)
                     gq.append((float(rec.t), float(net_return)))
+                    # the config gate reads one configuration Set's own executed results (config_key: the exact Set and lane)
+                    cq = gx.get(config_key(rec.set_id, lane))
+                    if cq is None:
+                        cq = gx[config_key(rec.set_id, lane)] = collections.deque(maxlen=50)
+                    cq.append((float(rec.t), float(net_return)))
 
     def execution_snapshot(self) -> Dict[str, Any]:
         """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
         Set (a Set that stopped passing keeps its open positions until its own lane closes them), and the orders closed so far by lane."""
-        counts = self.sets.counts()
+        counts = self.sets.counts_cached() if hasattr(self.sets, "counts_cached") else self.sets.counts()   # display figure (stats file)
         reasons = counts.get("reasons", {})
         by_pack: Dict[str, Dict[str, int]] = {}
         open_sets, under_invalid, retired, no_set = set(), 0, 0, 0
@@ -5325,7 +5372,8 @@ class Pulse:
                 "cashNoLoss": complete_cash and e["cash_gain"] > 0 and e["cash_loss"] == 0,
                 "feeSources": dict(e["fee_sources"]),
             }}
-        stage_counts = self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}
+        stage_counts = (self.sets.stage_counts_cached() if hasattr(self.sets, "stage_counts_cached")
+                        else self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {})
         gate_on = bool(getattr(self.sets, "group_gate", False))
         group_rows: Dict[str, Any] = {}
         now_g = time.time()
@@ -6317,6 +6365,16 @@ class Pulse:
             self.did_io = True
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
+                m_min = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
+                if m_min:
+                    # learn the venue's minimum as entries and Block adds do (x02 2026-11-15: DCA re-sent the same too-small add every 25 s); the next
+                    # attempt rounds up to it within the auto plan's ceiling, or skips
+                    try:
+                        need = float(m_min.group(1))
+                    except (TypeError, ValueError, OverflowError):
+                        need = 0.0
+                    if math.isfinite(need) and need > 0:
+                        c.min_qty = max(float(c.min_qty or 0), need)
                 self.dca_fail_cd[pos.symbol] = time.time() + (180.0 if is_transient_api(msg) else 25.0)
                 if is_transient_api(msg):
                     log(f"DCA SKIP {pos.symbol} #{row['n']} {short_api_msg(msg)}", every=20.0, key=f"dcaf:{pos.symbol}")
@@ -7316,7 +7374,7 @@ class Pulse:
             "returnScorePlus1xCost": 1.1,
             "pfScale": "net gains / net losses",
             "variants": self.variants.snapshot(),
-            "sets": self.sets.snapshot(),
+            "sets": self.sets.snapshot_cached() if hasattr(self.sets, "snapshot_cached") else self.sets.snapshot(),
             "execution": self.execution_snapshot(),
             "exits": self.exits.snapshot(),
             "indications": self.indications.snapshot(),
@@ -7472,7 +7530,7 @@ class Pulse:
             "sets": {
                 "families": scov.get("families"),
                 "setCount": len(self.sets.sets),
-                "activeCount": int(self.sets.counts().get("valid", 0)),
+                "activeCount": int((self.sets.counts_cached() if hasattr(self.sets, "counts_cached") else self.sets.counts()).get("valid", 0)),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "trailCover": scov.get("trailCover"),
                 "slCover": scov.get("slCover"),
@@ -8116,7 +8174,7 @@ class Pulse:
                 names = [s for s in names if s in fetched]
             if b.hist_run:
                 self.sets.replay_all(on_step=lambda: time.sleep(0), symbols=names, expected_symbols=hist_universe,
-                                     abort=lambda: self.load.last_budget.level == "critical")
+                                     abort=lambda: self.load.last_budget.level == "critical" and not self.load.last_budget.hist_run)   # memory, not slow cycles
         finally:
             self.hist_busy = False
 

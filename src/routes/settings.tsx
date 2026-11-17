@@ -2,12 +2,13 @@ import {VolumeRatioSliders} from "../../shared/cts-volume/sliders.tsx";
 import {PORTED_CATALOG,DEFAULT_TACTIC_SOURCES,DEFAULT_INVERSE_SOURCES} from "../../shared/cts-indications/catalog.ts";
 import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
-import { ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
+import { ROUND_AUTO_N_MAX, ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
 import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
 import { SignalConfigEditor } from "@/components/signal-config-editor";
 import { createFileRoute } from "@tanstack/react-router";
+import { SECTION_GROUPS, SECTION_LABEL, groupOf, type SettingsSection } from "@/lib/settings-menu";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MIN_PF_FLOOR,
@@ -80,33 +81,88 @@ import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
-const SECTIONS = [
-  "overview",
-  "connection",
-  "profit",
-  "risk",
-  "trailing",
-  "timeframes",
-  "packs",
-  "sets",
-  "exits",
-  "stages",
-  "block",
-  "dca",
-  "axes",
-  "volume",
-  "controls",
-  "indication",
-  "pulse",
-  "symbols",
-] as const;
+type SectionId = SettingsSection;
+
+function slug(text: string): string {
+  return "card-" + text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+}
+
+/** The page's menus: the top menus with their sections (on a phone only the open menu's sections), then "On this page": a jump to every card of the section. */
+function SettingsMenu({ section, onSection, pageRef }: { section: SectionId; onSection: (id: SectionId) => void; pageRef: React.RefObject<HTMLDivElement | null> }) {
+  const active = groupOf(section);
+  const [open, setOpen] = useState(active);
+  useEffect(() => setOpen(active), [active]);
+  const [cards, setCards] = useState<Array<{ id: string; title: string }>>([]);
+  useEffect(() => {
+    const read = () => {
+      const els = Array.from(pageRef.current?.querySelectorAll<HTMLElement>("[data-card]") ?? []);
+      setCards(els.map((el) => ({ id: el.id, title: el.dataset.card ?? "" })));
+    };
+    read();
+    const t = window.setTimeout(read, 300);        // cards that render after the stats arrive
+    return () => window.clearTimeout(t);
+  }, [section, pageRef]);
+  const openGroup = SECTION_GROUPS.find((g) => g.id === open) ?? SECTION_GROUPS[0];
+  return (
+    <>
+      {/* every section, grouped by its menu (desktop); scrolls away with the page */}
+      <nav className="hidden flex-wrap gap-x-4 gap-y-1 lg:flex" aria-label="Settings sections">
+        {SECTION_GROUPS.map((g) => (
+          <div key={g.id} className="flex min-w-0 items-center gap-1">
+            <span className="shrink-0 font-mono text-[10px] uppercase text-muted">{g.label}</span>
+            {g.sections.map((id) => (
+              <button key={id} type="button" onClick={() => onSection(id)}
+                className={`min-h-9 shrink-0 rounded-md px-2.5 text-left text-sm ${section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"}`}
+                data-section={id} data-testid={`section-${id}`} aria-current={section === id ? "page" : undefined}>
+                {SECTION_LABEL[id]}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+      {/* the sticky bar: top menus, the open menu's submenu, and the cards of this section */}
+      <div className="sticky top-0 z-20 -mx-1 space-y-1.5 rounded-radius border border-border bg-bg/95 px-1 py-1.5 backdrop-blur" data-testid="settings-menu">
+        <nav className="flex gap-1 overflow-x-auto" aria-label="Settings menus">
+          {SECTION_GROUPS.map((g) => (
+            <button key={g.id} type="button" onClick={() => { setOpen(g.id); if (!g.sections.includes(section)) onSection(g.sections[0]); }}
+              className={`min-h-9 shrink-0 rounded-lg px-3 text-sm font-medium ${active === g.id ? "bg-bg2 text-fg ring-1 ring-primary" : open === g.id ? "bg-bg2 text-fg" : "text-muted"}`}
+              data-testid={`menu-${g.id}`} aria-expanded={open === g.id}>
+              {g.label}
+            </button>
+          ))}
+        </nav>
+        <nav className="flex gap-1 overflow-x-auto" aria-label={`${openGroup.label} submenu`}>
+          {openGroup.sections.map((id) => (
+            <button key={id} type="button" onClick={() => onSection(id)}
+              className={`min-h-8 shrink-0 rounded-md px-2.5 text-sm ${section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"}`}
+              data-testid={`submenu-${id}`}>
+              {SECTION_LABEL[id]}
+            </button>
+          ))}
+        </nav>
+        {cards.length > 1 ? (
+          <nav className="flex gap-1 overflow-x-auto border-t border-border pt-1.5" aria-label="On this page" data-testid="settings-page-index">
+            <span className="shrink-0 self-center font-mono text-[10px] uppercase text-muted">On this page</span>
+            {cards.map((c) => (
+              <button key={c.id} type="button" className="min-h-8 shrink-0 rounded-md border border-border px-2 text-xs text-muted hover:text-fg"
+                onClick={() => document.getElementById(c.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+                {c.title}
+              </button>
+            ))}
+          </nav>
+        ) : null}
+      </div>
+    </>
+  );
+}
 
 function SettingsPage() {
   const { conn } = useConnection();
   const [cts, setCts] = useState<CtsSettings | null>(null);
   const [raw, setRaw] = useState<LiveStats | null>(null);
   const [overlay, setOverlay] = useState<PulseOverlay>(DEFAULT_OVERLAY);
-  const [section, setSection] = useState<(typeof SECTIONS)[number]>("overview");
+  const [section, setSection] = useState<SectionId>("overview");
+  const pageRef = useRef<HTMLDivElement | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -206,49 +262,9 @@ function SettingsPage() {
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
-      <div className="flex flex-col gap-4 lg:flex-row">
-        <aside className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto">
-          <nav className="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:pb-0">
-            {SECTIONS.map((id) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setSection(id)}
-                className={`min-h-11 shrink-0 rounded-lg px-3 text-left text-sm capitalize ${
-                  section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"
-                }`}
-                data-section={id}
-                data-testid={`section-${id}`}
-              >
-                {id === "dca"
-                  ? "DCA"
-                  : id === "pulse"
-                    ? "Pulse overlay"
-                    : id === "profit"
-                      ? "Profit factor"
-                      : id === "risk"
-                        ? "SL / TP ratios"
-                        : id === "trailing"
-                          ? "Trailing recals"
-                          : id === "timeframes"
-                            ? "Timeframes"
-                            : id === "packs"
-                              ? "Strategy packs"
-                              : id === "sets"
-                                ? "Sets · historic"
-                                : id === "exits"
-                                  ? "Exits · SL"
-                                  : id === "overview"
-                                    ? "Overview"
-                                    : id === "controls"
-                                      ? "Control orders"
-                                      : id}
-              </button>
-            ))}
-          </nav>
-        </aside>
-
-        <div className="min-w-0 flex-1 space-y-4">
+      <div className="flex flex-col gap-4">
+        <SettingsMenu section={section} onSection={setSection} pageRef={pageRef} />
+        <div ref={pageRef} className="min-w-0 flex-1 space-y-4">
           <LiveApplied conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
           {section === "overview" && (
             <Card title="Secure, Minimal" hint="Saved run preset · load it here, review it, then save to the selected connection">
@@ -1090,7 +1106,7 @@ function SettingsPage() {
                   min={MIN_PF_FLOOR}
                   max={2.3}
                   step={0.02}
-                  hint={overlay.minPfBySize !== false ? "The window-size PF controls currently take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
+                  hint={overlay.minPfByStep !== false ? "Not used now: with the minimum PF by TP step on, Short Range Sets ask their step floor (Auto or 1 + TP% x ratio) like every other Set." : overlay.minPfBySize !== false ? "Not used now: the window-size PF classes take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider label="Micro minimum SL (% of entry)" value={overlay.microMinSlDistancePct} min={0} max={10} step={0.01}
@@ -1311,7 +1327,7 @@ function SettingsPage() {
           {section === "block" && (
             <Card
               title="Block rounds"
-              hint="A group's positions form blocks of N. A losing block raises the group's next entries by ratio × level of the original volume, until the volume-weighted net since that block is back at zero. Every block count 1–6 runs its own procedure on its own blocks."
+              hint="Each Set, lane, direction and count keeps its own recovery history. Recovery uses that count’s requested size. Actual entries can combine requests."
             >
               {(() => {
                 const cfg = blockRoundsOf(overlay.blockRounds);
@@ -1322,6 +1338,16 @@ function SettingsPage() {
                     <Grid>
                       <Toggle label="Block rounds" on={cfg.enabled} onChange={(enabled) => update({ enabled })} />
                       <Num label="Volume multiple ceiling" value={cfg.maxMult} min={1} max={ROUND_MULT_MAX} step={0.25} hint="1 + the raised procedures' ratio × level, never above this" onChange={(maxMult) => update({ maxMult })} />
+                      <Toggle label="Auto: every block count decides by its own newest results" on={cfg.auto} onChange={(auto) => update({ auto })} />
+                      <Num label="Auto · newest results judged (last N)" value={cfg.autoN} min={1} max={ROUND_AUTO_N_MAX} step={1}
+                        hint="per Set, lane, relation group and count: level × net of positions opened while that procedure was raised, including paper observations"
+                        onChange={(autoN) => update({ autoN, autoMin: Math.min(cfg.autoMin, autoN) })} />
+                      <Num label="Auto · results needed (minimum)" value={cfg.autoMin} min={1} max={cfg.autoN} step={1}
+                        hint="fewer results: the count's manual switch (Raises column) holds" onChange={(autoMin) => update({ autoMin })} />
+                      <Num label="Auto · PF a count needs to raise" value={cfg.autoPf} min={0.5} max={3} step={0.05}
+                        hint="1.00 = its raises at least paid for themselves" onChange={(autoPf) => update({ autoPf })} />
+                      <Num label="Auto · ratio of a count without its own" value={cfg.autoRatio} min={0.05} max={ROUND_RATIO_MAX} step={0.05}
+                        hint="a count Auto switches on whose own ratio is 0 raises by this × level of the original volume" onChange={(autoRatio) => update({ autoRatio })} />
                     </Grid>
                     <div className="mt-3 flex flex-wrap gap-3">
                       {ROUND_RELATIONS.map((name) => (
@@ -1334,7 +1360,7 @@ function SettingsPage() {
                         <thead className="font-mono text-[11px] text-muted">
                           <tr>
                             <th className="pb-2 font-medium">Block count</th>
-                            <th className="pb-2 font-medium">Raises</th>
+                            <th className="pb-2 font-medium">{cfg.auto ? "Raises (manual, until Auto has its minimum)" : "Raises"}</th>
                             <th className="pb-2 font-medium">Volume ratio</th>
                             <th className="pb-2 font-medium">Step</th>
                             <th className="pb-2 font-medium">Top level</th>
@@ -1358,10 +1384,10 @@ function SettingsPage() {
                         </tbody>
                       </table>
                     </div>
+                    <BlockRoundsAutoTable stats={stats ?? null} />
                     <p className="mt-3 text-xs opacity-70">
                       Largest multiple of one entry with these settings: ×{blockRoundsMax(cfg).toFixed(2)}. A count that does not raise still forms its blocks and keeps its record.
-                      Shipped: relation Step, block count 5, ratio 1.0, step to level 2, ceiling ×3 — the only procedure measured at or above “without” on all nine windows
-                      (volume-weighted PF 0.750 against 0.648, net −480.2 against −495.1 points; both below 1). A raise weights results; it does not change a per-order PF.
+                      Historical results for the former pooled scope do not establish performance for these independent Set-level procedures. A raise changes monetary exposure and can change monetary PF.
                     </p>
                   </div>
                 );
@@ -1403,6 +1429,11 @@ function SettingsPage() {
 
           {section === "block" && (
             <Card title="Block strategy" hint="Each Set, lane and group keeps its own evidence">
+              {stats?.block?.setLanes?.guard?.legacyBlocked ? (
+                <p className="mb-3 rounded border border-danger px-3 py-2 text-xs text-danger">Guarded adds are held because an earlier pooled deficit cannot be assigned to an individual Set and count. Reconcile the retained old record before resuming.</p>
+              ) : null}
+              {stats?.block?.setLanes?.error ? <p className="mb-3 text-xs text-danger">{stats.block.setLanes.error}</p> : null}
+              {stats?.block?.setLanes?.guard ? <p className="mb-3 text-xs text-muted">Guard scopes: {stats.block.setLanes.guard.scopes ?? 0} · {stats.block.setLanes.guard.holding ? "one or more held" : "none held"}</p> : null}
               <Grid>
                 <EnableSlider
                   label="Block enabled"
@@ -1474,12 +1505,22 @@ function SettingsPage() {
                 </div>
                 <Num label="Min observations per count" value={overlay.blockMinObservations} min={1} max={200} step={1}
                   hint="A count adds only after its own record holds this many observations (a count, not a window)." onChange={(v) => patch("blockMinObservations", Math.max(1, Math.round(v)))} />
-                <Toggle label="Carry: keep the stack of a losing parent until the relation's net is back positive, then pause" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
+                <Toggle label="Carry: keep the stack until the relation's net is back positive, then pause (shared across counts)" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
                 <Num label="Pause after the reset (parents)" value={overlay.blockPauseSteps} min={0} max={20} step={1} hint="Parents of the relation without adds after the net is back positive."
                   onChange={(v) => patch("blockPauseSteps", Math.max(0, Math.round(v)))} />
                 <Num label="Skip the first x counts" value={overlay.blockSkipFirst} min={0} max={12} step={1} hint="Those counts never add; they still collect evidence."
                   onChange={(v) => patch("blockSkipFirst", Math.max(0, Math.round(v)))} />
-                <Toggle label="Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back" on={overlay.blockGuard !== false} onChange={(v) => patch("blockGuard", v)} />
+                <Toggle label="Deficit guard: pause each Set, relation and count independently until its paper adds recover that count's deficit" on={overlay.blockGuard !== false} onChange={(v) => patch("blockGuard", v)} />
+                {stats?.block?.setLanes?.guard?.byScope?.length ? (
+                  <div className="col-span-full overflow-x-auto text-xs">
+                    <p className="mb-1 text-muted">Guard results by Set, lane, relation and count (showing up to 200; held scopes first)</p>
+                    <table className="w-full text-left"><thead><tr><th>Set / lane / side</th><th>Relation</th><th>Count</th><th>Executed net</th><th>Paper recovery</th><th>Status</th></tr></thead>
+                      <tbody>{stats.block.setLanes.guard.byScope.map((g) => <tr key={JSON.stringify([g.set, g.lane, g.side, g.relation, g.group, g.count])}>
+                        <td>{g.set} / {g.lane} / {g.side}</td><td>{g.relation} {g.group.join(" / ")}</td><td>{g.count}</td>
+                        <td>{g.net.toFixed(4)}</td><td>{g.shadow.toFixed(4)}</td><td>{g.holding ? "held" : "open"}</td>
+                      </tr>)}</tbody></table>
+                  </div>
+                ) : null}
                 <Num label="Add only up to this share of the way to the target" value={overlay.blockTargetShare ?? 0.5} min={0} max={1} step={0.05} hint="Fixed-target parents. 0 = no rule; 0.5 = no add past the middle of the way."
                   onChange={(v) => patch("blockTargetShare", Math.max(0, Math.min(1, v)))} />
                 {BLOCK_KINDS.map((kind) => (
@@ -2028,9 +2069,13 @@ function SettingsPage() {
                 <EnableSlider label="Auto SL range per TP step" on={overlay.slAutoRange} hint="each TP step (and direction) learns its min / max SL ratio from the orders closed before the window it judges; a Set outside it is not valid (trailing Sets never); without enough orders the manual grid below stands" onChange={(v) => patch("slAutoRange", v)} />
                 <Slider label="Auto SL range: orders a range needs" value={overlay.slAutoMin} min={1} max={500} step={1} onChange={(v) => patch("slAutoMin", v)} />
                 <Slider label="Auto SL range: tolerance to the best PF (%)" value={overlay.slAutoTol} min={0} max={50} step={1} hint="the widest range whose PF is within this of the best" onChange={(v) => patch("slAutoTol", v)} />
+                <Slider label="Min TP step of the TP / Exit Sets" value={overlay.tpStepMin} min={0} max={32} step={1} hint={`no TP Set under ${(overlay.tpStepMin * 0.1).toFixed(1)}% (0 = the grid's min step); trailing stops do not move. Live x02 (11-12 .. 11-15): TP Sets from 2.6 % read PF 1.04 on 92 closes, all of them 0.77 on 264`} onChange={(v) => patch("tpStepMin", v)} />
                 <Slider label="Min trailing arm (TP steps)" value={overlay.trailStepMin} min={0} max={20} step={1} hint={`no trailing Set arms under ${(overlay.trailStepMin * 0.1).toFixed(1)}% (0 = every arm the grid builds)`} onChange={(v) => patch("trailStepMin", v)} />
                 <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
                 <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
+                <Toggle label="Time exit on trailing Sets (on by default; off: no max hold, they leave by stop and trail only)" on={overlay.trailTimeExit} onChange={(v) => patch("trailTimeExit", v)} />
+                <Slider label="Trailing Sets' own max hold" value={overlay.trailHoldBars} min={0} max={1440} step={30} unit="min" hint="with the time exit on: 0 = the global time stop" onChange={(v) => patch("trailHoldBars", v)} />
+                <Toggle label="No time exit once a trail has armed (the max hold applies only while unarmed)" on={overlay.trailHoldArmedFree} onChange={(v) => patch("trailHoldArmedFree", v)} />
                 {(["micro", "minimal", "short", "normal", "long", "wide"] as const).map((rg) => {
                   const xs = overlay.slRatiosByRange?.[rg] ?? [];
                   const own = xs.length > 0;
@@ -2455,9 +2500,26 @@ function PfWindowControls({
         {overlay.minPfByRange?.micro != null ? <Slider
           label="Micro range · minimum PF"
           value={overlay.minPfByRange.micro} min={1.001} max={2} step={0.001} digits={3}
-          hint="One positive PF floor for Micro TP steps 2–3 across Base, Main, Real and their strategy gates. PF 1.000 is break-even after modeled costs."
+          hint="Micro's own manual floor (TP steps 2–3) across Base, Main, Real and their strategy gates. With Auto per config Set on, a Micro Set with its own learned floor asks that; every other Micro Set asks this value, never a floor learned on other ranges. PF 1.000 is break-even after modeled costs."
           onChange={(value) => patch("minPfByRange", { ...overlay.minPfByRange, micro: value })} /> : null}
       </> : null}
+      <Slider
+        label="Signals packs · own minimum PF"
+        value={overlay.minPfSignals}
+        min={2.2}
+        max={3}
+        step={0.01}
+        hint="The own manual floor of every Signals pack Set (sig-*) in every window and stage, whatever the step or window-size setting. With Auto per config Set on, a Signals Set's own learned floor first and this value as its fallback (never a floor learned on other packs). Minimum 2.20."
+        onChange={(v) => patch("minPfSignals", v)}
+      />
+      <div className="col-span-full font-mono text-[11px] text-muted">
+        Which floor a Set asks: Auto on → its own learned floor (per config Set) → its configuration's own manual floor (Signals, Micro range, an indication entry's lane policy) → the step's learned floor → 1 + TP% × ratio. Auto off → own manual floor → 1 + TP% × ratio. The Sets overview and the Stages table show the source of each floor.
+      </div>
+      <Toggle
+        label="Exit Sets (no take-profit, leave by stop / time): off by default since 2026-11-15 (they lost on both windows)"
+        on={overlay.exitSets === true}
+        onChange={(v) => patch("exitSets", v)}
+      />
       <Toggle
         label="Choose among valid Sets by the lane's own Set (Real / Real Negative orders), not the raw Base tape"
         on={overlay.rankByLane !== false}
@@ -2484,6 +2546,26 @@ function PfWindowControls({
             onChange={(v) => patch("groupGateMin", Math.max(1, Math.min(50, Math.round(v))))} />
         </Grid>
       ) : null}
+      <Toggle
+        label="Config gate: one configuration Set (Set × lane) opens positions only while its own newest executed results are profitable"
+        on={overlay.configGate === true}
+        onChange={(v) => patch("configGate", v)}
+      />
+      {overlay.configGate === true ? (
+        <Grid>
+          <Slider label="Config gate · newest executed results" value={overlay.configGateN} min={1} max={50} step={1}
+            hint="Shipped 5 (measured: N 3 / 5 / 10 identical; development 1.054 -> 1.129, sealed equal)." onChange={(v) => patch("configGateN", Math.max(1, Math.min(200, Math.round(v))))} />
+          <Slider label="Config gate · minimum PF" value={overlay.configGatePf} min={0.5} max={2} step={0.05}
+            hint="1.00 = break-even after costs." onChange={(v) => patch("configGatePf", Math.max(0.5, Math.min(3, Math.round(v * 100) / 100)))} />
+          <Slider label="Config gate · window (hours)" value={overlay.configGateHours} min={1} max={72} step={1}
+            hint="Results older than this are forgotten." onChange={(v) => patch("configGateHours", Math.max(1, Math.min(72, Math.round(v))))} />
+        </Grid>
+      ) : null}
+      <Toggle
+        label="Gate recovery: a blocked group or configuration reopens as soon as its Set's own paper results after its last executed result pass the same rule (never stuck until its results age out)"
+        on={overlay.gateRecovery === true}
+        onChange={(v) => patch("gateRecovery", v)}
+      />
       <Toggle
         label="Scratch exit on Set lanes (off: a Set leaves only by its own stop, target and time; the global +0.16 % scratch cut every range's winners)"
         on={overlay.setScratchEnabled === true}
@@ -2527,7 +2609,7 @@ function PfWindowControls({
           checked={overlay.minPfStepAutoScope === "set"}
           onChange={(e) => patch("minPfStepAutoScope", e.target.checked ? "set" : "step")}
         />
-        Auto floor per config Set (each Set learns its own floor; with too few orders it uses the step, pooled, then manual floor)
+        Auto floor per config Set (each Set learns its own floor; with too few orders a configuration with its own manual floor — Signals, Micro range, an indication entry's lane policy — uses that value, every other Set the step, pooled, then manual floor)
       </label>
       <Slider
         label="Auto per Set: orders a Set needs"
@@ -2537,6 +2619,15 @@ function PfWindowControls({
         step={1}
         hint="admitted orders of the Set itself before its own floor is used; fewer = the defaults"
         onChange={(v) => patch("minPfSetAutoMin", v)}
+      />
+      <Slider
+        label="Auto: relation factor PF vs orders"
+        value={overlay.minPfAutoOrdersFactor ?? 0}
+        min={0}
+        max={3}
+        step={0.05}
+        hint="0 = the lowest floor within the tolerance below of the best PF. Above 0 every candidate floor scores PF × (its admitted orders ÷ the most any floor admits) ^ factor and the best score wins: 0.5 weighs orders moderately, 1 = PF × orders share, higher favours more orders."
+        onChange={(v) => patch("minPfAutoOrdersFactor", Math.max(0, Math.min(3, Math.round(v * 100) / 100)))}
       />
       <Slider
         label="Auto: tolerance to the best PF (%)"
@@ -2562,7 +2653,7 @@ function PfWindowControls({
         min={1}
         max={2}
         step={0.01}
-        hint="Caps the learned Auto floor and the manual 1 + TP % x ratio at this value in every stage (owner 2026-11-04: 1.27). 2.00 = no cap."
+        hint="Caps the learned Auto floor and the manual 1 + TP % x ratio at this value in every stage (owner 2026-11-04: 1.27). A configuration's own manual floor (Signals 2.20, Micro range) is not capped. 2.00 = no cap."
         onChange={(v) => patch("minPfStepAutoHigh", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
       />
       <StepPfTable overlay={overlay} stats={stats ?? null} />
@@ -2584,7 +2675,7 @@ function PfWindowControls({
       ).map(([name, pfKey, nKey]) => (
         <div key={pfKey} className="contents">
           <Slider
-            label={`${name} · min PF`}
+            label={`Window ${name} · min PF`}
             value={overlay[pfKey]}
             min={MIN_PF_FLOOR}
             max={2.5}
@@ -2593,7 +2684,7 @@ function PfWindowControls({
             onChange={(v) => patch(pfKey, v)}
           />
           <Slider
-            label={`${name} · up to N orders`}
+            label={`Window ${name} · up to N orders`}
             value={overlay[nKey]}
             min={1}
             max={100}
@@ -2604,22 +2695,13 @@ function PfWindowControls({
         </div>
       ))}
       <Slider
-        label="Long · min PF"
+        label="Window Long · min PF"
         value={overlay.minPfLong}
         min={MIN_PF_FLOOR}
         max={3}
         step={0.01}
         hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders`}
         onChange={(v) => patch("minPfLong", v)}
-      />
-      <Slider
-        label="Signals · min PF"
-        value={overlay.minPfSignals}
-        min={2.2}
-        max={3}
-        step={0.01}
-        hint="minimum 2.20 · own Signal evidence only; the full CTS-A-O Signal adapter is not yet connected in CTS-G"
-        onChange={(v) => patch("minPfSignals", v)}
       />
     </>
   );
@@ -2822,9 +2904,51 @@ function IndicationConfigEditor({
   );
 }
 
+type RoundsAutoRow = { set?: string; lane?: string; side?: string; policy?: string; relation: string; key?: string; count: number; raises: boolean; source: string; pf: number | null; results: number; ratio: number };
+
+/** The live Auto verdict of every block count (execution.blockRounds.auto from the engine): which counts raise now, on what evidence. */
+function BlockRoundsAutoTable({ stats }: { stats: LiveStats | null }) {
+  const rounds = stats?.execution?.blockRounds as { auto?: RoundsAutoRow[]; autoTotal?: number; legacyGroups?: number; inactivePolicyGroups?: number } | undefined;
+  const raw = rounds?.auto;
+  if (!Array.isArray(raw) || !raw.length) return <p className="mt-3 font-mono text-[11px] text-muted">Auto verdicts appear once the engine reports them.</p>;
+  return (
+    <div className="mt-3 overflow-x-auto" data-testid="block-rounds-auto">
+      <p className="mb-2 font-mono text-[11px] text-muted">Showing {raw.length} of {rounds?.autoTotal ?? raw.length} current verdicts. Archived scopes: {(rounds?.legacyGroups ?? 0) + (rounds?.inactivePolicyGroups ?? 0)}.</p>
+      <table className="w-full min-w-[740px] text-left text-sm">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 font-medium">Set / lane / side</th>
+            <th className="pb-2 font-medium">Relation / group</th>
+            <th className="pb-2 font-medium">Count</th>
+            <th className="pb-2 font-medium">Results</th>
+            <th className="pb-2 font-medium">PF of its raises</th>
+            <th className="pb-2 font-medium">Decided by</th>
+            <th className="pb-2 font-medium">Raises now</th>
+            <th className="pb-2 font-medium">Ratio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {raw.map((r) => (
+            <tr key={JSON.stringify([r.set, r.lane, r.side, r.policy, r.relation, r.key, r.count])} className="border-t border-border font-mono tabular-nums">
+              <td className="py-1">{r.set ?? "legacy scope"} / {r.lane ?? "—"} / {r.side ?? "—"}</td>
+              <td className="py-1">{r.relation} / {r.key ?? "—"}</td>
+              <td className="py-1">{r.count}</td>
+              <td className="py-1">{r.results}</td>
+              <td className="py-1">{r.results && r.pf != null ? r.pf.toFixed(3) : "—"}</td>
+              <td className="py-1">{r.source}</td>
+              <td className={`py-1 ${r.raises ? "text-fg" : "text-muted"}`}>{r.raises ? "yes" : "no"}</td>
+              <td className="py-1">{r.ratio.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Card({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-4 rounded-radius border border-border bg-surface p-4">
+    <section id={slug(title)} data-card={title} className="scroll-mt-36 space-y-4 rounded-radius border border-border bg-surface p-4">
       <div>
         <h2 className="text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
         {hint ? <p className="mt-1 text-sm text-muted">{hint}</p> : null}

@@ -47,7 +47,7 @@ def every_count_is_independent_and_stacks_from_the_original_volume():
         cfg = b.cfg
         levels = cfg.levels()
         _teach(b, _pos(cid="t1"), 101.5)                       # every count observed a winning add
-        led = b.ledgers["set|general:L:1m:sl1.00:st20|pos|LONG"]
+        led = b.ledgers[b.rel_keys(cfg, _pos())[0]]
         led["paper"]["2"] = [3, 0.001, 0.02]                   # count 2's own record is losing; counts 1 and 3 keep theirs
         pos = _pos(cid="p2")
         seen = []
@@ -81,11 +81,11 @@ def six_counts_one_step_apart_run_six_independent_procedures():
     with tempfile.TemporaryDirectory() as td:
         b = _book(td, blockCounts=table, blockRelations=["set", "step"])
         cfg = b.cfg
-        keys = ["set|general:L:1m:sl1.00:st20|pos|LONG", "step|general|20|pos|LONG"]
+        keys = b.rel_keys(cfg, _pos())
         for k in keys:                                          # what the group's previous positions left behind, count by count
             b.ledgers[k] = {"paper": {str(n): ([4, 0.03, 0.002] if n in (1, 3, 4, 6) else [4, 0.002, 0.03]) for n in range(1, 7)}, "executed": {},
                             "life": br.new_life(), "updated": 0.0}
-        other = "step|general|12|pos|LONG"
+        other = b.rel_keys(cfg, _pos(set_id="general:L:1m:sl1.00:st12"))[1]
         b.ledgers[other] = {"paper": {str(n): [9, 0.0, 0.09] for n in range(1, 7)}, "executed": {}, "life": br.new_life(), "updated": 0.0}   # another group: must not matter
         pos = _pos(cid="six", tp=103.0)
         adds, thresholds = [], []
@@ -114,8 +114,7 @@ def six_counts_one_step_apart_run_six_independent_procedures():
 
 
 def evidence_is_kept_per_set_and_overall_for_the_open_parents():
-    """Relations. "set": only this Set's own parents teach it; another Set of the same pack and TP step does not. "step" (Overall): every Set of the pack and
-    step, lane and direction teaches one record, another step or direction does not. Both selected: both must agree. Observations come from every open parent
+    """All relations remain within the same Set and lane. Both selected: both must agree. Observations come from every open parent
     (also one that gets no add), each count once per parent, measured from the price an add would have had when the count was first seen reached (a jump over
     two levels records both at the price after the jump: that is what an order sent then would have paid) to that parent's exit."""
     twin, other_step, short = "general:L:1m:sl2.00:st20", "general:L:1m:sl1.00:st12", "general:S:1m:sl1.00:st20"
@@ -138,8 +137,8 @@ def evidence_is_kept_per_set_and_overall_for_the_open_parents():
         b.observe(p, 100.35, 1500.0, BLOCK, COST, 3600.0)       # reached counts 1 and 2 (1 and 3 costs), not 3
         b.observe(p, 100.35, 1501.0, BLOCK, COST, 3600.0)       # the same level again: still one observation per count
         b.close(p, 100.0, 2000.0, BLOCK, COST)
-        rec = b.ledgers["step|general|20|pos|LONG"]["paper"]
-    want = {"set <- own": True, "set <- twin": False, "step <- twin": True, "step <- other step": False, "step <- other direction": False,
+        rec = b.ledgers[b.rel_keys(b.cfg, p)[0]]["paper"]
+    want = {"set <- own": True, "set <- twin": False, "step <- twin": False, "step <- other step": False, "step <- other direction": False,
             "set+step <- twin": False, "set+step <- own": True}
     lost = (100.35 - 100.0) / 100.35 + 0.001
     obs_ok = sorted(rec) == ["1", "2"] and rec["1"][0] == 1 and rec["2"][0] == 1 and abs(rec["1"][2] - lost) < 1e-9 and abs(rec["2"][2] - lost) < 1e-9
@@ -150,35 +149,35 @@ def the_deficit_guard_holds_adds_until_paper_adds_earn_the_deficit_back():
     """blockGuard: after executed adds have lost (the book's cumulative add net below zero) no add is sent; the add that would have gone is followed on paper
     from its price, once per count and parent; a parent whose paper add loses deepens nothing and resumes nothing; when the paper adds have earned the deficit
     back the record restarts at zero and the next add is sent. The record survives a restart; with the guard off the same book keeps adding. The guard is
-    the BOOK's: the losing add was on symbol A, the held ones are on symbol B, whose own records are clean (a relation's own executed record already stops
-    that relation; it never spoke for the others)."""
+    Set relation's: the losing add was on symbol A and the held ones are on symbol B of the same Set and count. A separate Set or count remains independent."""
     with tempfile.TemporaryDirectory() as td:
-        b = _book(td, blockGuard=True, blockRelations=["symbol"], blockCounts=[{"step": 1, "ratio": 1.0, "on": True}])
+        b = _book(td, blockGuard=True, blockRelations=["set"], blockCounts=[{"step": 1, "ratio": 1.0, "on": True}])
         _teach(b, _pos(cid="t1"), 101.5)
         _teach(b, _pos(cid="t2", symbol="B-USDT"), 101.5)
         p1 = _pos(cid="p1")
         r = b.candidate(p1, 100.12, 3000.0, BLOCK, COST, 3600.0, floor=1.1)
         _fill(p1, r, 100.12)
         b.close(p1, 99.6, 3100.0, BLOCK, COST)                 # the add lost about 0.62 %: the book is in deficit
-        deficit = b.guard["net"]
+        gk = br.guard_key(b.rel_keys(b.cfg, p1)[0], 1)
+        deficit = b.guards[gk]["net"]
         p2 = _pos(cid="p2", symbol="B-USDT")
         held = b.candidate(p2, 100.12, 3200.0, BLOCK, COST, 3600.0, floor=1.1)
         held_again = b.candidate(p2, 100.2, 3201.0, BLOCK, COST, 3600.0, floor=1.1)
         shadow_px = b.parents[b.key(p2)]["shadow"]["1"][1]
         b.close(p2, 99.9, 3300.0, BLOCK, COST)                 # its paper add lost too: still held
-        after_loss = dict(b.guard)
+        after_loss = dict(b.guards[gk])
         reloaded = SetBlockBook(b.path)
         reloaded.cfg = b.cfg
         p3 = _pos(cid="p3", symbol="B-USDT")
         still = reloaded.candidate(p3, 100.12, 3400.0, BLOCK, COST, 3600.0, floor=1.1)
         reloaded.close(p3, 102.0, 3500.0, BLOCK, COST)         # the paper add made about 1.78 %: the deficit is earned back
-        resumed = dict(reloaded.guard)
+        resumed = dict(reloaded.guards[gk])
         p4 = _pos(cid="p4", symbol="B-USDT")
         sent = reloaded.candidate(p4, 100.12, 3600.0, BLOCK, COST, 3600.0, floor=1.1)
         off = _book(os.path.join(td, "x") if os.makedirs(os.path.join(td, "x"), exist_ok=True) is None else td, blockRelations=["symbol"],
                     blockCounts=[{"step": 1, "ratio": 1.0, "on": True}])
         _teach(off, _pos(cid="t3", symbol="B-USDT"), 101.5)
-        off.guard = {"net": -0.5, "shadow": 0.0}
+        off.guards[br.guard_key(off.rel_keys(off.cfg, _pos(symbol="B-USDT"))[0], 1)] = {"net": -0.5, "shadow": 0.0}
         no_guard = off.candidate(_pos(cid="q", symbol="B-USDT"), 100.12, 3700.0, BLOCK, COST, 3600.0, floor=1.1)
     ok = (deficit < -0.005 and held is None and held_again is None and abs(shadow_px - 100.12) < 1e-9 and after_loss["net"] == deficit and after_loss["shadow"] < 0
           and still is None and resumed == br.new_guard() and sent is not None and sent["group"] == 1 and no_guard is not None)
@@ -206,13 +205,15 @@ def an_add_needs_room_to_the_target_and_an_allowed_parent_type():
         k = _book(os.path.join(td, "k") if os.makedirs(os.path.join(td, "k"), exist_ok=True) is None else td, blockKinds=["base", "trail"], blockRelations=["symbol"],
                   blockCounts=[{"step": 1, "ratio": 1.0, "on": True}])
         _teach(k, _pos(cid="t2"), 101.5)
+        _teach(k, _pos(set_id="general:L:1m:tr0.60:0.30", cid="t3"), 101.5)
         kinds = {}
         for name, sid in (("base", "general:L:1m:sl1.00:st20"), ("exit", "general:L:1m:sl1.00:st20:xt"), ("trail", "general:L:1m:tr0.60:0.30")):
             kinds[name] = k.candidate(_pos(set_id=sid, cid="k" + name), 100.12, 3100.0, BLOCK, COST, 3600.0, floor=1.1) is not None
         x = _pos(set_id="general:L:1m:sl1.00:st20:xt", cid="kx")
         k.observe(x, 100.3, 3200.0, BLOCK, COST, 3600.0)
         k.close(x, 100.9, 3300.0, BLOCK, COST)
-        exit_observed = k.ledgers["symbol|A-USDT|LONG"]["paper"]["1"][0] == 2
+        exit_observed = all(k.ledgers[k.rel_keys(k.cfg, _pos(set_id=sid))[0]]["paper"]["1"][0] == 1 for sid in
+                            ("general:L:1m:sl1.00:st20", "general:L:1m:sl1.00:st20:xt"))
     book = se.SetBook()
     book.load(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"))))
     ids_ok = all(br.kind_of_set(st.id) == st.kind for st in book.by_idx) and br.kind_of_set("trend:L:1m:sl1.00:st20") == "base"
@@ -304,7 +305,7 @@ def block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule():
                 blocks = {o: b.groups[b.gid("step", k["step"], o)]["blocks"] for o in rounds.COUNTS}
                 if blocks != {o: len(nets) // o for o in rounds.COUNTS}:
                     bad.append((n, "blocks", blocks))
-    # all six on: the sum of the six procedures, each by its own reading of the same results (the multiple feeds every count's weighted net)
+    # All six on: each count follows its own recovery, and their requested amounts stack.
     nets = [rng.choice((-1.0, -0.4, 0.3, 0.9, 1.5)) for _ in range(300)]
     cfg = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 4, "counts": {str(o): {"on": True, "ratio": 0.1 * o, "step": o % 2 == 0, "maxLevel": 3, "pause": o % 3} for o in rounds.COUNTS}})
     b = rounds.RoundsBook(cfg=cfg)
@@ -343,7 +344,7 @@ def _replayed_rounds(history, n, c):
                 unit += p["net"]
                 weighted += p["net"] * p["mult"]
                 scored += 1
-        if not scored:
+        if scored != len(block):
             continue
         if rest > 0:
             rest -= 1
@@ -420,7 +421,7 @@ def block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions(
         cap = rng.choice((2.0, 3.0, 5.0))
         cfg = rounds.config_of({"enabled": True, "relations": rels, "maxMult": cap, "counts": counts})
         b = rounds.RoundsBook(cfg=cfg)
-        hist = {}                                # (relation, key) -> the group's positions in open order
+        hist = {}                                # (relation, key, count) -> positions in open order
         live, seq = [], 0
         for i in range(rng.randint(40, 160)):
             while live and (len(live) >= 5 or rng.random() < 0.45):          # close (or release) a random open position
@@ -437,38 +438,38 @@ def block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions(
             keys = rounds.keys_of(rng.choice(("A", "B", "C")), rng.choice((1, -1)), rng.choice(("general", "indications")), rng.choice(("base", "trail")),
                                   rng.choice((5, 9)), "pos", rng.choice(("s1", "s2")))
             want = 1.0
+            rows = []
             for rel in cfg.relations:
-                h = hist.setdefault((rel, keys[rel]), [])
                 for n in rounds.COUNTS:
                     c = counts[str(n)]
-                    if c["on"]:
-                        want += c["ratio"] * _replayed_rounds(h, n, c)[0]
+                    h = hist.setdefault((rel, keys[rel], n), [])
+                    own = c["ratio"] * _replayed_rounds(h, n, c)[0] if c["on"] else 0.0
+                    want += own
+                    row = {"mult": min(cap, 1.0 + own), "net": None, "closed": None}
+                    h.append(row)
+                    rows.append(row)
             want = min(cap, want)
             got = b.ask(keys)[0]
             if abs(got - want) > 1e-9:
                 bad.append((_case, i, round(got, 6), round(want, 6)))
                 break
             b.opened(f"p{i}", keys, got)
-            rows = []
-            for rel in cfg.relations:
-                row = {"mult": got, "net": None, "closed": None}
-                hist[(rel, keys[rel])].append(row)
-                rows.append(row)
             live.append((f"p{i}", rows))
             positions += 1
             raised += got > 1.0 + 1e-9
             top = max(top, got)
-        for (rel, key), h in hist.items():       # every count settled exactly its complete blocks, in order
-            for n in rounds.COUNTS:
-                g = b.groups[b.gid(rel, key, n)]
-                done = 0
-                for j in range(0, len(h) - len(h) % n, n):
-                    if any(p["closed"] is None for p in h[j:j + n]):
-                        break
-                    done += 1
-                pending = sum(1 for _ in range(done * n, len(h), n))
-                if len(g["open"]) != pending or (g["level"], g["pause"]) != _replayed_rounds(h, n, counts[str(n)]):
-                    bad.append((_case, rel, key, n, "state"))
+        if bad and bad[-1][0] == _case:
+            continue
+        for (rel, key, n), h in hist.items():
+            g = b.groups[b.gid(rel, key, n)]
+            done = 0
+            for j in range(0, len(h) - len(h) % n, n):
+                if any(p["closed"] is None for p in h[j:j + n]):
+                    break
+                done += 1
+            pending = sum(1 for _ in range(done * n, len(h), n))
+            if len(g["open"]) != pending or (g["level"], g["pause"]) != _replayed_rounds(h, n, counts[str(n)]):
+                bad.append((_case, rel, key, n, "state"))
         books += 1
     ok = plain_ok and not bad and raised > 1000 and top >= 5.0 - 1e-9
     return ok, (f"worked cases {worked if not plain_ok else 'all equal the hand calculation'}; {books} random books, {positions} positions ({raised} raised, "
@@ -476,9 +477,8 @@ def block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions(
 
 
 def block_rounds_ship_the_procedure_measured_at_or_above_without():
-    """The shipped overlays, the three presets that carry Block and the desk default hold the same blockRounds object, and it is the measured one: relation
-    step, block count 5 raising (ratio 1.0, step to level 2, no pause), the other five counts forming their blocks without raising, ceiling x 3. The engine's
-    absent-key default is off (fixtures and older overlays raise nothing)."""
+    """The overlays, presets and desk carry the same requested Block-rounds settings. Historical pooled-relation results do not establish performance of the
+    independently scoped procedure. The engine's absent-key default is off (fixtures and older overlays raise nothing)."""
     import json
     import re
     import block_rounds as rounds
@@ -487,12 +487,72 @@ def block_rounds_ship_the_procedure_measured_at_or_above_without():
     files = [os.path.join(pulse, f) for f in sorted(os.listdir(pulse)) if f.startswith("overlay-") and f.endswith(".json")]
     files += [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json", "low-steps-coordination-research.json")]
     carried = {os.path.basename(f): json.load(open(f)).get("blockRounds") for f in files}
-    want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "counts": {"5": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 2, "pause": 0}}}).to_json()
+    # owner 2026-11-15 ("block steps increasing and remaining at the last until net positive for lane, best vol increment ratio"): counts 1 and 2 of the step
+    # relation, ratio 1.0, step to level 3 (held until the lane's net is back at zero), ceiling x4. Re-evaluate after any change in scope.
+    want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 4, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 1.0,
+                             "counts": {"1": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0},
+                                        "2": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0}}}).to_json()
     same = {name: (isinstance(v, dict) and rounds.config_of(v).to_json() == want and v == want) for name, v in carried.items()}
     desk = open(os.path.join(ROOT, "src", "lib", "block-rounds.ts")).read()
-    desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 3,', desk)) and '"5": { on: true, ratio: 1, step: true, maxLevel: 2, pause: 0 }' in desk
+    desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 4,\s*auto: true,\s*autoN: 30,\s*autoMin: 15,\s*autoPf: 1,\s*autoRatio: 1,', desk)) and '"2": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 }' in desk
     off = rounds.config_of(None)
-    return all(same.values()) and len(same) == 7 and desk_ok and not off.enabled and not any(c.on for c in off.counts.values()), f"carried equal to the measured object: {same}; desk {desk_ok}; absent key enabled {off.enabled}"
+    return all(same.values()) and len(same) == 7 and desk_ok and not off.enabled and not any(c.on for c in off.counts.values()), f"carried settings agree: {same}; desk {desk_ok}; absent key enabled {off.enabled}"
+
+
+def block_rounds_auto_judges_every_count_on_its_own_newest_results():
+    """Owner 2026-11-15 ("auto eval for each block count and set by last n30 but minimal 15"): with auto on, each block count of each relation raises while the
+    PF of its newest autoN raise results (level x net at volume 1 of every position that opened while one of its procedures stood raised; the same on paper for a
+    count that does not raise) is at least autoPf; with fewer than autoMin results its manual switch holds. Read against a plain replay of the same positions:
+    every count's evidence, verdict and every position's multiple."""
+    import random
+    import block_rounds as rounds
+    rng = random.Random(11)
+    cfg = rounds.config_of({"enabled": True, "relations": ["overall", "direction"], "maxMult": 5, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 0.5,
+                            "counts": {"2": {"on": True, "ratio": 0.25, "step": True, "maxLevel": 3}, "4": {"on": False, "ratio": 0.0}}})
+    book = rounds.RoundsBook(cfg=cfg)
+    # Rebuild levels and Auto evidence from each procedure's own opening history.
+    history, evidence, bad = {}, {}, []
+    configs = cfg.to_json()["counts"]
+    seen_auto = 0
+    for i in range(600):
+        side = 1 if rng.random() < 0.5 else -1
+        k = rounds.keys_of("X", side, "p", "base", 5, "pos", "s")
+        # the plain verdict, from the plain evidence
+        add, opening = 0.0, []
+        for rel in cfg.relations:
+            for n in rounds.COUNTS:
+                key = (rel, k[rel], n)
+                h = history.setdefault(key, [])
+                e = evidence.setdefault(key, [])
+                level, _ = _replayed_rounds(h, n, configs[str(n)])
+                tail = e[-30:]
+                c = cfg.counts[n]
+                if len(tail) < 15:
+                    on, ratio = c.on, c.ratio
+                else:
+                    gp, gl = sum(x for x in tail if x > 0), -sum(x for x in tail if x < 0)
+                    on, ratio = (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)) >= 1.0, (c.ratio if c.ratio > 0 else 0.5)
+                    seen_auto += level > 0
+                increment = ratio * level if on else 0.0
+                add += increment
+                opening.append((h, e, level, min(5.0, 1.0 + increment)))
+        want = min(5.0, 1.0 + add)
+        got, _ = book.ask(k)
+        if abs(got - want) > 1e-9:
+            bad.append((i, got, want))
+        book.opened(f"p{i}", k, got)
+        net = rng.gauss(-0.1 if i < 300 else 0.15, 1.0)
+        book.closed(f"p{i}", net)
+        for h, e, level, own in opening:
+            h.append({"closed": i, "net": net, "mult": own})
+            if level > 0:
+                e.append(level * net)
+    ev_same = all(e[-200:] == book.evidence.get(book.eid(*key), []) for key, e in evidence.items())
+    snap = book.snapshot()
+    rows = {(r["relation"], r["key"], r["side"], r["count"]): r for r in snap["auto"]}
+    return (not bad and ev_same and seen_auto > 100 and len(rows) == 24 and all(r["source"] in ("auto", "manual") for r in rows.values()),
+            f"600 positions, independent relation keys x 6 counts; multiples equal the plain reading: {not bad} {bad[:2]}; evidence equal {ev_same}; auto verdicts read {seen_auto}; "
+            f"verdict rows {len(rows)}")
 
 
 CHECKS = [
@@ -505,4 +565,5 @@ CHECKS = [
     ("block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule", block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule),
     ("block_structure.block-rounds-hold-step-pause-and-stack-by-the-rule-on-overlapping-positions", block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions),
     ("block_structure.block-rounds-ship-the-procedure-measured-at-or-above-without", block_rounds_ship_the_procedure_measured_at_or_above_without),
+    ("block_structure.block-rounds-auto-judges-every-count-on-its-own-newest-results", block_rounds_auto_judges_every_count_on_its_own_newest_results),
 ]

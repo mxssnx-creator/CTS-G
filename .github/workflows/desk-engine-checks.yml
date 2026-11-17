@@ -40,6 +40,7 @@ jobs:
           python3 scripts/test_replay_memo.py
           python3 scripts/test_regression_memo.py
           python3 scripts/test_bounded_replay_build.py
+          python3 scripts/test_set_block_scope.py
       - name: Run offline engine tests
         run: python3 scripts/regression/run.py --jobs 4
       - name: Check VST transport and accounting offline
@@ -52,11 +53,14 @@ jobs:
           python3 scripts/test_indication_feature_cache.py
       - name: Check x02 ownership and protection offline
         run: |
+          python3 scripts/test_redis_read_failures.py
+          python3 scripts/test_redis_control_guards.py
           python3 scripts/test_x02_native_session.py
           python3 scripts/test_native_cleanup_evidence.py
           python3 scripts/test_fee_scope_refresh.py
           python3 scripts/test_venue_fill_fees.py
           python3 scripts/test_disjoint_lastn.py
+          python3 scripts/test_block_rounds_set_scope.py
           python3 scripts/test_trailing_control_pacing.py
           python3 scripts/test_project_order_identity.py
           python3 scripts/test_control_coverage.py

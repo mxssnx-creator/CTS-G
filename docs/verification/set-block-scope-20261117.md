@@ -1,0 +1,9 @@
+# Set Block add-on: scoped evidence and guard
+
+All selected add-on relation keys now include the Set, lane and side. Each relation's deficit guard is further separated by add count. When a guarded count is in deficit, hypothetical adds can provide paper recovery evidence without needing the losing executed record to pass first. Actual execution statistics remain intact; after that count's deficit is recovered on paper, a new executed-qualification epoch begins. The simulator and coordination study use the same relation keys and guard rules.
+
+Version-1/2 pooled evidence is kept but cannot qualify the new scopes. An old pooled deficit cannot be allocated to individual Sets and counts; when the guard is enabled, guarded adds remain held until it is reconciled, and Settings displays that condition. Version-3 state is unreadable by older releases, which disable adds on an unreadable state. The optional carry lifecycle is still shared by counts within each relation and needs independent redesign. Add-on qualification is cumulative rather than the requested per-count last-N Auto evaluation.
+
+Five focused tests cover sibling Set and count isolation, restart, paper recovery, other-relation gating, legacy deficit retention, and an ordered replay-versus-engine cash oracle. These use hypothetical positions, not an exchange.
+
+In a retrospective 20-symbol fixed-parent overlay study, 16 combinations of trigger distance, add ratio, observation minimum and guard were tested. Parent trade candidates overlap and are not a shared-capital account. Based on settled parent positions only, baseline PF was about 1.197 then 0.924 in successive 12-hour periods; all tested add-on combinations remained below 1 in the later period. Some improved PF modestly; none establishes profitable execution or low drawdown. Endpoint marks were not included in those settled PFs, and the study used idealized threshold fills. Do not treat the study as evidence of an optimal default.

@@ -1,4 +1,5 @@
 import { pendingMigrations } from "../../scripts/migration-plan.mjs";
+import { embeddedDbDataDir } from "../../scripts/embedded-db-path.mjs";
 
 /** Which database backend is active. */
 export type DbSource = "neon" | "pglite";
@@ -107,11 +108,18 @@ function createNeonSql(): Promise<Sql> {
 
 async function createPgliteSql(): Promise<Sql> {
   // Embedded Postgres, imported on demand so it never loads on the Neon path.
-  // One in-memory instance per process, shared across HMR module instances, so
-  // data survives source edits (it resets on dev-server restart).
+  // Managed Linux installs keep state outside the disposable source checkout.
+  // An unconfigured preview still gets its own in-memory instance. A configured
+  // path that cannot be opened rejects bootstrap instead of losing saved state.
   globalRef.__pgliteInstance__ ??= (async () => {
     const { PGlite } = await import("@electric-sql/pglite");
+    const dataDir = embeddedDbDataDir(process.env);
+    if (dataDir) {
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    }
     const pg = new PGlite({
+      dataDir,
       parsers: {
         [OID_INT8]: Number,
         [OID_DATE]: identity,
@@ -195,7 +203,7 @@ export function getSql(): Promise<Sql> {
 }
 
 /**
- * The shared PGLite instance (preview only), with `migrations/*.sql` applied.
+ * The shared PGLite instance, with `migrations/*.sql` applied.
  * Lets Better Auth persist to the SAME embedded DB as app data in preview (via a
  * Kysely dialect). Throws when `DATABASE_URL` is set (that path uses Neon).
  */
@@ -212,7 +220,7 @@ export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite
 /**
  * Finish DB bootstrap before the server handles traffic.
  *
- * - **PGLite** (preview / no `DATABASE_URL`): open the in-memory DB and apply
+ * - **PGLite** (no `DATABASE_URL`): open the configured local DB and apply
  *   `migrations/*.sql`. Idempotent — concurrent callers share one promise.
  * - **Neon**: no-op (pool is created lazily on first query).
  *

@@ -253,7 +253,7 @@ export type PulseOverlay = {
   blockCarry: boolean;
   blockPauseSteps: number;
   blockSkipFirst: number;
-  /** Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back. */
+  /** Deficit guard: each Set, relation and count resumes after its paper adds earn back its own executed deficit. */
   blockGuard: boolean;
   /** A count of a fixed-target parent adds only up to this share of the way to the target (0 = no rule). */
   blockTargetShare: number;
@@ -389,6 +389,14 @@ export type PulseOverlay = {
   groupGatePf: number;
   groupGateHours: number;
   groupGateMin: number;
+  /** Config gate (owner 2026-11-15): the group gate's rule on ONE configuration Set's own executed results (Set x lane). */
+  configGate: boolean;
+  configGateN: number;
+  configGatePf: number;
+  configGateHours: number;
+  configGateMin: number;
+  /** Gate recovery (owner 2026-11-15, "never block the Sets or stuck them"): a blocked group / config scope reopens on its Set's paper results after the scope's last executed result. */
+  gateRecovery: boolean;
   stratDca: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -522,6 +530,9 @@ export type PulseOverlay = {
   minPfStepAutoScope: "step" | "set";
   minPfSetAutoMin: number;
   minPfStepAutoTol: number;
+  /** PF vs admitted orders in the Auto minimum PF (owner 2026-11-15): 0 = the lowest floor within the tolerance of the best PF; above 0 each
+   * candidate floor scores PF x (admitted / most admitted) ^ factor and the best score wins (higher = more orders). */
+  minPfAutoOrdersFactor: number;
   /** The lowest floor Auto may choose (1.00 .. 2.00). */
   minPfStepAutoLow: number;
   /** Highest floor a TP step may ask (server: set_engine.STEP_PF_AUTO_HIGH_DEFAULT); 2 = no cap. */
@@ -543,6 +554,8 @@ export type PulseOverlay = {
   trailMinStep: number;
   exitEnabled: boolean;
   exitIgnoreTp: boolean;
+  /** false = no Exit Sets at all (owner 2026-11-15); exitIgnoreTp keeps the trailing Sets' TP rule. */
+  exitSets: boolean;
   exitBestOf: boolean;
   exitLockOn: boolean;
   exitPeakOn: boolean;
@@ -556,18 +569,29 @@ export type PulseOverlay = {
   exitMinHoldS: number;
   setSlMinRatio: number;
   trailStepMin: number;
+  /** The TP Sets' lowest step (owner 2026-11-15, live x02: TP Sets from 2.6 % read PF 1.04 on 92 closes); 0 = setMinStep. Trailing stops do not move. */
+  tpStepMin: number;
   slAutoRange: boolean;
   slAutoMin: number;
   slAutoTol: number;
   execGateN: number;
   slRatiosByRange: Record<string, number[]>;
   exitSetHoldBars: number;
+  trailTimeExit: boolean;
+  trailHoldBars: number;
+  trailHoldArmedFree: boolean;
   exitPfWindow: number;
   exitDeactN: number;
   exitMinPf: number;
   exitAutoDeact: boolean;
   modules?: Record<string, boolean>;
 };
+
+/** The signal entries x01 / x02 ship (owner 2026-11-14 / 15): 1 / 5 min base + trailing, 15 / 30 min trailing. */
+const SHIPPED_SIGNAL_CONFIGS: SignalConfig[] = [
+  { label: "signals 1/5m", timeframes: [1, 5], stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"] },
+  { label: "signals 15/30m trailing", timeframes: [15, 30], stepMin: 6, stepMax: 15, slRatios: [0.5, 0.75, 1.0], types: ["trail"] },
+] as SignalConfig[];
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
@@ -662,12 +686,12 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   "KAS-USDT",
   ],
   axisPrevEnabled: true,
-  axisPrevMaxWindow: 12,
-  axisLastEnabled: true,
+  axisPrevMaxWindow: 4,
+  axisLastEnabled: false,
   axisLastMaxWindow: 4,
-  axisContEnabled: true,
+  axisContEnabled: false,
   axisContMaxWindow: 8,
-  axisPauseEnabled: true,
+  axisPauseEnabled: false,
   axisPauseMaxWindow: 8,
   minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.11,
@@ -708,8 +732,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   strategyProcessingByRange: {},
   stratGeneral: true,
   stratShortRange: true,
-  stratSignals: false,
-  signalConfigs: [],
+  stratSignals: true,
+  signalConfigs: SHIPPED_SIGNAL_CONFIGS,
   stratTrend: true,
   stratBreakout: false,
   stratReversion: true,
@@ -727,6 +751,12 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   groupGatePf: 1,
   groupGateHours: 6,
   groupGateMin: 1,
+  configGate: true,
+  configGateN: 5,
+  configGatePf: 1,
+  configGateHours: 24,
+  configGateMin: 1,
+  gateRecovery: true,
   stratDca: false,
   indTypeState: true,
   indTypeDirection: true,
@@ -826,6 +856,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfStepAutoScope: "set",
   minPfSetAutoMin: 10,
   minPfStepAutoTol: 5,
+  minPfAutoOrdersFactor: 0,
   minPfStepAutoLow: 1.02,
   minPfStepAutoHigh: 2,
   pauseMode: "auto",
@@ -844,6 +875,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailMinStep: 3,
   exitEnabled: true,
   exitIgnoreTp: true,
+  exitSets: false,
   exitBestOf: true,
   exitLockOn: true,
   exitPeakOn: true,
@@ -856,13 +888,17 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
   setSlMinRatio: 0.5,
-  trailStepMin: 3,
+  trailStepMin: 12,
+  tpStepMin: 5,
   slAutoRange: true,
   slAutoMin: 20,
   slAutoTol: 5,
   execGateN: 0,
   slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
   exitSetHoldBars: 720,
+  trailTimeExit: true,
+  trailHoldBars: 0,
+  trailHoldArmedFree: false,
   exitPfWindow: 8,
   exitDeactN: 25,
   exitMinPf: 1.25,
@@ -1007,6 +1043,12 @@ export type CtsSettings = {
   groupGatePf?: number;
   groupGateHours?: number;
   groupGateMin?: number;
+  configGate?: boolean;
+  configGateN?: number;
+  configGatePf?: number;
+  configGateHours?: number;
+  configGateMin?: number;
+  gateRecovery?: boolean;
   stratDca?: boolean;
   indTypeState?: boolean;
   indTypeDirection?: boolean;
@@ -1106,6 +1148,7 @@ export type CtsSettings = {
   minPfStepAutoScope?: string;
   minPfSetAutoMin?: number;
   minPfStepAutoTol?: number;
+  minPfAutoOrdersFactor?: number;
   minPfStepAutoLow?: number;
   minPfStepAutoHigh?: number;
   pauseMode?: string;
@@ -1124,6 +1167,7 @@ export type CtsSettings = {
   setStepAdapt?: boolean;
   exitEnabled?: boolean;
   exitIgnoreTp?: boolean;
+  exitSets?: boolean;
   exitBestOf?: boolean;
   exitLockOn?: boolean;
   exitPeakOn?: boolean;
@@ -1137,12 +1181,16 @@ export type CtsSettings = {
   exitMinHoldS?: number;
   setSlMinRatio?: number;
   trailStepMin?: number;
+  tpStepMin?: number;
   slAutoRange?: boolean;
   slAutoMin?: number;
   slAutoTol?: number;
   execGateN?: number;
   slRatiosByRange?: Record<string, number[]>;
   exitSetHoldBars?: number;
+  trailTimeExit?: boolean;
+  trailHoldBars?: number;
+  trailHoldArmedFree?: boolean;
   exitPfWindow?: number;
   exitDeactN?: number;
   exitMinPf?: number;
@@ -1580,6 +1628,12 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     groupGatePf: Math.max(0.5, Math.min(3, num(cts.groupGatePf, 1))),
     groupGateHours: Math.max(1, Math.min(72, num(cts.groupGateHours, 12))),
     groupGateMin: Math.max(1, Math.min(50, Math.round(num(cts.groupGateMin, 1)))),
+    configGate: bool(cts.configGate, true),
+    configGateN: Math.max(1, Math.min(200, Math.round(num(cts.configGateN, 5)))),
+    configGatePf: Math.max(0.5, Math.min(3, Math.round(num(cts.configGatePf, 1) * 100) / 100)),
+    configGateHours: Math.max(1, Math.min(72, Math.round(num(cts.configGateHours, 24)))),
+    configGateMin: Math.max(1, Math.min(50, Math.round(num(cts.configGateMin, 1)))),
+    gateRecovery: bool(cts.gateRecovery, true),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),
@@ -1682,6 +1736,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfStepAutoScope: cts.minPfStepAutoScope === "step" ? "step" : "set",
     minPfSetAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfSetAutoMin, 10)))),
     minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
+    minPfAutoOrdersFactor: Math.max(0, Math.min(3, Math.round(num(cts.minPfAutoOrdersFactor, 0) * 100) / 100)),
     minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1.02) * 100) / 100)),
     minPfStepAutoHigh: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoHigh, 2) * 100) / 100)),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
@@ -1699,6 +1754,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setStepAdapt: bool(cts.setStepAdapt, false),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),
+    exitSets: bool(cts.exitSets, false),
     exitBestOf: bool(cts.exitBestOf, true),
     exitLockOn: bool(cts.exitLockOn, true),
     exitPeakOn: bool(cts.exitPeakOn, true),
@@ -1711,7 +1767,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitOptSlMax: num(cts.exitOptSlMax, 0.9),
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     setSlMinRatio: num(cts.setSlMinRatio, 0.5),
-    trailStepMin: Math.max(0, Math.min(50, Math.round(num(cts.trailStepMin, 3)))),
+    trailStepMin: Math.max(0, Math.min(50, Math.round(num(cts.trailStepMin, 12)))),
+    tpStepMin: Math.max(0, Math.min(50, Math.round(num(cts.tpStepMin, 5)))),
     slAutoRange: bool(cts.slAutoRange, true),
     slAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.slAutoMin, 20)))),
     slAutoTol: Math.max(0, Math.min(50, num(cts.slAutoTol, 5))),
@@ -1726,6 +1783,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       return out;
     })(cts.slRatiosByRange),
     exitSetHoldBars: num(cts.exitSetHoldBars, 720),
+    trailTimeExit: typeof cts.trailTimeExit === "boolean" ? cts.trailTimeExit : true,
+    trailHoldBars: Math.max(0, Math.min(4320, num(cts.trailHoldBars, 0))),
+    trailHoldArmedFree: cts.trailHoldArmedFree === true,
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
     exitMinPf: pfFloor(num(cts.exitMinPf, GATE_MIN_PF_DEFAULT)),

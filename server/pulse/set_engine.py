@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from config_num import num
 from lane_policy import expand_entries, negative_filter_ok
 import relation_lanes
+import axis_sets
 from modules import trailing_enabled, range_processing, additional_processing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
@@ -261,6 +262,41 @@ def group_verdict(rows, now: float, n: int = 10, floor: float = 1.0, hours: floa
         return True, None, len(window)
     pf = gain / loss
     return pf + 1e-12 >= float(floor), pf, len(window)
+def config_key(set_id: str, lane: str = "pos") -> str:
+    """The key of one configuration Set's own executed results for the config gate (configGate, owner 2026-11-15 "create also config gates not only group gates"): the
+    exact Set id and lane, so a losing configuration closes only itself while its siblings of the same group keep opening."""
+    return f"cfg:{set_id}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+
+
+def exec_gates_allow(book: Any, rows_of: Callable[[str], Any], set_id: str, lane: str, now: float,
+                     paper: Optional[Callable[[], Sequence[Tuple[float, float]]]] = None) -> Tuple[bool, str, Optional[float], int]:
+    """The executed-results gates of one candidate: the group gate (groupGate) and the config gate (configGate), each on the results its own key holds
+    (group_verdict). Returns (allow, the blocking key or "", its PF, its count); both off = allow.
+    gateRecovery (owner 2026-11-15, "never block then, no stuck"): a blocked scope opens nothing, so its executed record cannot change until it ages out; with
+    recovery on, the candidate Set's own continuing paper results (its lane Set: Real / Real Negative orders, `paper`) that closed AFTER the scope's newest
+    executed result are judged by the same rule, and a pass reopens the scope for this candidate."""
+    def recovered(key: str, n: int, floor: float, hours: float) -> bool:
+        if paper is None or not getattr(book, "gate_recovery", False):
+            return False
+        last = max((float(t) for t, _x in (rows_of(key) or ())), default=float("-inf"))
+        after = [(float(t), float(x)) for t, x in (paper() or ()) if last < float(t) <= float(now)]
+        if not after:
+            return False
+        ok_p, _pf_p, _k_p = group_verdict(after, now, n, floor, hours, 1)
+        return ok_p
+    if getattr(book, "group_gate", False):
+        key = set_group(set_id, lane, getattr(book, "group_gate_side", False))
+        ok, pf, k = group_verdict(rows_of(key) or (), now, book.group_gate_n, book.group_gate_pf, book.group_gate_hours, book.group_gate_min)
+        if not ok and not recovered(key, book.group_gate_n, book.group_gate_pf, book.group_gate_hours):
+            return False, key, pf, k
+    if getattr(book, "config_gate", False):
+        key = config_key(set_id, lane)
+        ok, pf, k = group_verdict(rows_of(key) or (), now, book.config_gate_n, book.config_gate_pf, book.config_gate_hours, book.config_gate_min)
+        if not ok and not recovered(key, book.config_gate_n, book.config_gate_pf, book.config_gate_hours):
+            return False, key, pf, k
+    return True, "", None, 0
+
+
 SET_KINDS = ("base", "exit", "trail")
 RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
 RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
@@ -1379,6 +1415,8 @@ class SetState:
     exe_pf: float = 0.0             # net PF of the executable lane over its last setGateWindow orders (listing)
     exe_n: int = 0
     neg: List[Tuple[float, float]] = field(default_factory=list)    # Real Negative Set (exit t, net): Main orders opened in a dip
+    exe_ent: Optional[array] = None   # entry times of `exe` (axisSets only): an Axis Set judges every order on the orders closed before its entry
+    neg_ent: Optional[array] = None   # entry times of `neg`
     neg_total: int = 0
     neg_n: int = 0
     neg_pf: float = 0.0
@@ -1623,8 +1661,11 @@ STEP_PF_CANDIDATES = tuple(round(1.0 + 0.02 * i, 2) for i in range(51))      # 1
 STEP_PF_AUTO_TOL_DEFAULT = 0.05                       # minPfStepAutoTol: the lowest floor whose delivered PF is within 5 % of the best one
 
 
+AUTO_SCORE_PF_CAP = 5.0               # minPfAutoOrdersFactor: a no-loss candidate counts as PF 5 in the score, so it cannot win on a handful of orders
+
+
 def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, tol: float,
-                     candidates: Sequence[float] = STEP_PF_CANDIDATES) -> Optional[Dict[str, Any]]:
+                     candidates: Sequence[float] = STEP_PF_CANDIDATES, orders_factor: float = 0.0) -> Optional[Dict[str, Any]]:
     """The Auto floor of one TP step from its causal pairs (the Set's PF over its last N closes at an order's entry, that order's net), independent of
     the manual ratio (owner 2026-11-03): every candidate floor F admits the pairs with PF >= F; among the candidates with at least `min_admitted`
     admitted orders, the best delivered PF is found, and the LOWEST floor whose delivered PF is within `tol` of that best is chosen -- the most valid
@@ -1642,7 +1683,12 @@ def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, to
     if not rows:
         return None
     best = max(r[1] for r in rows)
-    pick = min((r for r in rows if r[1] + 1e-12 >= best * (1.0 - tol)), key=lambda r: r[0])
+    if orders_factor > 0:
+        # the PF-vs-orders relation (minPfAutoOrdersFactor, owner 2026-11-15): score = PF x (admitted / most admitted) ^ factor; 0 = the tolerance rule
+        most = max(r[2] for r in rows)
+        pick = max(rows, key=lambda r: (min(r[1], AUTO_SCORE_PF_CAP) * (r[2] / most) ** orders_factor, -r[0]))
+    else:
+        pick = min((r for r in rows if r[1] + 1e-12 >= best * (1.0 - tol)), key=lambda r: r[0])
     return {"floor": pick[0], "pf": pick[1], "admitted": pick[2], "bestPf": best, "orders": len(prs), "pfAll": pf_of(g_[-1], l_[-1])}
 
 
@@ -1789,7 +1835,7 @@ class SetLane:
                     o["peak"] = max(o["peak"], float(bar[1]))
                 else:
                     o["peak"] = min(o["peak"], float(bar[2]))
-            if why is None and held >= (self.hold or cfg["time_bars"]):
+            if why is None and held >= (self.hold or cfg["time_bars"]) and not (o.get("trail") is not None and cfg.get("trail_armed_free")):
                 why, px = "time", float(bar[3])
             if why is None and held >= cfg["scratch_bars"]:
                 if (float(bar[3]) - entry) / entry * side >= cfg["scratch_min"]:
@@ -1845,6 +1891,7 @@ class SetLane:
         if cand is None:
             cand = [i for i in range(i0, i1) if dirs[i] != 0 and confs[i] >= thr]
         time_bars = self.hold or cfg["time_bars"]
+        armed_free = bool(cfg.get("trail_armed_free"))        # trailHoldArmedFree: an armed trail has no time exit (the walk path; the lookup path runs only unarmed)
         scratch_bars = cfg["scratch_bars"]
         scratch_min = cfg["scratch_min"]
         cooldown = cfg["cooldown"]
@@ -1995,7 +2042,7 @@ class SetLane:
                             peak = max(peak, high)
                         else:
                             peak = min(peak, low)
-                    if why is None and held >= time_bars:
+                    if why is None and held >= time_bars and not (trail is not None and armed_free):
                         why, px = "time", close
                     if why is None and held >= scratch_bars and (close - entry) / entry * side >= scratch_min:
                         why, px = "scratch+", close
@@ -2091,6 +2138,198 @@ def parse_step_hold(on: Any, minutes: Any) -> Dict[int, int]:
         if bool(on[i]) and 1 <= m <= 720:
             out[i + 1] = m
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------
+# Forked lane scans (overlay scanWorkers, owner 2026-11-15 "fix all performance issues ... async processings fully, multiple and for each").
+# A warm replay (signal memo hit) spends most of its time in the per-Set lane scans of one symbol, one Set after the other in one thread under the GIL.
+# Every Set's scan is a pure function of the symbol's frozen bars, the pack's signals and the Set's own geometry, so the Sets are split into balanced shares
+# and each share is scanned in a forked child: the child inherits exactly the replay's frame (same objects, nothing re-loaded, nothing re-sent), scans,
+# packs its rows into the same RowCols the in-thread loop builds and sends them back. The parent keeps the in-thread order for the tape aliases, so the
+# stored columns, ids and aliases equal the loop's (check processing.forked-lane-scans-equal-the-in-thread-scans). Any failure (no fork, a child that
+# dies, times out or answers garbage) returns None and the replay runs the in-thread loop: the result is the same either way, only slower.
+SCAN_FORK_MAX = 8
+HOLD_NEVER = 10 ** 9             # a Set's hold_bars that never ends (trailing Sets with trailTimeExit off): stop, trail and target decide alone
+SNAP_CACHE_MIN_COST_S = 0.25     # SetBook.snapshot_cached: snapshots cheaper than this are built on every call
+SNAP_CACHE_X = 20.0              # a costly snapshot is rebuilt at most every 20 x its own cost (about 5 % of one core) ...
+SNAP_CACHE_MAX_S = 60.0          # ... and at least every minute
+DISPLAY_CACHE_MIN_S = 0.05       # SetBook.display_cached: figures cheaper than this are computed on every call
+SCAN_FORK_MIN_SETS = 64          # fewer Sets than this are scanned in the replay's own thread (a fork costs more)
+SCAN_FORK_TIMEOUT_S = 1800.0
+
+
+def _scan_share(book: "SetBook", symbol: str, sets: Sequence["SetState"], packs: Sequence[str], bars, base_ts: float, warmup: int, n: int,
+                cfg: Dict[str, Any], dirs, confs, cand, acc, cand_side) -> Tuple[Dict[Tuple[str, str, int], int], List[Tuple[str, "RowCols", bytes]]]:
+    """One share of a symbol's Sets: the pause plan of the packs it touches, then each Set's scan exactly as _replay_symbol's loop does (no hold
+    candidates: the forked path is off with hold Auto). Returns (pause_now entries of these packs on this symbol, [(set id, columns, tape key)])."""
+    plan = book._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc, packs=packs)
+    own = set(packs)
+    pauses = {k: v for k, v in book.pause_now.items() if k[1] == symbol and k[0] in own}
+    out: List[Tuple[str, RowCols, bytes]] = []
+    for st in sets:
+        lane = SetLane(st, symbol)
+        sel_pause = book._lane_pause(lane, st.pack, plan, st.side)
+        trades = lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
+        if not trades:
+            continue
+        cols = RowCols([{"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"], "pnl": done["pnl"], "pnl_pct": done["pnl_pct"],
+                         "hold_s": done["hold_s"], "reason": done["reason"], "set_id": st.id} for done in trades])
+        # the in-thread loop's tape signature (entry, exit, reason, pnl_pct, side) as exact bytes: equal bytes = equal orders
+        key = (array("q", [d["entry_i"] for d in trades]).tobytes() + array("q", [d["exit_i"] for d in trades]).tobytes()
+               + array("d", [d["pnl_pct"] for d in trades]).tobytes() + "\x1f".join(f"{d['reason']}\x1e{d['side']}" for d in trades).encode())
+        out.append((st.id, cols, key))
+    return pauses, out
+
+
+def _scan_shares(book: "SetBook", symbol: str, sets: Sequence["SetState"], cand: Dict[str, List[int]], k: int) -> List[List["SetState"]]:
+    """Split the Sets into k shares of about equal work (a Set's work ~ its pack's entry bars), whole packs where they fit, each share in by_idx order."""
+    cost = {st.id: 1 + len(cand.get(st.pack) or ()) for st in sets}
+    total = sum(cost.values())
+    cap = total / k
+    units: List[List[SetState]] = []
+    by_pack: Dict[str, List[SetState]] = {}
+    for st in sets:
+        by_pack.setdefault(st.pack, []).append(st)
+    for rows in by_pack.values():
+        w = sum(cost[st.id] for st in rows)
+        if w <= cap / 2:
+            units.append(rows)
+            continue
+        part: List[SetState] = []
+        acc_w = 0.0
+        for st in rows:                       # a large pack is cut into pieces of about half a share
+            part.append(st)
+            acc_w += cost[st.id]
+            if acc_w >= cap / 2:
+                units.append(part)
+                part, acc_w = [], 0.0
+        if part:
+            units.append(part)
+    units.sort(key=lambda u: -sum(cost[st.id] for st in u))
+    shares: List[List[SetState]] = [[] for _ in range(k)]
+    loads = [0.0] * k
+    for u in units:                           # longest unit first onto the lightest share
+        j = loads.index(min(loads))
+        shares[j].extend(u)
+        loads[j] += sum(cost[st.id] for st in u)
+    order = {st.id: i for i, st in enumerate(sets)}
+    return [sorted(sh, key=lambda st: order[st.id]) for sh in shares if sh]
+
+
+def scan_forked(book: "SetBook", symbol: str, bars, base_ts: float, warmup: int, n: int, cfg: Dict[str, Any], dirs, confs, cand, acc, cand_side,
+                on_step: Optional[Callable[[], None]] = None) -> Optional[Dict[str, "RowCols"]]:
+    """{set id: columns} of every Set of this symbol that traded (aliased Sets share their first twin's columns), the pause_now entries applied; None = not
+    done (the caller scans in its own thread)."""
+    if not hasattr(os, "fork"):
+        return None
+    sets = [st for st in book.by_idx if st.pack in book.packs and book.symbol_allows(st.pack, symbol)]
+    k = max(1, min(int(book.scan_workers or 0), SCAN_FORK_MAX, os.cpu_count() or 1, len(sets) // max(1, SCAN_FORK_MIN_SETS)))
+    if k < 1 or len(sets) < SCAN_FORK_MIN_SETS:
+        return None
+    import gc
+    import pickle
+    import selectors
+    import warnings
+    shares = _scan_shares(book, symbol, sets, cand, k)
+    share_packs = [[p for p in book.packs if any(st.pack == p for st in share)] for share in shares]
+    covered = {p for ps in share_packs for p in ps}
+    share_packs[0] += [p for p in book.packs if p not in covered]       # a pack without a Set here still gets its pause plan, as in the in-thread pass
+    kids: List[Tuple[int, int]] = []
+    try:
+        for share, packs in zip(shares, share_packs):
+            packs = [p for p in book.packs if p in set(packs)]
+            r, w = os.pipe()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)      # "multi-threaded, fork() may deadlock": the child takes no lock and does no I/O but its pipe
+                pid = os.fork()
+            if pid == 0:                                                 # child: compute, write, leave without running any parent cleanup
+                code = 1
+                try:
+                    os.close(r)
+                    gc.disable()                                         # a collection would touch (and so copy) the parent's whole heap
+                    blob = pickle.dumps((list(_CODES),) + _scan_share(book, symbol, share, packs, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc,
+                                                                      cand_side), 5)
+                    view = memoryview(blob)
+                    while view:
+                        view = view[os.write(w, view):]
+                    code = 0
+                except BaseException:
+                    pass
+                finally:
+                    os._exit(code)
+            os.close(w)
+            kids.append((pid, r))
+        bufs = {r: bytearray() for _pid, r in kids}
+        sel = selectors.DefaultSelector()
+        for _pid, r in kids:
+            sel.register(r, selectors.EVENT_READ)
+        t0 = time.monotonic()
+        open_n = len(kids)
+        while open_n:
+            if time.monotonic() - t0 > SCAN_FORK_TIMEOUT_S:
+                raise TimeoutError("forked scan timed out")
+            for key, _ev in sel.select(timeout=1.0):
+                chunk = os.read(key.fd, 1 << 20)
+                if chunk:
+                    bufs[key.fd] += chunk
+                else:
+                    sel.unregister(key.fd)
+                    open_n -= 1
+            if on_step:
+                on_step()
+        sel.close()
+        results = []
+        for pid, r in kids:
+            _p, status = os.waitpid(pid, 0)
+            if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+                raise RuntimeError("forked scan failed")
+            results.append(pickle.loads(bytes(bufs[r])))
+        kids_done = True
+    except Exception:
+        for pid, _r in kids:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+        kids_done = False
+    finally:
+        for _pid, r in kids:
+            try:
+                os.close(r)
+            except OSError:
+                pass
+    if not kids_done:
+        return None
+    got: Dict[str, Tuple[RowCols, bytes]] = {}
+    for codes, pauses, rows in results:
+        # a child may have met a row word the parent's table does not hold yet: register it here and recode that child's columns
+        table = bytes(_code(wd) for wd in codes)
+        same = table == bytes(range(len(codes)))
+        book.pause_now.update(pauses)
+        for sid, cols, key in rows:
+            if not same:
+                cols.side, cols.reason = bytearray(cols.side.translate(table.ljust(256, b"\0"))), bytearray(cols.reason.translate(table.ljust(256, b"\0")))
+            got[sid] = (cols, key)
+    packed: Dict[str, RowCols] = {}
+    first_of: Dict[bytes, str] = {}
+    for st in sets:                                   # the in-thread order: the first Set with a tape keeps its columns, a later twin shares them
+        hit = got.get(st.id)
+        if hit is None:
+            continue
+        cols, key = hit
+        twin = first_of.get(key)
+        if twin is not None and len(packed[twin]) == len(cols):
+            packed[st.id] = packed[twin].share(st.id)
+        else:
+            first_of.setdefault(key, st.id)
+            packed[st.id] = cols
+    if sets:
+        book.progress.set_id = sets[-1].id
+    return packed
 
 
 class SetBook:
@@ -2199,6 +2438,7 @@ class SetBook:
         self.step_sl_report: List[Dict[str, Any]] = []
         self.set_floor_auto: Dict[str, float] = {}             # Set id -> its own learned Auto floor (minPfStepAutoScope "set"); absent = the defaults
         self.pf_step_auto_tol = STEP_PF_AUTO_TOL_DEFAULT
+        self.pf_auto_factor = 0.0
         self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
         self.step_floor_report: List[Dict[str, Any]] = []
         self._manual_floor_cache: Dict[Tuple[int, float], float] = {}
@@ -2235,9 +2475,13 @@ class SetBook:
         self.relation_at = 0.0                                  # the event clock of that pass (0 = none yet)
         self.relation_ms = 0.0                                  # what the last pass spent on the relation lanes
         self.window_basis = "time"           # lastNBasis: "time" (windows inside the lookback) or "count" (the newest N orders of the configuration, whatever their age)
+        self.scan_workers = 0                # scanWorkers: forked processes for the per-Set lane scans of one symbol (0 = off)
         self.replay_workers = 0              # replayWorkers: worker processes for the per-bar signals of a replay (0 = off, the engine's own process computes them)
         self.group_gate_side = False         # groupGateSide: the group key also carries the Set's direction (long / short groups judged apart)
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
+        self.config_gate, self.config_gate_n, self.config_gate_pf, self.config_gate_hours, self.config_gate_min = False, 5, 1.0, 24.0, 1   # configGate (config_key)
+        self.axis_sets = axis_sets.AxisSetsCfg()
+        self.gate_recovery = False
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
         self.hist_honor_tp = True
@@ -2253,6 +2497,9 @@ class SetBook:
         self.sl_min_ratio = 0.0
         self.sl_max_ratio = 0.0
         self.exit_set_hold_bars = 0
+        self.trail_time_exit = True
+        self.trail_hold_bars = 0
+        self.trail_armed_free = False
         self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
         self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
         self.trail_step_max = TRAIL_STEP_MAX                  # trailStepMax: the largest trailing arm in TP steps (22 = 2.2 %, up to TRAIL_STEP_CEIL)
@@ -2303,7 +2550,7 @@ class SetBook:
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
-                              self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol,
+                              self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol, self.pf_auto_factor,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -2481,7 +2728,8 @@ class SetBook:
         # hist_honor_tp decides the trailing Sets only. A base Set always takes its TP (its step is its target); ignoring TP
         # is its own strategy type: with exitIgnoreTp on, every base stop (SL ratio x step, one Set per distinct distance)
         # also runs as an Exit Set, its own lane with no TP exit, its own tape and its own Base validation.
-        self.exit_sets = bool(ov.get("exitIgnoreTp", True))
+        # exitSets false (owner 2026-11-15, "disable exit sets"): no Exit Set at all, without touching the trailing Sets' TP rule that exitIgnoreTp also sets
+        self.exit_sets = bool(ov.get("exitIgnoreTp", True)) and ov.get("exitSets", True) is not False
         # Exit Sets per indication pack (exitSetsByPack {pack: bool}, missing = on): measured 2026-11-03, the indications pack's Exit Sets executed at
         # PF 0.32 / 0.45 on two windows while its base Sets made 1.19 / 1.59, so a pack can run its Exit Sets or not on its own
         raw_xp = ov.get("exitSetsByPack")
@@ -2499,6 +2747,7 @@ class SetBook:
         opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
+        self.tp_step_min = int(max(0, min(STEP_MAX, finite(ov.get("tpStepMin"), 0.0))))      # the TP / Exit Sets' lowest step (0 = setMinStep)
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_DEFAULT_MAX, self.min_step_cfg, STEP_MAX)
         # owner 2026-11-03: the minimum TP step is 2 and stays there; step-adapt (raise it after losing live fills) is off by default -- on x02 it had
         # raised the minimum to 11 and removed every Set from 0.2 % to 1.0 %
@@ -2587,6 +2836,9 @@ class SetBook:
         self.sl_grid_all = sorted(set(self.sl_ratios) | {r for lst in by_range.values() for r in lst})
         # exitSetHoldBars (0 = the global time stop): Exit Sets (no TP) hold this many minutes before the time exit
         self.exit_set_hold_bars = int(max(0, min(720, finite(ov.get("exitSetHoldBars"), 0.0))))
+        self.trail_time_exit = bool(ov.get("trailTimeExit", True))      # false: trailing Sets have no time exit (hold_bars_for -> HOLD_NEVER)
+        self.trail_hold_bars = int(max(0, min(4320, finite(ov.get("trailHoldBars"), 0.0))))   # trailing Sets' own max hold in minutes; 0 = the global time stop
+        self.trail_armed_free = bool(ov.get("trailHoldArmedFree", False))  # the time exit applies only while a trailing Set's trail has not armed
         self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
         try:
             self.trail_step_max = int(max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_CEIL, int(float(ov.get("trailStepMax") or TRAIL_STEP_MAX)))))
@@ -2683,6 +2935,11 @@ class SetBook:
             self.replay_workers = max(0, min(6, int(float(ov.get("replayWorkers") or 0))))
         except (TypeError, ValueError):
             self.replay_workers = 0
+        try:
+            # scanWorkers: forked processes that run the per-Set lane scans of one symbol (0 = off, the scans run in the replay's own thread)
+            self.scan_workers = max(0, min(SCAN_FORK_MAX, int(float(ov.get("scanWorkers") or 0))))
+        except (TypeError, ValueError):
+            self.scan_workers = 0
         def _num(key, default, lo, hi):
             try:
                 x = float(ov.get(key) if ov.get(key) is not None else default)
@@ -2693,6 +2950,14 @@ class SetBook:
         self.group_gate_pf = _num("groupGatePf", 1.0, 0.5, 3.0)
         self.group_gate_hours = _num("groupGateHours", 12.0, 1.0, 72.0)
         self.group_gate_min = int(_num("groupGateMin", 1, 1, 50))
+        # the config gate: the same rule on one configuration Set's own executed results (config_key), next to the group gate (default off)
+        self.config_gate = bool(ov.get("configGate", False))
+        self.gate_recovery = bool(ov.get("gateRecovery", False))       # a blocked group / config scope reopens on its Sets' paper results after its last executed one
+        self.axis_sets = axis_sets.config_of(ov.get("axisSets"))       # Axis Sets: per configuration and lane, the Auto choice among every Axis setting
+        self.config_gate_n = int(_num("configGateN", 5, 1, 200))
+        self.config_gate_pf = _num("configGatePf", 1.0, 0.5, 3.0)
+        self.config_gate_hours = _num("configGateHours", 24.0, 1.0, 72.0)
+        self.config_gate_min = int(_num("configGateMin", 1, 1, 50))
         self.trails = [t for t in self.trails if trailing_enabled(ov, tp_range_of(int(round(t[1] / TP_UNIT_PCT))))]
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
@@ -2732,6 +2997,7 @@ class SetBook:
         self.sl_auto_tol = max(0.0, min(0.5, float(num(ov, "slAutoTol", 5)) / 100.0))
         self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", 10))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
+        self.pf_auto_factor = max(0.0, min(3.0, float(num(ov, "minPfAutoOrdersFactor", 0.0))))   # PF vs admitted orders in the Auto choice (0 = tolerance rule)
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
         self.pf_step_auto_high = max(self.pf_step_auto_low, min(2.0, float(num(ov, "minPfStepAutoHigh", STEP_PF_AUTO_HIGH_DEFAULT))))
@@ -2819,6 +3085,9 @@ class SetBook:
         grid at 3.2 % whatever setStepMax says (the steps above belong to Wide)."""
         lo, hi = self._step_span()
         on = getattr(self, "tp_ranges", None) or TP_RANGES_DEFAULT
+        # tpStepMin (owner 2026-11-15, "update min step defaults to make profit"): the TP Sets' lowest step, applied to this grid only, so the trailing
+        # Sets' stop (_trail_mid_step, from setMinStep) does not move
+        lo = max(lo, int(getattr(self, "tp_step_min", 0) or 0))
         return [k for k in range(lo, hi + 1) if on.get(tp_range_of(k), True)]
 
     def _trail_mid_step(self) -> int:
@@ -3142,7 +3411,8 @@ class SetBook:
         depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
         manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
         automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
-        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0))
+        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0),
+                        int(getattr(self, "trail_hold_bars", 0) or 0))
         return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
@@ -3445,6 +3715,7 @@ class SetBook:
                 replay_book = copy.copy(self)
                 replay_book.bars = market
                 replay_book.bar_t = dated
+                replay_book._scan_packed = True     # this loop stores packed columns, so _replay_symbol may hand them over from forked scans
             prefetch = getattr(self, '_prefetch_replay', None)
             if prefetch is not None:
                 prefetch(replay_book, names, now)
@@ -3467,7 +3738,7 @@ class SetBook:
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
                     continue
-                packed: Dict[str, RowCols] = {}
+                packed: Dict[str, RowCols] = (inputs.pop("packed", None) if isinstance(inputs, dict) else None) or {}
                 alias = (inputs.get("tape_alias") if isinstance(inputs, dict) else None) or {}      # a stub or an older producer returns nothing: no sharing
                 for sid, rows in per_set.items():
                     if rows and sid not in alias:
@@ -3671,6 +3942,7 @@ class SetBook:
         finally:
             self._replay_local.__dict__.pop('market', None)
             self.progress.last_run_ms = (time.time() - t0) * 1000
+            self._snapshot_stale()
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
@@ -3727,6 +3999,7 @@ class SetBook:
             "cost_pct": self.cost_pct,
             "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
             "min_sl_distance_pct": self.min_sl_distance_pct,
+            "trail_armed_free": bool(getattr(self, "trail_armed_free", False)),
         }
         # per pack: directions, confidences and the bars where an entry is possible (shared by all its Sets)
         dirs: Dict[str, List[int]] = {}
@@ -3739,6 +4012,12 @@ class SetBook:
             cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
         acc = BarIndex(bars)          # one index per symbol, shared by every lane
         cand_side = self._cand_by_side(cand, dirs)
+        if self.__dict__.get("_scan_packed") and self.scan_workers and not getattr(self, "hold_auto", False):
+            forked = scan_forked(self, symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc, cand_side, on_step)
+            if forked is not None:
+                # the same rows, columns and aliases the loop below builds, made in forked processes (scan_forked); replay_all stores them as they are
+                return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg, "dirs": dirs, "confs": confs, "cand": cand,
+                        "cand_side": cand_side, "acc": acc, "pause": {}, "tape_alias": {}, "packed": forked}
         pause_plan = self._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc)
         # Keys that traded exactly the same orders in this pass (Sets whose stops and targets never decide a trade differently) are noted in `tape_alias`
         # so the packing step stores their columns once. Every list in `hist` and every row stays its own: a Set's rows always name that Set.
@@ -3786,8 +4065,8 @@ class SetBook:
         return out
 
     def _pause_plan(self, symbol: str, bars: Sequence[Sequence[float]], base_ts: float, warmup: int, n: int, cfg: Dict[str, Any],
-                    dirs: Dict[str, List[int]], confs: Dict[str, List[float]], cand: Dict[str, List[int]], acc: "BarIndex"
-                    ) -> Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]]:
+                    dirs: Dict[str, List[int]], confs: Dict[str, List[float]], cand: Dict[str, List[int]], acc: "BarIndex",
+                    packs: Optional[Sequence[str]] = None) -> Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]]:
         """Per (pack, side) the rest after a winning close this symbol's replay uses: (fixed minutes, choice function or None). A long Set and a short
         Set of the same indication each learn their own pause from their own side's reference Sets (side 0: the one Set that trades both).
         Manual (pausePack) and fixed values are constants. The Auto Mode replays the reference Sets once per candidate pause on this symbol and, at each
@@ -3797,7 +4076,7 @@ class SetBook:
         plan: Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]] = {}
         sides = (1, -1) if self.direction_split else (0,)
         cand_side = self._cand_by_side(cand, dirs)
-        for pack in self.packs:
+        for pack in (self.packs if packs is None else packs):      # packs: a forked scan's own share (scan_forked); None = every pack
             if not self.pause_active(pack):
                 continue
             for side in sides:
@@ -3976,7 +4255,7 @@ class SetBook:
             memo: Dict[int, Optional[float]] = {}
             for sid, sig in own_of.items():
                 if sig not in memo:
-                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
+                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates(), self.pf_auto_factor)
                     memo[sig] = got["floor"] if got else None
                 if memo[sig] is not None:
                     own_floor[sid] = float(memo[sig])
@@ -3985,11 +4264,11 @@ class SetBook:
         report: List[Dict[str, Any]] = []
         for side in ((1, -1) if self.direction_split else (0,)):
             pooled = learn_step_floor([x for (bk, sd), v in pairs.items() if sd == side for x in v], self.pf_step_auto_min, self.pf_step_auto_tol,
-                                      self.step_auto_candidates())
+                                      self.step_auto_candidates(), self.pf_auto_factor)
             for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
                 tp = round(bucket * TP_UNIT_PCT, 3)
                 manual = manual_step_floor(tp, self.pf_step_ratio)
-                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
+                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol, self.step_auto_candidates(), self.pf_auto_factor)
                 source = "step" if got else ("pooled" if pooled else "manual")
                 use = got or pooled
                 floor = use["floor"] if use else manual
@@ -4075,41 +4354,78 @@ class SetBook:
         """
         return int(round(step_grid_pct(self.step_bucket(st) * TP_UNIT_PCT) / TP_UNIT_PCT))
 
-    def step_floor(self, st: "SetState") -> float:
-        """The one minimum PF of a Set (every window, every stage): the Auto Mode's learned value for its TP step when it has one, else 1 + TP% x ratio."""
-        bucket = self.step_bucket(st)
-        if self.pf_range_floor:
-            ranged = self.pf_range_floor.get(tp_range_of(bucket))
+    def own_manual_floor(self, st: "SetState") -> Optional[Tuple[float, str]]:
+        """The configuration's OWN manual minimum PF, when it has one (owner 2026-11-15: every coordination its own values): an indicationConfigs entry's
+        lanePolicy minPfByStep / minPfBySlRatio, a Signals pack's minPfSignals, a TP range's minPfByRange. None = the generic per-step table (1 + TP% x ratio)."""
+        policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
+        floors = [policy.get("minPfByStep", {}).get(str(self.step_bucket(st))), policy.get("minPfBySlRatio", {}).get(format(st.sl_ratio, "g"))]
+        floors = [float(f) for f in floors if f is not None]
+        if floors:
+            return max(floors + ([self.signal_min_pf] if is_signal_pack(st.pack) else [])), "lanePolicy"
+        if is_signal_pack(st.pack):
+            return self.signal_min_pf, "signals"
+        if self.pf_by_step and self.pf_range_floor:
+            ranged = self.pf_range_floor.get(tp_range_of(self.step_bucket(st)))
             if ranged is not None:
-                return ranged
+                return ranged, "range"
+        return None
+
+    def axis_set_verdict(self, st: "SetState", lane: str, now: float, cutoff: float, floor: float) -> Optional[Dict[str, Any]]:
+        """axisSets: the Auto choice among every Axis setting for this Set's lane Set (its Real / Real Negative orders inside the evidence window, each judged
+        on the orders closed before its entry). Cached until the lane Set changes. None when the lane Set holds no entry times (axisSets off)."""
+        src = st.neg if lane == "neg" else st.exe
+        ents = st.neg_ent if lane == "neg" else st.exe_ent
+        if ents is None or len(ents) != len(src):
+            return None
+        keep = [k for k, (t, _v) in enumerate(src) if cutoff <= t <= now]
+        key = (st.id, lane, len(src), src[-1][0] if src else 0.0, keep[0] if keep else -1, round(floor, 6))
+        cache = self.__dict__.setdefault("_axis_set_cache", {})
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        got = axis_sets.choose([src[k][0] for k in keep], [ents[k] for k in keep], [src[k][1] for k in keep], floor, self.axis_sets)
+        if len(cache) > 50000:
+            cache.clear()
+        cache[key] = got
+        return got
+
+    def floor_of(self, st: "SetState") -> Tuple[float, str]:
+        """The one minimum PF of a Set (every window, every stage) and where it comes from. Auto on (minPfByStep + minPfStepAuto): the Set's own learned floor
+        (scope "set") first; a configuration with its own manual floor (own_manual_floor) falls back to THAT value, never to a floor learned on other
+        configurations' orders; every other Set falls back to its step's learned floor (step, else the direction's pool), then the manual step table.
+        Auto off: the configuration's own manual floor, else 1 + TP% x ratio. A learned floor is capped by minPfStepAutoHigh, as the manual table is."""
         high = self.pf_step_auto_high
-        if self.pf_step_auto:
-            own = self.set_floor_auto.get(st.id) if self.pf_set_auto else None
+        auto = self.pf_by_step and self.pf_step_auto
+        if auto and self.pf_set_auto:
+            own = self.set_floor_auto.get(st.id)
             if own is not None:
-                return min(float(own), high)          # the Set's own learned floor (minPfStepAutoScope "set")
+                return min(float(own), high), "auto-set"
+        mine = self.own_manual_floor(st)
+        if mine is not None:
+            return mine
+        if auto:
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
-                return min(float(learned), high)
+                return min(float(learned), high), "auto-step"
+        bucket = self.step_bucket(st)
         key = (bucket, self.pf_step_ratio)          # a pure function of the step and the ratio, asked for several times per Set by every verdict and snapshot
         got = self._manual_floor_cache.get(key)
         if got is None:
             got = self._manual_floor_cache[key] = manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
-        return min(got, high)
+        return min(got, high), "manual-step"
+
+    def step_floor(self, st: "SetState") -> float:
+        """The one minimum PF of a Set under minPfByStep (floor_of without its source)."""
+        return self.floor_of(st)[0]
 
     def floor_for(self, n: int, pack: str, st: Optional["SetState"] = None) -> float:
-        """The minimum PF a window of n orders of this pack asks. With minPfByStep (default) a Set asks one floor from its TP step in every window and stage;
-        else its size class when minPfBySize is on, else the pack's floor. Signal packs keep their own."""
-        if st is not None:
-            policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
-            floors = [policy.get("minPfByStep", {}).get(str(self.step_bucket(st))),
-                      policy.get("minPfBySlRatio", {}).get(format(st.sl_ratio, "g"))]
-            floors = [float(f) for f in floors if f is not None]
-            if floors:
-                return max(floors + ([self.signal_min_pf] if is_signal_pack(pack) else []))
+        """The minimum PF a window of n orders of this pack asks. With minPfByStep (default), with a configuration of its own floor (Signals, lanePolicy) or
+        with a learned own floor, a Set asks floor_of in every window and stage; else its size class when minPfBySize is on, else the pack's floor."""
+        if st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None
+                               or (self.pf_set_auto and st.id in self.set_floor_auto)):
+            return self.floor_of(st)[0]
         if is_signal_pack(pack):
             return self.signal_min_pf
-        if self.pf_by_step and st is not None:
-            return self.step_floor(st)
         if self.pf_by_size:
             for lim, pf in self.size_floors:
                 if n <= lim:
@@ -4146,8 +4462,7 @@ class SetBook:
     def stage_params(self, pack: str, st: Optional["SetState"] = None) -> StageParams:
         """The chain's rules for a pack and, with minPfByStep, for the Set's TP step (its one floor for every window and stage)."""
         policy = (self.pack_ranges.get(pack) or {}).get("lanePolicy") or {}
-        explicit = st is not None and (str(self.step_bucket(st)) in policy.get("minPfByStep", {}) or format(st.sl_ratio, "g") in policy.get("minPfBySlRatio", {}))
-        by_step = bool(explicit or (self.pf_by_step and st is not None and not is_signal_pack(pack)))
+        by_step = bool(st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None or (self.pf_set_auto and st.id in self.set_floor_auto)))
         step_floor = self.floor_for(0, pack, st) if by_step else 0.0
         w = self.win(st)
         return StageParams(base_long=w.base_long, base_short=w.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
@@ -4174,6 +4489,9 @@ class SetBook:
         cutoff = finite(now) - self._evidence_lookback() * BAR_S if now is not None else None
         ch = stage_chain(ts, ents, nets, self.stage_params(st.pack, st), window_start=cutoff)
         out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
+        if getattr(getattr(self, "axis_sets", None), "enabled", False):
+            out["real_ent"] = array("d", (ents[k] for k in ch["real"]))
+            out["realneg_ent"] = array("d", (ents[k] for k in ch["realneg"]))
         out["short_n"] = ch["short_n"]
         if relation_rows:
             # the Main-Set orders with their entry and symbol: what the Set contributes to its relation lanes (relation_lanes.Accumulator)
@@ -4202,6 +4520,10 @@ class SetBook:
         st.proc, st.proc_total = ch["main"][-PROC_KEEP:], len(ch["main"])
         st.exe, st.exe_total = ch["real"][-PROC_KEEP:], len(ch["real"])
         st.neg, st.neg_total = ch["realneg"][-PROC_KEEP:], len(ch["realneg"])
+        if "real_ent" in ch:
+            st.exe_ent, st.neg_ent = ch["real_ent"][-PROC_KEEP:], ch["realneg_ent"][-PROC_KEEP:]
+        else:
+            st.exe_ent = st.neg_ent = None
         st.main_short_win = int(ch["short_n"])
         st.main_evidence = ch.get("main_evidence")
         st.proc_replayed = True
@@ -4697,8 +5019,21 @@ class SetBook:
         w_ = self.win(st)
         return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(w_.real_neg_n if lane == "neg" else w_.real_n, st.pack, st), st.max_dd_s)
 
+    def _of_pack_kind(self, pack: str, kind: str) -> List[SetState]:
+        """The Sets of one pack and type in by_idx order, from an index rebuilt when the Set list changes. Found live on x02 (16,844 Sets, 2026-11-15):
+        every entry pick filtered the whole list once per pack, type and direction -- 610 of 807 samples of the entry path."""
+        by = self.by_idx
+        key = (id(by), len(by), self._topo_gen)
+        idx = self.__dict__.get("_pk_index")
+        if idx is None or idx[0] != key:
+            table: Dict[Tuple[str, str], List[SetState]] = {}
+            for st in by:
+                table.setdefault((st.pack, st.kind), []).append(st)
+            idx = self._pk_index = (key, table)
+        return idx[1].get((pack, kind), [])
+
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side)) and self.is_eligible(s)]
+        rows = [s for s in self._of_pack_kind(pack, kind) if (not side or s.side in (0, side)) and self.is_eligible(s)]
         rows.sort(key=self.rank_key, reverse=True)
         return rows
 
@@ -4777,6 +5112,10 @@ class SetBook:
 
     def hold_bars_for(self, st: "SetState") -> int:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
+        if st.kind == "trail" and not getattr(self, "trail_time_exit", True):
+            return HOLD_NEVER
+        if st.kind == "trail" and getattr(self, "trail_hold_bars", 0):
+            return int(self.trail_hold_bars)  # trailHoldBars: the trailing Sets' own max hold (minutes)            # trailTimeExit off (owner 2026-11-15 "for trailing no max hold time"): a trailing Set leaves only by its stop / trail (and its TP when honoured)
         table = getattr(self, "step_hold", None) or {}
         manual = int(table.get(self.step_of(st), 0)) if table else 0
         if not manual and st.kind == "exit":
@@ -5042,6 +5381,76 @@ class SetBook:
         with self._lock:
             return self._snapshot()
 
+    def _progress_view(self) -> Dict[str, Any]:
+        p = self.progress
+        return {"phase": p.phase, "pct": round(p.pct, 1), "symbol": p.symbol, "setId": p.set_id, "barsDone": p.bars_done, "barsTotal": p.bars_total,
+                "setsDone": p.sets_done, "setsTotal": p.sets_total, "symbolsDone": p.symbols_done, "symbolsTotal": p.symbols_total,
+                "elapsedMs": round(p.elapsed_ms, 1), "lastRunMs": round(p.last_run_ms, 1), "cycle": p.cycle, "detail": p.detail, "ready": p.ready,
+                "error": p.error, "errors": p.errors}
+
+    def snapshot_cached(self) -> Dict[str, Any]:
+        """The snapshot for the stats file the engine writes every second (2026-11-15). Found live on x02 (150 symbols, 16,844 Sets): the full snapshot took
+        about 0.9 s and was rebuilt every second in the trading loop, under the book's lock -- 61 % of the loop's time, and the replay and the entry picks waited
+        on that lock. A snapshot that costs at least SNAP_CACHE_MIN_COST_S is now rebuilt in a background thread at most every SNAP_CACHE_X x its cost (capped
+        SNAP_CACHE_MAX_S) and at once after a scoring pass; between rebuilds the last one is served with the live progress. A cheap snapshot (a small book)
+        is built every time, as before. `snapshotAgeS` says how old the served one is."""
+        c = self.__dict__.get("_snap_cache")
+        if c is None or c["cost"] < SNAP_CACHE_MIN_COST_S:
+            return self._snapshot_store()
+        age = time.monotonic() - c["at"]
+        if age >= min(SNAP_CACHE_MAX_S, SNAP_CACHE_X * c["cost"]) and not c["busy"]:
+            c["busy"] = True
+            threading.Thread(target=self._snapshot_bg, name="sets-snapshot", daemon=True).start()
+        snap = dict(c["snap"])
+        snap["progress"] = self._progress_view()
+        snap["snapshotAgeS"] = round(max(0.0, time.monotonic() - c["built"]), 1)
+        return snap
+
+    def _snapshot_store(self) -> Dict[str, Any]:
+        t0 = time.monotonic()
+        snap = self.snapshot()
+        t1 = time.monotonic()
+        self._snap_cache = {"at": t1, "built": t0, "cost": t1 - t0, "snap": snap, "busy": False}
+        snap = dict(snap)
+        snap["snapshotAgeS"] = 0.0
+        return snap
+
+    def _snapshot_bg(self) -> None:
+        try:
+            self._snapshot_store()
+        except Exception:
+            c = self.__dict__.get("_snap_cache")
+            if c is not None:
+                c["busy"] = False
+                c["at"] = time.monotonic()        # a failing snapshot is retried after the usual interval, not every second
+
+    def display_cached(self, key: str, fn: Callable[[], Any]) -> Any:
+        """A display figure for the stats file (counts, stage counts): one that costs at least DISPLAY_CACHE_MIN_S is reused for SNAP_CACHE_X x its cost
+        (cap SNAP_CACHE_MAX_S) and dropped by every scoring pass; a cheap one is computed every call. Found live on x02 (2026-11-15): counts() read
+        state_of for all 16,844 Sets on every stats write (29 % of the trading loop with the stage counts and the coverage)."""
+        c = self.__dict__.setdefault("_disp_cache", {})
+        e = c.get(key)
+        now = time.monotonic()
+        if e is not None and now - e[0] < e[1]:
+            return e[2]
+        v = fn()
+        cost = time.monotonic() - now
+        c[key] = (time.monotonic(), 0.0 if cost < DISPLAY_CACHE_MIN_S else min(SNAP_CACHE_MAX_S, SNAP_CACHE_X * cost), v)
+        return v
+
+    def counts_cached(self) -> Dict[str, Any]:
+        return self.display_cached("counts", self.counts)
+
+    def stage_counts_cached(self) -> Dict[str, int]:
+        return self.display_cached("stage_counts", self.stage_counts)
+
+    def _snapshot_stale(self) -> None:
+        """A scoring pass changed the verdicts: the next stats write starts a rebuild (the served snapshot stays until it is done)."""
+        self.__dict__.pop("_disp_cache", None)
+        c = self.__dict__.get("_snap_cache")
+        if c is not None:
+            c["at"] = -1e18
+
     def _pf_split(self) -> Dict[str, Any]:
         """The post-Base standard figures, on each Set's rolling gate window (its last `setGateWindow` orders), never on
         the whole tape: a Set that was good long ago and is bad now does not carry the pool. `base` is the pooled net
@@ -5290,7 +5699,7 @@ class SetBook:
                     "trailGive": st.trail_give,
                     "trI": st.tr_i,
                     "step": st.step,
-                    "stagePolicy": {"minPf": self.floor_for(self.win(st).base_long, st.pack, st),
+                    "stagePolicy": {"minPf": self.floor_for(self.win(st).base_long, st.pack, st), "minPfSource": self.floor_of(st)[1] if self.pf_by_step else "size",
                                     "windows": self.win(st).__dict__, "scope": "set", "source": "paper"},
                     "side": st.side,
                     "stepI": st.step_i,
@@ -5329,7 +5738,8 @@ class SetBook:
                     "wr": st.wr,
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
-                    "holdMin": st.hold_bars,
+                    "holdMin": 0 if st.hold_bars >= HOLD_NEVER else st.hold_bars,
+                    "holdNever": st.hold_bars >= HOLD_NEVER,
                     "holdAuto": st.hold_auto,
                     "pfAll": st.pf_all,
                     "gp": st.gp,
@@ -5469,25 +5879,7 @@ class SetBook:
             "barsSymbols": len(self.bars),
             "quality": {"excluded": len(self.quality), "maxFlatShare": self.max_flat_share, "maxJumpPct": self.max_jump * 100.0,
                         "symbols": dict(sorted(self.quality.items())[:24])},
-            "progress": {
-                "phase": p.phase,
-                "pct": round(p.pct, 1),
-                "symbol": p.symbol,
-                "setId": p.set_id,
-                "barsDone": p.bars_done,
-                "barsTotal": p.bars_total,
-                "setsDone": p.sets_done,
-                "setsTotal": p.sets_total,
-                "symbolsDone": p.symbols_done,
-                "symbolsTotal": p.symbols_total,
-                "elapsedMs": round(p.elapsed_ms, 1),
-                "lastRunMs": round(p.last_run_ms, 1),
-                "cycle": p.cycle,
-                "detail": p.detail,
-                "ready": p.ready,
-                "error": p.error,
-                "errors": p.errors,
-            },
+            "progress": self._progress_view(),
             "rows": rows,
         }
 

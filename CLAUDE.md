@@ -2,6 +2,111 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-17, owner (from CTS-A-O): "use own configs scope" — config-wide last-N windows.** CTS-A-O measured config-wide windows (a configuration's own
+  last N results across all symbols) against windows per symbol × side on the same data: executed PF 0.56 -> **1.33**, General / Long executing again (PF 2.79 / 1.82),
+  Micro better per symbol (so judged on both there). **CTS-G already judges every Set on one tape of all symbols (`SetBook._tape_at`), per direction: keep it.** Do not cut
+  Set windows, stages or Auto floors per symbol without a causal comparison that beats it; real-money lanes keep their exact scope. Record and next steps:
+  `docs/verification/config-wide-windows-20261117.md`.
+
+- **2026-11-15 (late), test isolation defect fixed.** The regression suite drove the real trader, whose log and state directory was hard-coded to the live engine
+  directory: a full run wrote synthetic closes (BTC-USDT at 100.0) into the live x01 log and touched its block state files. `pulse_trader.DIR` now reads
+  `CTSG_RUNTIME_DIR` (live engines never set it, default `/opt/grok-x01-pulse`), and `scripts/regression/run.py` points every run at a fresh temp directory. Live trade
+  records were checked: no synthetic rows. Check: `trader.lanes` leaves the live log unchanged.
+- **2026-11-15 (evening), owner: "exec last N 10 to 30 step 5, 50 symbols", "block steps increasing and remaining at the last until net positive for lane, best vol
+  increment ratio", "test Relate", "update x01 live, 120 symbols, DCA off, Axis, Block on", "axis with all possible multiple configs, auto PF, vol ratios to the base set".**
+  (a) **Execution last N** (trade_sim, 50 symbols, fresh 3 days 11-12 10:00 .. 11-15 10:00, x02 overlay with Axis prev 4; executed PF / orders): off 1.630 / 694 dev,
+  1.019 / 392 sealed; 10 1.466 / 711 dev (sealed run killed by the OOM killer twice); 15 1.669 / 702, 0.957 / 402; 20 = off (equal to the Real window 20); 25 1.458 / 724,
+  0.965 / 366; 30 1.463 / 744, 0.943 / 364. No N better than off on both windows: `execGateN` stays 0. 5 / 8 / 15 are being re-measured with the config gate (25 symbols).
+  (b) **Block rounds** (`block_study50.py` / `block_auto50.py`, the same 50-symbol executed parents, the engine's RoundsBook; weighted PF / net / max drawdown, net points): without
+  1.630 / +252 / 20.7 dev, 1.019 / +5 / 96.3 sealed; 115 of 630 single procedures better on both, all relation step, ratio 1.0. **Shipped: counts 1 + 2 of relation step, ratio
+  1.0, step to level 3 held until the lane's net is back at zero, ceiling x4, Auto on: 1.669 / +380 / 34.8 dev, 1.152 / +50 / 75.8 sealed** (147 / 33 entries raised; the
+  previous count 5 / level 2 / x3: 1.654 / 1.035). Higher drawdown on development, lower on sealed. Weighted PF, never a unit PF.
+  (c) **Relate** (RelateBook over the same parents in time order, the book carried from development into sealed; 810 settings): 162 better on both, but every one raises about
+  one position on development (a relation needs 60 closed parents first); of those raising 20 or more on development none is better on both. **Relate stays off.**
+  (d) **x01 restarted by the owner** (marker removed, 17:32 UTC): equity 29.98 USDT (the account was funded), not halted (session basis 29.98, halt 80 %), symbolCap 120,
+  DCA off, Axis prev 4, Block (rounds) on, config gate, Auto min PF, Signals, exitSetsByPack {} (x02's measured setting); the hourly keep-alive covers x01 and x02 again.
+  Fixtures pin the earlier `minSlDistancePct` 0.1, config gate off and no Axis Sets (`common.overlay`), so the golden is unchanged.
+  (e) **Axis Sets** (`axisSets`, `server/pulse/axis_sets.py`, off by default): per configuration Set and lane, every Axis setting (last 1-4, prev 4-12, pause 1-8, with
+  `combos` every pair of two kinds: 78 settings) is a derived Set of its Real / Real Negative Set judged on the orders closed before each entry; the Auto choice takes the
+  best PF of the newest `n` admitted (at least `minN`, margin over no Axis); volume `flat` / `base` (chosen PF over the lane Set's own PF) / `floor`, bounded. Engine
+  (`SetBook.axis_set_verdict`, `Pulse._scope_choice`, `Pulse.place`) and trade_sim share it; check `lane_rank.axis-sets-judge-each-set-on-its-own-lane-with-entry-times`.
+  Measurement running (25 symbols, dev + sealed).
+  (f) **Live x02 audit** (284 closes since the 10:38 restart): 118 distinct Sets, every close on its own Set and lane (147 negative / 137 positive), Block rounds raised 30
+  entries (max x3); PF 0.507 per close (multi positive lane 0.32 on 71, flow 0.33 / 0.39, reversion positive lane 1.60 on 18).
+- **2026-11-15 (newest), owner: "Block to auto eval for each block count and set by last n30 but minimal 15 .. add to settings" / "add top menus (submenus) for sections".**
+  (a) `blockRounds.auto` (+ `autoN` 30, `autoMin` 15, `autoPf` 1.0, `autoRatio` 1.0; `block_rounds.RoundsBook.auto_verdict`): every block count of every selected relation
+  decides by itself whether it raises. Evidence = level x net (volume 1) of every position that opened while one of that count's procedures stood raised -- recorded for a
+  count that only observes exactly as for one that raises, so an off count is judged on paper. Raises while the PF of its newest 30 results >= 1.0; under 15 results its
+  manual switch holds; a count Auto switches on with ratio 0 raises by autoRatio x level. Shipped on in every overlay / preset / the desk default (owner instruction, no
+  measurement yet: the 11-11 parent windows are not in this container); revert = `auto` false. Stats `execution.blockRounds.auto` (per relation x count: results, PF,
+  decided by, raises now, ratio), desk table under Block rounds. Check `block_structure.block-rounds-auto-judges-every-count-on-its-own-newest-results` (600 positions,
+  2 relations x 6 counts against a plain reading), mutants `block auto:` (3, caught). The multiple stays under `maxMult` (x3 shipped).
+  (b) Settings navigation (`src/lib/settings-menu.ts`): six top menus (Run, Strategies, Validation · PF, Exits · risk, Block · DCA · Axis, Volume), each section under exactly one;
+  a sticky bar holds the menus, the open menu's submenu and "On this page" (a jump to every card of the section, `Card` ids). Desktop keeps the full grouped section list
+  (`section-*` test ids unchanged); phones show the open menu's sections only.
+- **2026-11-15 (newest), owner: "min PF has for each coord own values and if auto enabled use the auto values with fallback to their manual defaults .. check sections,
+  settings .. ensure no collisions".** One resolver, `SetBook.floor_of(st)` -> (floor, source), read by `floor_for`, `step_floor`, `stage_params` (engine and simulator):
+  Auto on (minPfByStep + minPfStepAuto): the Set's own learned floor (scope "set", `auto-set`, capped by minPfStepAutoHigh) -> the configuration's OWN manual floor
+  (`own_manual_floor`: an indication entry's lanePolicy `lanePolicy`, a Signals pack's minPfSignals `signals`, a TP range's minPfByRange `range`) -> for every other Set the
+  step's learned floor (`auto-step`) -> 1 + TP% x ratio (`manual-step`). Auto off: own manual floor -> the table. **Collisions fixed:** (1) the Micro range floor and
+  (2) the Signals floor overrode Auto entirely (a Signals Set never used a learned floor); (3) an own-floor configuration never falls back to a floor learned on other
+  configurations' orders. Desk: `shortRangeMinPf` is labelled unused while the step floors are on (they always took precedence), the Signals floor moved out of the
+  window-size section (it applies whatever that setting), the window-size classes are named "Window Micro / Minimal / ..." (they collided with the TP range names),
+  and a line states the resolution order. Snapshot `stagePolicy.minPfSource`. Check `step-pf.every-coordination-asks-its-own-floor-auto-first-then-its-own-manual-default`,
+  mutants `own floor:` (3). Shipped as asked; measured old against new code on the x02 overlay (4 symbols, executed PF / orders / net): development 1.054 / 127 / +5.82 % -> **1.154 / 123 / +15.69 %**, sealed 1.082 / 51 / +3.72 % unchanged.
+- **2026-11-15 (newest), Axis / Block / DCA decided on the current grid** (stack_eval, 4 symbols, x02 overlay, executed PF / orders dev, sealed): no Axis 1.054 / 127, 1.082 / 51;
+  shipped all four 1.000 / 127, 0.783 / 66; **prev 4 alone 1.227 / 121, 1.084 / 51** (prev 8 / 12 and cont 8 equal no Axis on sealed; cont 1 1.074, pause 4 0.970 dev / 1.420 sealed,
+  last 1 / 2 0.864 / 0.953 sealed). **x02 now runs Axis prev 4 only** (`axisPrevMaxWindow` 4, last / cont / pause off; better than the shipped all-four on both windows and not
+  worse than no Axis on either, 6 fewer orders on development). Block v2 on admitted parents 0.956 dev against 1.000 (unchanged). DCA (10 arms): none better than without
+  on both windows (best dev rung 0.8 x stop 1.055 / sealed 1.046 against 1.054 / 1.082); x02 keeps DCA on its Axis gate by the owner's "run always all".
+- **2026-11-15 (latest), owner: "For all: use better working but also prioritize higher order amount."** Selection rule for every setting, indication, gate, Axis / Block /
+  DCA arm and default: (1) the executed PF must be better than the current setting on development AND sealed; (2) among arms that pass, prefer the one with MORE
+  executed orders (a higher PF on fewer orders is not preferred over a slightly lower PF on clearly more orders); a gain carried by a handful of orders is not shipped.
+  Report the order count next to every PF (as the 2026-11-04 rule already asks). Example (Axis, current grid, 4 symbols): no Axis 1.054 / 127 orders dev, 1.082 / 51 sealed;
+  the shipped all four 1.000 / 127, 0.783 / 66; prev 4 alone 1.227 / 121, 1.084 / 51 -- the long single-control windows (prev 8 / 12, cont 8, pause 8) read the same
+  1.227 / 121 on development and equal no Axis on sealed, so most of that gain is the Axis selection path, not the prev rule.
+
+- **2026-11-15 (latest), owner: "pool PF under 1 is normal, note this .. important is always post Base and exec PF!!! Doc this as infos" / "make those succeeding ones work and increase their ratio for vol".**
+  (a) **How to read PF (standing info for every session and project):** the pool PF (every Set's tape, every signal, before Base) is normally UNDER 1 -- the signals'
+  gross move per order is under the cost, so an unfiltered pool reads 0.4 - 0.9 (here: every onset of the 1,812 Inverse names 0.37 - 0.85, every slow
+  reversion onset 0.49 - 0.79, every Set tape 0.4 - 0.6). That is expected and is NOT a defect or a reason to drop anything. What decides is the **post-Base PF**
+  (the Sets that passed validation, `sets.pfBase.base`, with the validated share and the orders behind it) and above all the **executed PF** (positions the
+  engine opened, `trade_sim` exec_pf / live `execution`), read on development AND sealed. A rule is judged by the executed PF it delivers, never by the pool.
+  (b) **The succeeding group: trailing Sets.** Executed PF by Set type (x02 overlay, 4 symbols; dev / sealed / live x02): trailing **1.76 (69) / 2.03 (31) / 1.99 (23)**,
+  base 0.68 / 0.85 / 0.59, Exit 0.00 (2) / 0.00 (6) / 0.17 (51). Volume tilt on the same executed orders (volume-weighted PF / net / max drawdown): all 1 = 1.054 / +5.8 % /
+  20.9 % dev, 1.082 / +3.7 % / 21.5 % sealed; **trail 2, Exit 0.5 = 1.264 / +38.7 % / 22.6 % dev, 1.533 / +30.6 % / 23.1 % sealed**; trail 3, base 0.5, Exit 0.5 = 1.513 / 1.726 at
+  21.7 / 26.4 % drawdown; live x02 168 closes (USDT): 0.505 -> 0.648, drawdown 2.52 -> 1.94 USDT. **Shipped x01 / x02: `volumeByKind` {"trail": 2.0, "exit": 0.5}**
+  (the selection is unchanged, only the size; weighted PF, never quoted as a unit PF). Revert = `volumeByKind` {}. At volume factor 0.05 a 0.5 x Exit order is often
+  rounded up to the venue minimum lot, so the Exit cut binds only above the minimum.
+  (c) **Measured and not shipped this session** (details `docs/CHECKLIST.md`, `docs/verification/slow-indications-adaptive-20261115.md`): slow 30 min reversion packs for
+  Normal / Long (sealed 0.524), an adaptive follow / invert rule (fails on the older window), the CTS-A-O Inverse catalogue (1 of 4,025 cells >= 1.1 on four windows,
+  chance level), no trailing time exit (1.028 / 0.881), TP steps to 50 (1.012 / 0.939), trailing arms to 3.2 % (0.682 / 0.752).
+
+- **2026-11-15, owner: "Fix all performance issues completly .. async processings fully, multiple and for each" / "Check if max hold time works correctly .. For trailing no max hold time use".**
+  (a) **Live x02 profile (py-spy, 150 symbols, 16,844 Sets):** the trading loop spent 61 % of its time rebuilding the stats snapshot (0.9 s, every second, under the
+  book's lock, so the replay and the entry picks waited). `SetBook.snapshot_cached` (Pulse.stats): a snapshot that costs at least 0.25 s is rebuilt in a background
+  thread at most every 20 x its cost (cap 60 s) and right after a scoring pass; between rebuilds the last one is served with the live progress (`snapshotAgeS`).
+  After: 4 % of the loop. Check `processing.the-stats-snapshot-is-cached-only-when-it-is-costly`.
+  (b) **Forked lane scans** (`scanWorkers`, x01 / x02 3, engine and fixtures 0): after the signals, a symbol's per-Set scans run in balanced shares in forked children
+  that inherit the frozen replay frame (nothing re-sent, the signal memo stays shared), pack their own rows and hand back columns, tape keys and pause choices; the
+  parent rebuilds the in-thread aliases. Identical rows, aliases, pauses and verdicts; a failed fork or a dying child falls back to the in-thread scan. One symbol of the
+  x02 grid, warm memo: 12.2 - 12.4 s -> 4.4 - 5.3 s (the dict -> column packing, about 6 s of the in-thread cost, moves into the children). Off with hold Auto (it needs the
+  replay inputs). Check `processing.forked-lane-scans-equal-the-in-thread-scans`, mutants `scan fork:` (3).
+  (c) **Entry picks** read a (pack, type) index of the Sets (`SetBook._of_pack_kind`, rebuilt when the Set list changes) instead of filtering all 16,844 Sets per pack,
+  type and direction (610 of 807 samples of the entry path). Check `processing.the-pack-index-picks-what-the-plain-filter-picks`, mutant `pack index:`.
+  (d) **Load-governor deadlock fixed:** a loop cycle counts as an overrun only while the history fetch is idle; eight overruns made the level critical, critical shed the
+  fetch and aborted the replay, so after a restart x02 stayed critical with no history and no replay. Slow cycles alone now keep the history and the replay; only memory
+  over the hard limit sheds them. Check `trader.slow-cycles-alone-never-shed-the-set-history`, mutant `load critical:`. Remaining: the per-Set verdict (`is_eligible` ->
+  `gate_reason`) recomputed on every pick is now the top of the entry path; it reads the verdict's freshness against the clock, so it is not cached.
+  (e) **Max hold time, audited:** replay and live read the same `st.hold_bars`, an open position keeps the hold it opened with, a restart credits the downtime
+  (`hold_credit_s`; live x02 had one base Set close by time after 607 min wall time for a 360 min hold). The time exit decides little: 4 of 178 executed orders in the
+  Auto-SL sweep (0 of 100 trailing), 1 live x02 close. **`trailTimeExit`** (new, engine and fixtures true; x01 / x02 / desk / secure preset false by the owner's
+  instruction): a trailing Set's hold is `HOLD_NEVER`, so replay, simulator and live (also positions opened before the switch) leave it only by stop / trail / TP.
+  Check `trader.trailing-sets-have-no-time-exit-unless-asked`. **Measured (4 symbols, x02 overlay, executed PF / orders / net): with the time exit 1.054 / 127 / +5.82 %
+  dev, 1.082 / 51 / +3.72 % sealed; without it 1.028 / 119 / +2.76 % dev, 0.881 / 63 / -6.58 % sealed: worse on both windows** (no executed trailing order closed by
+  time in either arm: the change works through which trailing Sets validate and how long a position holds its symbol). Shipped because the owner asked for it, not as a
+  finding; revert = `trailTimeExit` true. Also measured: TP steps to 50 (`setStepMax` 50, with trailTimeExit off) 1.012 / 96 dev, 0.939 / 40 sealed: not shipped.
+
 - **2026-11-14 (later), owner: "Stop x1 and run x02", "min SL ratio 0.5", "max SL ratios 1.4", "long, wide 0.2 to 0.8 step 0.1", "Exit ... close later", "Real ... last N 20",
   "at the end of Real before executing a last-N check, try 10 to 35 step 5", "auto PF for each config Set, defaults when not enough samples", "for EACH config Set independent".**
   (a) **x01 is stopped by the owner**: marker `/var/lib/cts-g/x01-stopped-by-owner` (ensure_x01.sh, the hook and the watchdog start nothing while it exists; delete it to

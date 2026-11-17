@@ -141,7 +141,7 @@ def block_independent_evidence_and_restart():
         second = book.candidate(pos, 100.4, pos.opened_at + 11, cfg, .12, 86400)
         other = replace(pos, set_id="other", block_fills=[])
         isolated = book.candidate(other, 100.4, pos.opened_at + 11, cfg, .12, 86400)
-        led = book.ledgers["set|pack:1m:sl1:st4|pos|LONG"]
+        led = book.ledgers[book.rel_keys(book.config(cfg), pos)[0]]
         counts = [int(led["paper"][str(n)][0]) for n in (1, 2)]
         pf1, pf2 = SetBlockBook.stats(led["paper"]["1"])["pf"], SetBlockBook.stats(led["paper"]["2"])["pf"]
         return (bool(first and first["group"] == 1) and second is None and isolated is None and counts == [3, 3] and pf1 >= 99 and pf2 < 1.0,
@@ -302,7 +302,7 @@ def block_actual_and_paper_costs():
         pos.block_fills = [{"group": 1, "qty": 1, "price": 100.2}, {"group": 1, "qty": 2, "price": 100.5}]
         b.observe(pos, 100.15, T0 + 1, cfg, .12, 86400)
         b.close(pos, 101, T0 + 60, cfg, .12)
-        rec = b.ledgers["set|pack:1m:sl1:st4|pos|LONG"]["executed"]["1"]
+        rec = b.ledgers[b.rel_keys(b.config(cfg), pos)[0]]["executed"]["1"]
         oracle = ((101 - 100.2) + 2 * (101 - 100.5)) / (100.2 + 2 * 100.5) - 0.0012
         return int(rec[0]) == 1 and abs(rec[1] - oracle) < 1e-12 and rec[2] == 0, f"one executed observation, net {rec[1]:.9f} oracle {oracle:.9f}"
 
@@ -477,7 +477,9 @@ def block_relations_are_independent_and_all_must_agree():
             br.add_obs(book.ledgers[keys[1]]["paper"].setdefault("1", br.new_record()), 0.01)          # now the step relation too
         both = book.candidate(replace(pos, client_id="b"), 100.15, T0 + 701, cfg, .12, 86400)
         sym = br.relation_keys(br.clean_cfg({"blockRelations": ["symbol", "indication"]}), "pack:1m:sl1:st4", "pos", "LONG", "X", "pack", 4)
-        ok = one is None and both is not None and both["group"] == 1 and keys == ["set|pack:1m:sl1:st4|pos|LONG", "step|pack|4|pos|LONG"] and sym == ["symbol|X|LONG", "indication|pack|pos|LONG"]
+        expected = [[3, "pack:1m:sl1:st4", "pos", "LONG", "set"], [3, "pack:1m:sl1:st4", "pos", "LONG", "step", "pack", 4],
+                    [3, "pack:1m:sl1:st4", "pos", "LONG", "symbol", "X"], [3, "pack:1m:sl1:st4", "pos", "LONG", "indication", "pack"]]
+        ok = one is None and both is not None and both["group"] == 1 and [json.loads(k) for k in keys + sym] == expected
         return ok, f"one relation proven -> {one and one['group']}; both -> {both and both['group']}; keys {keys + sym}"
 
 

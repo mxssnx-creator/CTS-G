@@ -368,8 +368,9 @@ def shipped_overlays_switch_off_the_indications_exit_sets():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     got = {_o.path.basename(f): _j.load(open(f)).get("exitSetsByPack") for f in files}
-    # owner 2026-11-14 ("run always all"): the x02 demo builds every pack's Exit Sets and lets the evals decide; every other overlay and preset keeps them off
-    ok = all(v == ({} if k == "overlay-bingx-x02.json" else {"indications": False}) for k, v in got.items())
+    # owner 2026-11-14 ("run always all"): the x02 demo builds every pack's Exit Sets and lets the evals decide; owner 2026-11-15 ("update x01 live"): x01 runs
+    # x02's measured setting; the Bybit overlays and the presets keep them off
+    ok = all(v == ({} if k in ("overlay-bingx-x01.json", "overlay-bingx-x02.json") else {"indications": False}) for k, v in got.items())
     return ok, f"{got}"
 
 
@@ -423,9 +424,12 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     # (trend, reversion, flow and multi next to breakout) with the SL ratios 0.25 / 0.5 / 0.75; the earlier trend-off and Normal-off decisions above are superseded by that instruction,
     # their counterfactual numbers stay the evidence they were. Still true: Micro Sets exist, no trailing pair is dropped for its lock, the pack set below is complete.
     all_packs = {"shortrange", "general", "indications", "trend", "reversion", "flow", "multi", "breakout"}
-    ok = (any(st.kind != "trail" and st.step <= 3 for st in b.by_idx) and all_packs <= {st.pack for st in b.by_idx}
-          and ratios == {0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 1.0, 1.25} and locks and min(locks) < 0.1 and any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
-    return ok, f"x01 {len(b.by_idx)} Sets, packs {sorted({st.pack for st in b.by_idx})}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
+    # owner 2026-11-15 ("update min step defaults to make profit", live x02: TP Sets from 2.6 % PF 1.04 on 92 closes, all 0.77 on 264): the general packs' TP Sets start at
+    # tpStepMin 26, then 5 (owner 2026-11-15 later, "set min step to 5"), and the trailing arms at trailStepMin 12 (1.2 %); every pack still runs, the trailing stops keep their reference step
+    gen = [st.step for st in base if st.pack in ("general", "indications", "trend", "reversion", "flow", "multi", "breakout")]
+    ok = (all_packs <= {st.pack for st in b.by_idx} and gen and min(gen) == 5 and b.tp_step_min == 5 and b.trail_step_min == 12
+          and locks and b.trail_min_lock == 0.0 and b._trail_mid_step() == 17)
+    return ok, f"x01 {len(b.by_idx)} Sets, lowest general TP step {min(gen) if gen else None}, trailing reference step {b._trail_mid_step()}, packs {sorted({st.pack for st in b.by_idx})[:8]}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
 
 CHECKS = [

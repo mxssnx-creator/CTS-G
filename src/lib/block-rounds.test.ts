@@ -15,7 +15,22 @@ test("block rounds: an absent key is the shipped default, an object follows the 
 });
 
 test("block rounds: the largest multiple is bounded by the ceiling and is 1 when off", () => {
-  assert.equal(blockRoundsMax(DEFAULT_BLOCK_ROUNDS), 3);
+  assert.equal(blockRoundsMax(DEFAULT_BLOCK_ROUNDS), 4);
   assert.equal(blockRoundsMax({ ...DEFAULT_BLOCK_ROUNDS, maxMult: 2 }), 2);
   assert.equal(blockRoundsMax({ ...DEFAULT_BLOCK_ROUNDS, enabled: false }), 1);
+});
+
+test("block rounds: Auto per block count, newest 30 results, at least 15 (owner 2026-11-15), bounded like the server", () => {
+  assert.equal(DEFAULT_BLOCK_ROUNDS.auto, true);
+  assert.equal(DEFAULT_BLOCK_ROUNDS.autoN, 30);
+  assert.equal(DEFAULT_BLOCK_ROUNDS.autoMin, 15);
+  const c = blockRoundsOf({ enabled: true, auto: "yes", autoN: 900, autoMin: 500, autoPf: 9, autoRatio: 0 });
+  assert.equal(c.auto, false);
+  assert.equal(c.autoN, 200);
+  assert.equal(c.autoMin, 200);
+  assert.equal(c.autoPf, 3);
+  assert.equal(c.autoRatio, 0.05);
+  assert.equal(blockRoundsOf({ enabled: true, autoN: 10, autoMin: 15 }).autoMin, 10);
+  // with Auto every count may raise: the ceiling bounds it
+  assert.equal(blockRoundsMax({ ...DEFAULT_BLOCK_ROUNDS, maxMult: 5 }), 5);
 });

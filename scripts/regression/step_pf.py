@@ -634,6 +634,98 @@ def shipped_floors_are_all_above_one():
     return all(v > 1.0 for v in rows.values()), f"lowest floor any window can ask: {rows}"
 
 
+def every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default():
+    """Owner 2026-11-15 ("min PF has for each coord own values and if auto enabled use the auto values with fallback to their manual defaults .. no
+    collisions"): with Auto on, a Set's own learned floor comes first; a configuration with its own manual floor (Micro range, Signals pack, an indication
+    entry's lane policy) falls back to THAT value and never to a floor learned on other configurations' orders; every other Set falls back to its step's
+    learned floor, then the manual table. Auto off: the configuration's own manual floor, else the table. The chain's StageParams ask the same value."""
+    import copy
+    from position_cost import tp_range_of
+    b = _book(setStepMax=12, minPfStepAuto=True, minPfStepAutoScope="set", minPfStepAutoHigh=1.3, minPfByRange={"micro": 1.01}, minPfSignals=2.4)
+    base = [x for x in b.by_idx if x.kind == "base" and x.sl_ratio == 1.0]
+    micro = next(x for x in base if tp_range_of(b.step_bucket(x)) == "micro")
+    gen = next(x for x in base if tp_range_of(b.step_bucket(x)) != "micro")
+    sig = copy.copy(gen); sig.pack, sig.id = "sig-ema-cross-short-t5", "sig-probe"
+    pol = copy.copy(gen); pol.pack, pol.id = "probe-policy", "policy-probe"
+    b.pack_ranges["probe-policy"] = {"lanePolicy": {"minPfByStep": {str(b.step_bucket(pol)): 1.33}}}
+    manual = se.manual_step_floor(b.step_bucket(gen) * 0.1, b.pf_step_ratio)
+    for x in (micro, gen, sig, pol):
+        b.step_floor_auto[(b.auto_step_bucket(x), x.side)] = 1.12      # a step floor learned on every pack's orders
+    rows, bad = {}, []
+    def ask(tag, x, want, src):
+        got, source = b.floor_of(x)
+        same = {b.floor_for(n, x.pack, x) for n in (1, 10, 50)} | {b.stage_params(x.pack, x).floor}
+        rows[tag] = (round(got, 4), source)
+        if abs(got - want) > 1e-9 or source != src or same != {got}:
+            bad.append((tag, got, source, want, src, same))
+    ask("micro, no own", micro, 1.01, "range")
+    ask("signals, no own", sig, 2.4, "signals")
+    ask("policy, no own", pol, 1.33, "lanePolicy")
+    ask("generic, no own", gen, 1.12, "auto-step")
+    for x in (micro, sig, pol, gen):
+        b.set_floor_auto[x.id] = 1.18
+    ask("micro, own", micro, 1.18, "auto-set")
+    ask("signals, own", sig, 1.18, "auto-set")
+    ask("policy, own", pol, 1.18, "auto-set")
+    ask("generic, own", gen, 1.18, "auto-set")
+    b.set_floor_auto[gen.id] = 1.9
+    ask("own capped", gen, 1.3, "auto-set")
+    b.step_floor_auto.clear(); b.set_floor_auto.clear()
+    ask("generic, nothing learned", gen, min(manual, 1.3), "manual-step")
+    off = _book(setStepMax=12, minPfStepAuto=False, minPfByRange={"micro": 1.01}, minPfSignals=2.4)
+    off.set_floor_auto[micro.id] = 1.18                                   # never read with Auto off
+    off.pack_ranges["probe-policy"] = b.pack_ranges["probe-policy"]
+    b = off
+    ask("off: micro", micro, 1.01, "range")
+    ask("off: signals", sig, 2.4, "signals")
+    ask("off: policy", pol, 1.33, "lanePolicy")
+    ask("off: generic", gen, min(manual, 1.3), "manual-step")
+    return not bad, f"{rows}; bad {bad[:2]}"
+
+
+def the_orders_factor_trades_pf_against_admitted_orders_by_its_rule():
+    """minPfAutoOrdersFactor (owner 2026-11-15, "relation factor pf vs orders"): 0 keeps the tolerance rule; above 0 every candidate floor scores
+    min(PF, 5) x (admitted / most admitted) ^ factor and the best score wins (ties: the lower floor). Read against a plain loop on random pairs, and a higher
+    factor never admits fewer orders than a lower one on the same pairs. exitSets false removes the Exit order type only (base and trailing Sets and the
+    trailing TP rule unchanged)."""
+    import random
+    rng = random.Random(9)
+    bad, mono = [], True
+    for case in range(200):
+        pairs = [(rng.uniform(0.5, 3.0), rng.gauss(0.0005, 0.01)) for _ in range(rng.randint(20, 300))]
+        prev_adm = -1
+        for fac in (0.0, 0.25, 0.5, 1.0, 2.0):
+            got = se.learn_step_floor(pairs, 5, 0.05, se.STEP_PF_CANDIDATES, fac)
+            rows = []
+            for f in se.STEP_PF_CANDIDATES:
+                adm = [n for p_, n in pairs if p_ >= f - 1e-12]
+                if len(adm) >= 5:
+                    g = sum(x for x in adm if x > 0); l_ = -sum(x for x in adm if x < 0)
+                    rows.append((f, se.pf_of(g, l_), len(adm)))
+            if not rows:
+                continue
+            if fac > 0:
+                most = max(r[2] for r in rows)
+                want = max(rows, key=lambda r: (min(r[1], 5.0) * (r[2] / most) ** fac, -r[0]))
+            else:
+                best = max(r[1] for r in rows)
+                want = min((r for r in rows if r[1] + 1e-12 >= best * 0.95), key=lambda r: r[0])
+            if got is None or abs(got["floor"] - want[0]) > 1e-9:
+                bad.append((case, fac, got and got["floor"], want[0]))
+            if fac > 0 and got and got["admitted"] < prev_adm and prev_adm >= 0:
+                mono = False
+            if fac > 0 and got:
+                prev_adm = got["admitted"]
+    import collections
+    kinds = {}
+    for on in (True, False):
+        b = _book(exitSets=on)
+        kinds[on] = (collections.Counter(st.kind for st in b.by_idx), b.hist_honor_tp)
+    exit_ok = kinds[False][0].get("exit", 0) == 0 and kinds[True][0].get("exit", 0) > 0 and kinds[False][0]["base"] == kinds[True][0]["base"] \
+        and kinds[False][0]["trail"] == kinds[True][0]["trail"] and kinds[False][1] == kinds[True][1]
+    return not bad and mono and exit_ok, f"200 random pair sets x 5 factors against the plain rule: mismatches {bad[:3]}; admitted orders rise with the factor {mono}; exitSets {kinds}"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     ratio_midpoints_match_desk_half_up_normalization,
     auto_wide_steps_use_the_last_table_bucket_but_keep_policy_identity,
@@ -645,4 +737,6 @@ CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,
     auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors, the_simulator_learns_the_engines_own_floor_of_every_set,
     shipped_floors_are_all_above_one, the_packed_simulator_floors_equal_the_plain_ones,
+    every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default,
+    the_orders_factor_trades_pf_against_admitted_orders_by_its_rule,
     sl_range_is_the_widest_interval_near_the_best, the_simulator_learns_the_engines_sl_ranges_and_the_gate_reads_them)]

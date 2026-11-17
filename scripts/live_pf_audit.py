@@ -131,13 +131,17 @@ def pf_of(vals):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--trades", default=os.path.join(DEFAULT_DIR, "trades-bingx-x01.jsonl"))
-    ap.add_argument("--stats", default=os.path.join(DEFAULT_DIR, "stats-bingx-x01.json"))
-    ap.add_argument("--downtime", default=os.path.join(DEFAULT_DIR, "downtime-bingx-x01.json"))
+    ap.add_argument("--trades", default="", help="default: <pulse dir>/trades-<conn>.jsonl")
+    ap.add_argument("--stats", default="", help="default: <pulse dir>/stats-<conn>.json")
+    ap.add_argument("--downtime", default="", help="default: <pulse dir>/downtime-<conn>.json")
     ap.add_argument("--conn", default="bingx-x01")
     ap.add_argument("--tol", type=float, default=0.0011)
     ap.add_argument("--all", action="store_true", help="also list the matching scopes")
     a = ap.parse_args(argv)
+    # the files follow --conn (it read x01's files for any connection before, 2026-11-15)
+    a.trades = a.trades or os.path.join(DEFAULT_DIR, f"trades-{a.conn}.jsonl")
+    a.stats = a.stats or os.path.join(DEFAULT_DIR, f"stats-{a.conn}.json")
+    a.downtime = a.downtime or os.path.join(DEFAULT_DIR, f"downtime-{a.conn}.json")
     rows = []
     for line in open(a.trades, encoding="utf-8"):
         line = line.strip()

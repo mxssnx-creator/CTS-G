@@ -19,6 +19,9 @@ PULSE_DIR="${PULSE_DIR:-/opt/grok-x01-pulse}"
 ETC_DIR="${ETC_DIR:-/etc/${CTS_G_NAME}}"
 LOG_DIR="${LOG_DIR:-/var/log/${CTS_G_NAME}}"
 ENV_FILE="${ENV_FILE:-$ETC_DIR/cts-g.env}"
+CTS_DB_DIR_OVERRIDE="${CTS_DB_DIR:-}"
+CTS_DB_DIR="${CTS_DB_DIR_OVERRIDE:-${CTS_STATE_DIR:+${CTS_STATE_DIR%/}/db}}"
+CTS_DB_DIR="${CTS_DB_DIR:-/var/lib/${CTS_G_NAME}/db}"
 REPO_URL="${REPO_URL:-https://github.com/mxssnx-creator/CTS-G.git}"
 BRANCH="${BRANCH:-main}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
@@ -41,6 +44,11 @@ PKG_SKIPPED=()
 log()  { printf '[%s] %s\n' "$CTS_G_NAME" "$*"; }
 warn() { printf '[%s] WARN %s\n' "$CTS_G_NAME" "$*" >&2; }
 die()  { printf '[%s] ERROR %s\n' "$CTS_G_NAME" "$*" >&2; exit 1; }
+
+validate_instance_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid install name"
+}
+validate_instance_name "$CTS_G_NAME"
 
 ok()   { STEPS_OK+=("$1"); log "ok    $1"; }
 skip() { STEPS_SKIP+=("$1"); log "skip  $1"; }
@@ -79,13 +87,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 apply_name() {
   # --name changes install root / etc / logs. Pulse dir stays hardcoded in the engine.
-  CTS_G_NAME="${1:-$CTS_G_NAME}"
-  CTS_G_NAME="${CTS_G_NAME//[^A-Za-z0-9._-]/}"
-  [[ -n "$CTS_G_NAME" ]] || CTS_G_NAME=cts-g
+  validate_instance_name "${1:-}"
+  CTS_G_NAME="$1"
   CTS_G_ROOT="/opt/${CTS_G_NAME}"
   ETC_DIR="/etc/${CTS_G_NAME}"
   LOG_DIR="/var/log/${CTS_G_NAME}"
   ENV_FILE="$ETC_DIR/cts-g.env"
+  CTS_DB_DIR="${CTS_DB_DIR_OVERRIDE:-${CTS_STATE_DIR:+${CTS_STATE_DIR%/}/db}}"
+  CTS_DB_DIR="${CTS_DB_DIR:-/var/lib/${CTS_G_NAME}/db}"
 }
 
 detect_pkg() {
@@ -220,6 +229,8 @@ PYTHONUNBUFFERED=1
 PYTHONDONTWRITEBYTECODE=1
 CTS_G_NAME=${CTS_G_NAME}
 CTS_G_ROOT=${CTS_G_ROOT}
+CTS_DB_DIR=${CTS_DB_DIR}
+CTS_REQUIRE_PERSISTENT_DB=1
 EOF
   chmod 0644 "$ENV_FILE"
 }
@@ -244,6 +255,15 @@ seed_env() {
     else
       skip "env $ENV_FILE"
     fi
+  fi
+  # Never source an existing environment file or replace an operator's path.
+  # Old managed installs used memory only; record the new durable path before
+  # the next desk restart. Empty explicit paths fail closed in DB bootstrap.
+  if ! grep -qE '^CTS_(DB_DIR|STATE_DIR)=' "$ENV_FILE"; then
+    printf '\nCTS_DB_DIR=%s\n' "$CTS_DB_DIR" >>"$ENV_FILE"
+  fi
+  if ! grep -q '^CTS_REQUIRE_PERSISTENT_DB=' "$ENV_FILE"; then
+    printf '\nCTS_REQUIRE_PERSISTENT_DB=1\n' >>"$ENV_FILE"
   fi
 }
 
@@ -291,7 +311,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="cea5f55962ea4d313a0047398f5d7573b523b8ef"
+  local pt_want="f7ee0b90f3a94b626f6b030e1d1ed067f011d528"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
@@ -344,6 +364,7 @@ sync_pulse_tree() {
   [[ -f "$src/universe.json" ]] && cp -a "$src/universe.json" "$PULSE_DIR/universe.json"
   restore_pulse_trader
   python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
+    "$PULSE_DIR"/redis_reads.py \
     "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py \
     "$PULSE_DIR"/set_block.py "$PULSE_DIR"/execution_cost.py "$PULSE_DIR"/market_features.py
   ok "pulse tree $PULSE_DIR"
@@ -411,10 +432,10 @@ npm_install_desk() {
 redis_has_keys() {
   local slot="$1"
   have redis-cli || return 1
-  local key sec
-  key="$(redis-cli HGET "connection:$slot" api_key 2>/dev/null || true)"
-  sec="$(redis-cli HGET "connection:$slot" api_secret 2>/dev/null || true)"
-  [[ -n "$key" && -n "$sec" && "$key" != "(nil)" && "$sec" != "(nil)" ]]
+  have python3 || return 1
+  local reader="$CTS_G_ROOT/server/pulse/redis_reads.py"
+  [[ -f "$reader" ]] || return 1
+  python3 "$reader" "$slot" >/dev/null 2>&1
 }
 
 disable_vst_autostart() {

@@ -522,3 +522,47 @@ CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
     linked_axes_use_the_exact_positive_or_negative_window,
     lane_rank_stats_equal_the_plain_reading, the_choice_among_valid_sets_reads_the_lanes_own_set,
     a_lane_set_without_orders_ranks_below_one_with_orders_and_the_key_follows_the_floor, simulator_and_engine_rank_valid_sets_the_same_way)]
+
+
+def axis_sets_judge_each_set_on_its_own_lane_with_entry_times():
+    """axisSets (owner 2026-11-15, "axis setting with all possible multiple configs, auto PF eval, vol ratios related to base set"): with axisSets on the
+    Set keeps the entry time of every Real / Real Negative order (aligned with exe / neg, entry before exit), SetBook.axis_set_verdict equals the pure
+    axis_sets.choose on exactly that Set's lane rows inside the evidence window, a second Set's tape never moves it, and off keeps no entry times."""
+    import random
+    import axis_sets
+    from common import SMALL, overlay
+    from set_engine import SetBook
+    def book_with(on):
+        b = SetBook()
+        b.load(overlay(**{**SMALL, "axisSets": {"enabled": on, "n": 10, "minN": 3, "margin": 1.0, "vol": "base", "combos": True}}))
+        b.cost_pct = 0.0
+        return b
+    rng = random.Random(5)
+    rows_a, rows_b, t = [], [], 1000.0
+    for k in range(120):
+        x = rng.choice([0.004, 0.004, -0.003]) if k % 7 not in (3, 4) else -0.003
+        rows_a.append((t + 50, "A-USDT", "LONG", x, x, 50.0, "tp" if x > 0 else "sl"))
+        rows_b.append((t + 50, "B-USDT", "LONG", -x, -x, 50.0, "sl"))
+        t += 60
+    on, off = book_with(True), book_with(False)
+    st, other = on.by_idx[0], on.by_idx[1]
+    st_off = off.by_idx[0]
+    sid = lambda rows, s: [(*r, s.id) for r in rows]
+    now = t + 100
+    on.set_processed(st, sid(rows_a, st), now=now)
+    off.set_processed(st_off, sid(rows_a, st_off), now=now)
+    aligned = st.exe_ent is not None and len(st.exe_ent) == len(st.exe) and len(st.neg_ent) == len(st.neg) \
+        and all(e < x for e, (x, _v) in zip(st.exe_ent, st.exe))
+    cutoff = now - on._evidence_lookback() * 60
+    floor = on.floor_for(15, st.pack, st)
+    got = on.axis_set_verdict(st, "pos", now, cutoff, floor)
+    keep = [k for k, (x, _v) in enumerate(st.exe) if cutoff <= x <= now]
+    plain = axis_sets.choose([st.exe[k][0] for k in keep], [st.exe_ent[k] for k in keep], [st.exe[k][1] for k in keep], floor, on.axis_sets)
+    on.set_processed(other, sid(rows_b, other), now=now)          # another Set's (opposite) tape
+    on.__dict__.pop("_axis_set_cache", None)
+    again = on.axis_set_verdict(st, "pos", now, cutoff, floor)
+    ok = aligned and got == plain == again and st_off.exe_ent is None and len(st.exe) > 10
+    return ok, f"Real orders {len(st.exe)}, entry times aligned {aligned}; verdict {got}; equal to the plain choice {got == plain}; unmoved by another Set {got == again}; off keeps none {st_off.exe_ent is None}"
+
+
+CHECKS.append(("lane_rank.axis-sets-judge-each-set-on-its-own-lane-with-entry-times", axis_sets_judge_each_set_on_its_own_lane_with_entry_times))
