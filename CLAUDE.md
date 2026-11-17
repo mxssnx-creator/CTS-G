@@ -2,6 +2,12 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-17, owner (from CTS-A-O): "use own configs scope" — config-wide last-N windows.** CTS-A-O measured config-wide windows (a configuration's own
+  last N results across all symbols) against windows per symbol × side on the same data: executed PF 0.56 -> **1.33**, General / Long executing again (PF 2.79 / 1.82),
+  Micro better per symbol (so judged on both there). **CTS-G already judges every Set on one tape of all symbols (`SetBook._tape_at`), per direction: keep it.** Do not cut
+  Set windows, stages or Auto floors per symbol without a causal comparison that beats it; real-money lanes keep their exact scope. Record and next steps:
+  `docs/verification/config-wide-windows-20261117.md`.
+
 - **2026-11-15 (late), test isolation defect fixed.** The regression suite drove the real trader, whose log and state directory was hard-coded to the live engine
   directory: a full run wrote synthetic closes (BTC-USDT at 100.0) into the live x01 log and touched its block state files. `pulse_trader.DIR` now reads
   `CTSG_RUNTIME_DIR` (live engines never set it, default `/opt/grok-x01-pulse`), and `scripts/regression/run.py` points every run at a fresh temp directory. Live trade
