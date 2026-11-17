@@ -1429,6 +1429,11 @@ function SettingsPage() {
 
           {section === "block" && (
             <Card title="Block strategy" hint="Each Set, lane and group keeps its own evidence">
+              {stats?.block?.setLanes?.guard?.legacyBlocked ? (
+                <p className="mb-3 rounded border border-danger px-3 py-2 text-xs text-danger">Guarded adds are held because an earlier pooled deficit cannot be assigned to an individual Set and count. Reconcile the retained old record before resuming.</p>
+              ) : null}
+              {stats?.block?.setLanes?.error ? <p className="mb-3 text-xs text-danger">{stats.block.setLanes.error}</p> : null}
+              {stats?.block?.setLanes?.guard ? <p className="mb-3 text-xs text-muted">Guard scopes: {stats.block.setLanes.guard.scopes ?? 0} · {stats.block.setLanes.guard.holding ? "one or more held" : "none held"}</p> : null}
               <Grid>
                 <EnableSlider
                   label="Block enabled"
@@ -1500,12 +1505,22 @@ function SettingsPage() {
                 </div>
                 <Num label="Min observations per count" value={overlay.blockMinObservations} min={1} max={200} step={1}
                   hint="A count adds only after its own record holds this many observations (a count, not a window)." onChange={(v) => patch("blockMinObservations", Math.max(1, Math.round(v)))} />
-                <Toggle label="Carry: keep the stack of a losing parent until the relation's net is back positive, then pause" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
+                <Toggle label="Carry: keep the stack until the relation's net is back positive, then pause (shared across counts)" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
                 <Num label="Pause after the reset (parents)" value={overlay.blockPauseSteps} min={0} max={20} step={1} hint="Parents of the relation without adds after the net is back positive."
                   onChange={(v) => patch("blockPauseSteps", Math.max(0, Math.round(v)))} />
                 <Num label="Skip the first x counts" value={overlay.blockSkipFirst} min={0} max={12} step={1} hint="Those counts never add; they still collect evidence."
                   onChange={(v) => patch("blockSkipFirst", Math.max(0, Math.round(v)))} />
-                <Toggle label="Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back" on={overlay.blockGuard !== false} onChange={(v) => patch("blockGuard", v)} />
+                <Toggle label="Deficit guard: pause each Set, relation and count independently until its paper adds recover that count's deficit" on={overlay.blockGuard !== false} onChange={(v) => patch("blockGuard", v)} />
+                {stats?.block?.setLanes?.guard?.byScope?.length ? (
+                  <div className="col-span-full overflow-x-auto text-xs">
+                    <p className="mb-1 text-muted">Guard results by Set, lane, relation and count (showing up to 200; held scopes first)</p>
+                    <table className="w-full text-left"><thead><tr><th>Set / lane / side</th><th>Relation</th><th>Count</th><th>Executed net</th><th>Paper recovery</th><th>Status</th></tr></thead>
+                      <tbody>{stats.block.setLanes.guard.byScope.map((g) => <tr key={JSON.stringify([g.set, g.lane, g.side, g.relation, g.group, g.count])}>
+                        <td>{g.set} / {g.lane} / {g.side}</td><td>{g.relation} {g.group.join(" / ")}</td><td>{g.count}</td>
+                        <td>{g.net.toFixed(4)}</td><td>{g.shadow.toFixed(4)}</td><td>{g.holding ? "held" : "open"}</td>
+                      </tr>)}</tbody></table>
+                  </div>
+                ) : null}
                 <Num label="Add only up to this share of the way to the target" value={overlay.blockTargetShare ?? 0.5} min={0} max={1} step={0.05} hint="Fixed-target parents. 0 = no rule; 0.5 = no add past the middle of the way."
                   onChange={(v) => patch("blockTargetShare", Math.max(0, Math.min(1, v)))} />
                 {BLOCK_KINDS.map((kind) => (

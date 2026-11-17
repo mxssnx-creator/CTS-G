@@ -6,8 +6,9 @@ inherited Set PF, parent PnL or other count's result can validate a count. There
 since the book started (block_rules). The rules themselves (counts, steps, ratios, Additive / Shared, relations, lifecycle) live in block_rules and are shared
 with the simulator (scripts/stack_eval.py).
 
-State file version 2: `parents` (the open parent's count entries per Set / lane / symbol / side) and `ledgers` (the cumulative records and the lifecycle per
-relation key). Version 1 (per-lane windows of rows) migrates: its paper rows are summed into the "set" relation's ledger, its executed rows too.
+State file version 3 adds Set-scoped relation keys and per-relation/count guards. Old pooled ledgers remain in the file but do not qualify new scopes. An
+unattributable old pooled deficit is retained as a guard hold when the guard is enabled; it must be reconciled before guarded adds can resume. Version-3
+state cannot be read by older versions, which disable adds on an unreadable state file. The optional carry lifecycle is still shared across counts per relation.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional
 import block_rules as br
 from position_cost import cost_as_frac
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 
 
 def _pack_step(set_id: str):
@@ -36,7 +37,8 @@ class SetBlockBook:
         self.ledgers: Dict[str, Any] = {}       # relation key -> {"paper": {n: [obs, gains, losses]}, "executed": {...}, "life": {...}, "updated": t}
         self.cfg: Optional[br.BlockCfg] = None   # set by Pulse from the overlay (clean_cfg); None = the legacy table built from the BlockBook's own numbers
         self.scope = "set"                       # kept for callers that still set it; the relations (cfg.relations) decide the evidence keys now
-        self.guard: Dict[str, float] = br.new_guard()   # the book's executed adds' cumulative net and, in deficit, the paper adds' net since (block_rules deficit guard)
+        self.guards: Dict[str, Dict[str, float]] = {}   # relation x count -> executed and shadow net
+        self.legacy_guard: Dict[str, float] = br.new_guard()
         self.error = ""
         self._prune_at = 0.0
         if os.path.exists(path):
@@ -50,17 +52,26 @@ class SetBlockBook:
     # ---- state -------------------------------------------------------------------------------------------------------------------------------------
     def _load(self, data: Dict[str, Any]) -> None:
         ver = data.get("version")
-        if ver == STATE_VERSION and isinstance(data.get("parents"), dict) and isinstance(data.get("ledgers"), dict):
+        if ver in (2, STATE_VERSION) and isinstance(data.get("parents"), dict) and isinstance(data.get("ledgers"), dict):
             self.parents, self.ledgers = data["parents"], data["ledgers"]
-            g = data.get("guard")
-            if isinstance(g, dict):
+            def read_guard(g):
+                if not isinstance(g, dict):
+                    raise ValueError("unreadable Block guard")
                 try:
                     net, shadow = float(g.get("net", 0.0)), float(g.get("shadow", 0.0))
                 except (TypeError, ValueError):
                     raise ValueError("unreadable Block guard")
                 if not (math.isfinite(net) and math.isfinite(shadow)):
                     raise ValueError("unreadable Block guard")
-                self.guard = {"net": net, "shadow": shadow}
+                return {"net": net, "shadow": shadow}
+            if ver == 2:
+                self.legacy_guard = read_guard(data.get("guard", br.new_guard()))
+            else:
+                raw_guards = data.get("guards", {})
+                if not isinstance(raw_guards, dict):
+                    raise ValueError("unreadable Block guards")
+                self.guards = {str(k): read_guard(g) for k, g in raw_guards.items()}
+                self.legacy_guard = read_guard(data.get("legacyGuard", br.new_guard()))
             return
         if ver == 1 and isinstance(data.get("lanes"), dict):
             for key, lane in data["lanes"].items():
@@ -80,7 +91,8 @@ class SetBlockBook:
     def save(self) -> None:
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"version": STATE_VERSION, "parents": self.parents, "ledgers": self.ledgers, "guard": self.guard}, f)
+            json.dump({"version": STATE_VERSION, "parents": self.parents, "ledgers": self.ledgers,
+                       "guards": self.guards, "legacyGuard": self.legacy_guard}, f)
         os.replace(tmp, self.path)
 
     # ---- configuration -----------------------------------------------------------------------------------------------------------------------------
@@ -181,16 +193,28 @@ class SetBlockBook:
             if move + 1e-12 < levels[n - 1] * cf:
                 continue                       # the current price must still satisfy the count's own step
             recs = [b["paper"].get(str(n)) for b in books]
-            execs = [b["executed"].get(str(n)) for b in books]
+            execs = [b.get("qualification", b["executed"]).get(str(n)) for b in books]
             # A partially filled count is already in fired_ratio. Its remainder
             # completes that same target; count_passes adds the target once.
             other_ratio = fired_ratio - (cfg.target_ratio(n) if filled.get(n, 0.0) > 0 else 0.0)
-            if not br.count_passes(cfg, n, recs, execs, base_pf, other_ratio):
+            legacy_holds = br.guard_holds(cfg, self.legacy_guard)
+            held_keys = {k for k in rkeys if br.guard_holds(cfg, self.guards.get(br.guard_key(k, n)))}
+            held = bool(held_keys)
+            # While a guard holds, evaluate hypothetical recovery against the
+            # paper evidence. Requiring the losing executed record here would
+            # prevent any shadow observation and make recovery impossible.
+            available_execs = [rec for key, rec in zip(rkeys, execs) if key not in held_keys]
+            if not br.count_passes(cfg, n, recs, available_execs, base_pf, other_ratio):
                 continue
             if honor_tp and not br.share_allows(cfg, pos.base_entry, price, pos.tp, 1 if pos.side == "LONG" else -1):
                 continue                       # past its share of the way to the target: little room left, the whole way back below
-            if br.guard_holds(cfg, self.guard):
-                # the book's executed adds are in deficit: this add is not sent. It is followed on paper from the price it would have had, once
+            # A legacy pooled deficit cannot be attributed safely to an individual
+            # Set/count. Keep it as a hold until it can be reconciled explicitly.
+            if legacy_holds or held:
+                # Follow a scoped deficit on paper, but do not use a pooled legacy
+                # deficit to teach or clear any new individual guard.
+                if legacy_holds:
+                    continue
                 if str(n) not in shadow and filled.get(n, 0.0) <= 0:
                     shadow[str(n)] = [now, price]
                     self.save()
@@ -218,14 +242,16 @@ class SetBlockBook:
         cf = cost_as_frac(cost_pct)
         rkeys = self.rel_keys(cfg, pos)
         books = [self.ledger(k, create=True) for k in rkeys]
-        add_part, highest, shadow_part = 0.0, 0, 0.0
+        add_part, highest = 0.0, 0
+        shadow_parts: Dict[str, float] = {}
+        add_parts: Dict[str, float] = {}
         for n, item in (lane.get("shadow") or {}).items():
             try:
                 s_t, s_px = float(item[0]), float(item[1])
             except (TypeError, ValueError, IndexError):
                 continue
             if s_t < now and s_px > 0 and pos.base_entry > 0:
-                shadow_part += br.base_return_contribution((price / s_px - 1) * side - cf, s_px, cfg.target_ratio(int(n)), pos.base_entry)
+                shadow_parts[str(n)] = br.base_return_contribution((price / s_px - 1) * side - cf, s_px, cfg.target_ratio(int(n)), pos.base_entry)
         groups: Dict[str, List[Any]] = {}
         for item in pos.block_fills:
             groups.setdefault(str(item["group"]), []).append(item)
@@ -248,7 +274,9 @@ class SetBlockBook:
                         net_add = (gross - entry_fee - exit_fee) / notional
                     for b in books:
                         br.add_obs(b["executed"].setdefault(n, br.new_record()), net_add)
-                    add_part += br.base_return_contribution(net_add, notional / quantity, quantity / pos.base_qty, pos.base_entry)
+                        br.add_obs(b.setdefault("qualification", {}).setdefault(n, br.new_record()), net_add)
+                    add_parts[n] = br.base_return_contribution(net_add, notional / quantity, quantity / pos.base_qty, pos.base_entry)
+                    add_part += add_parts[n]
                     highest = max(highest, int(n))
         parent_net = ((price / pos.base_entry - 1) * side - cf if pos.base_entry > 0 and math.isfinite(price) and price > 0 else 0.0) + add_part
         if pos.base_entry_fee_usdt is not None and pos.exit_fee_qty >= pos.qty > 0 and pos.base_qty > 0 and pos.base_entry > 0:
@@ -257,7 +285,15 @@ class SetBlockBook:
         for b in books:
             b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
             b["updated"] = now
-        self.guard = br.guard_after_close(cfg, self.guard, add_part, shadow_part)
+        for k in rkeys:
+            for n in add_parts.keys() | shadow_parts.keys():
+                gk = br.guard_key(k, int(n))
+                was_held = br.guard_holds(cfg, self.guards.get(gk))
+                self.guards[gk] = br.guard_after_close(cfg, self.guards.get(gk), add_parts.get(n, 0.0), shadow_parts.get(n, 0.0))
+                if was_held and not br.guard_holds(cfg, self.guards[gk]):
+                    # Keep all-time actual execution statistics; start a new
+                    # qualification epoch after a paper-recovered deficit.
+                    self.ledger(k, create=True).setdefault("qualification", {})[n] = br.new_record()
         lane.update(parent="", closed=parent, entries={}, shadow={}, updated=now)
         self.save()
 
@@ -286,9 +322,25 @@ class SetBlockBook:
                     rows.append({"lane": key, "group": int(n), "paper": paper, "executed": live, "level": int(led["life"].get("level", 0)),
                                  "pause": int(led["life"].get("pause", 0)), "net": round(float(led["life"].get("net", 0.0)), 6)})
         cfg = self.config(block)
+        active_guards, idle_guards = [], []
+        for gk, guard in self.guards.items():
+            try:
+                rkey, count = json.loads(gk)
+                version, sid, lane, side, relation, *group = json.loads(rkey)
+                if version != 3:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            holding = br.guard_holds(cfg, guard)
+            dest = active_guards if holding else idle_guards
+            if len(dest) < 200:
+                dest.append({"set": sid, "lane": lane, "side": side, "relation": relation, "group": group,
+                             "count": count, "holding": holding, "net": round(guard["net"], 6),
+                             "shadow": round(guard["shadow"], 6)})
         return {"lanes": rows, "minObservations": cfg.min_obs, "stackType": cfg.stack_type, "relations": list(cfg.relations),
                 "counts": [{"n": i + 1, "step": c["step"], "ratio": c["ratio"], "on": c.get("on", True)} for i, c in enumerate(cfg.counts)],
                 "carry": cfg.carry, "pauseSteps": cfg.pause_steps, "skipFirst": cfg.skip_first, "error": self.error,
-                "guard": {"on": cfg.guard, "holding": br.guard_holds(cfg, self.guard), "net": round(float(self.guard.get("net", 0.0)), 6),
-                          "shadow": round(float(self.guard.get("shadow", 0.0)), 6)},
+                "guard": {"on": cfg.guard, "holding": br.guard_holds(cfg, self.legacy_guard) or any(br.guard_holds(cfg, g) for g in self.guards.values()),
+                          "legacyBlocked": br.guard_holds(cfg, self.legacy_guard), "scopes": len(self.guards),
+                          "legacyNet": round(self.legacy_guard["net"], 6), "byScope": (active_guards + idle_guards)[:200]},
                 "targetShare": cfg.target_share, "kinds": list(cfg.kinds) or list(br.KINDS)}

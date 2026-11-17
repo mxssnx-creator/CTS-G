@@ -427,6 +427,8 @@ export type LiveStats = {
     defaultMinPF: number;
     allCounts?: Array<{ n: number; inc: number; targetAdd: number; targetBlock?: number; minPF: number }>;
     countN?: number;
+    setLanes?: { error?: string; guard?: { on?: boolean; holding?: boolean; legacyBlocked?: boolean; scopes?: number;
+      byScope?: Array<{ set: string; lane: string; side: string; relation: string; group: unknown[]; count: number; holding: boolean; net: number; shadow: number }> } };
     lanes: Array<{
       symbol: string;
       side: string;
