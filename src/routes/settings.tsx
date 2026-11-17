@@ -1327,7 +1327,7 @@ function SettingsPage() {
           {section === "block" && (
             <Card
               title="Block rounds"
-              hint="Each Set and lane forms its own blocks for every selected relation and count. A losing block raises only that procedure's next entries until its weighted net recovers."
+              hint="Each Set, lane, direction and count keeps its own recovery history. Recovery uses that count’s requested size. Actual entries can combine requests."
             >
               {(() => {
                 const cfg = blockRoundsOf(overlay.blockRounds);
@@ -2904,20 +2904,20 @@ function IndicationConfigEditor({
   );
 }
 
-type RoundsAutoRow = { set?: string; lane?: string; relation: string; key?: string; count: number; raises: boolean; source: string; pf: number | null; results: number; ratio: number };
+type RoundsAutoRow = { set?: string; lane?: string; side?: string; policy?: string; relation: string; key?: string; count: number; raises: boolean; source: string; pf: number | null; results: number; ratio: number };
 
 /** The live Auto verdict of every block count (execution.blockRounds.auto from the engine): which counts raise now, on what evidence. */
 function BlockRoundsAutoTable({ stats }: { stats: LiveStats | null }) {
-  const rounds = stats?.execution?.blockRounds as { auto?: RoundsAutoRow[]; autoTotal?: number; legacyGroups?: number } | undefined;
+  const rounds = stats?.execution?.blockRounds as { auto?: RoundsAutoRow[]; autoTotal?: number; legacyGroups?: number; inactivePolicyGroups?: number } | undefined;
   const raw = rounds?.auto;
   if (!Array.isArray(raw) || !raw.length) return <p className="mt-3 font-mono text-[11px] text-muted">Auto verdicts appear once the engine reports them.</p>;
   return (
     <div className="mt-3 overflow-x-auto" data-testid="block-rounds-auto">
-      <p className="mb-2 font-mono text-[11px] text-muted">Showing {raw.length} of {rounds?.autoTotal ?? raw.length} Set / lane / relation / count verdicts. Older pooled histories cannot qualify a Set.</p>
+      <p className="mb-2 font-mono text-[11px] text-muted">Showing {raw.length} of {rounds?.autoTotal ?? raw.length} current verdicts. Archived scopes: {(rounds?.legacyGroups ?? 0) + (rounds?.inactivePolicyGroups ?? 0)}.</p>
       <table className="w-full min-w-[740px] text-left text-sm">
         <thead className="font-mono text-[11px] text-muted">
           <tr>
-            <th className="pb-2 font-medium">Set / lane</th>
+            <th className="pb-2 font-medium">Set / lane / side</th>
             <th className="pb-2 font-medium">Relation / group</th>
             <th className="pb-2 font-medium">Count</th>
             <th className="pb-2 font-medium">Results</th>
@@ -2929,8 +2929,8 @@ function BlockRoundsAutoTable({ stats }: { stats: LiveStats | null }) {
         </thead>
         <tbody>
           {raw.map((r) => (
-            <tr key={JSON.stringify([r.set,r.lane,r.relation,r.key,r.count])} className="border-t border-border font-mono tabular-nums">
-              <td className="py-1">{r.set ?? "legacy scope"} / {r.lane ?? "—"}</td>
+            <tr key={JSON.stringify([r.set, r.lane, r.side, r.policy, r.relation, r.key, r.count])} className="border-t border-border font-mono tabular-nums">
+              <td className="py-1">{r.set ?? "legacy scope"} / {r.lane ?? "—"} / {r.side ?? "—"}</td>
               <td className="py-1">{r.relation} / {r.key ?? "—"}</td>
               <td className="py-1">{r.count}</td>
               <td className="py-1">{r.results}</td>
