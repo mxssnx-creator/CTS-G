@@ -872,6 +872,7 @@ def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
             _n, gpos3 = enter(u, uapi, syms[4])
             os.remove(pt.OPEN_PATH)                                             # a restart whose book no longer holds the position
             u2, _a2 = make(td, "unscored")
+            u2.rounds.cfg = u.rounds.cfg
             out["restart without the position"] = (len(u.rounds.members), len(u2.rounds.members), len(u2.rounds.groups[u2.rounds.gid("step", ukeys["step"], 1)]["open"]))
             q, _api = make(td, "off")
             notional, pos = enter(q, _api, syms[0])

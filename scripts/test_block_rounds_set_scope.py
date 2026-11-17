@@ -132,8 +132,51 @@ class BlockSetScope(unittest.TestCase):
             self.assertEqual(book.ask(keys('new-set'))[0], 1)
             self.assertEqual(book.snapshot()['legacyGroups'], 1)
             book.save()
-            self.assertEqual(json.loads(path.read_text())['version'], 2)
+            self.assertEqual(json.loads(path.read_text())['version'], 3)
             self.assertEqual(RoundsBook(str(path), cfg).ask(keys('new-set'))[0], 1)
+
+    def test_policy_change_keeps_open_members_and_unchanged_counts_in_their_own_histories(self):
+        a = keys('same')
+        old = self.config('set')
+        old.counts[1].pause = 2
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / 'rounds.json')
+            book = RoundsBook(path, old)
+            self.trade(book, a, 'first', -1)
+            self.trade(book, a, 'second', -1)
+            old_id = book.gid('set', a['set'], 1)
+            second_id = book.gid('set', a['set'], 2)
+            book.opened('owned-by-old-policy', a, book.ask(a)[0])
+            book.save()
+            new = self.config('set')
+            new.counts[1].ratio = .25
+            restored = RoundsBook(path, new)
+            self.assertEqual(restored.ask(a)[0], 1.5, 'only unchanged count two may raise')
+            self.assertEqual(restored.gid('set', a['set'], 2), second_id)
+            new_id = restored.gid('set', a['set'], 1)
+            self.assertNotEqual(old_id, new_id)
+            restored.closed('owned-by-old-policy', 3)
+            self.assertEqual(restored.groups[old_id]['pause'], 2)
+            self.assertNotIn(new_id, restored.groups)
+            self.assertEqual(restored.snapshot()['inactivePolicyGroups'], 1)
+            restored.cfg = old
+            self.assertEqual(restored.groups[restored.gid('set', a['set'], 1)]['pause'], 2)
+
+    def test_independent_recovery_ignores_actual_multiple_and_opposite_direction(self):
+        cfg = self.config('overall')
+        book = RoundsBook(cfg=cfg)
+        long, short = keys('both'), keys_of('BTC-USDT', -1, 'trend', 'base', 3, 'pos', 'both')
+        self.trade(book, long, 'one', -1)
+        self.assertEqual(book.ask(short)[0], 1)
+        self.trade(book, long, 'two', -1)
+        self.assertEqual(book.ask(long)[0], 2.5)
+        # The shared cap or lot rounding changes the aggregate result. The
+        # count-one deficit is -3 and its own proposed x2 makes back 2.6.
+        book.opened('three', long, 4)
+        book.closed('three', 1.3)
+        first = book.groups[book.gid('overall', long['overall'], 1)]
+        self.assertEqual(first['level'], 1)
+        self.assertAlmostEqual(first['net'], -.4)
 
 
 if __name__ == '__main__':

@@ -305,7 +305,7 @@ def block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule():
                 blocks = {o: b.groups[b.gid("step", k["step"], o)]["blocks"] for o in rounds.COUNTS}
                 if blocks != {o: len(nets) // o for o in rounds.COUNTS}:
                     bad.append((n, "blocks", blocks))
-    # all six on: the sum of the six procedures, each by its own reading of the same results (the multiple feeds every count's weighted net)
+    # All six on: each count follows its own recovery, and their requested amounts stack.
     nets = [rng.choice((-1.0, -0.4, 0.3, 0.9, 1.5)) for _ in range(300)]
     cfg = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 4, "counts": {str(o): {"on": True, "ratio": 0.1 * o, "step": o % 2 == 0, "maxLevel": 3, "pause": o % 3} for o in rounds.COUNTS}})
     b = rounds.RoundsBook(cfg=cfg)
@@ -421,7 +421,7 @@ def block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions(
         cap = rng.choice((2.0, 3.0, 5.0))
         cfg = rounds.config_of({"enabled": True, "relations": rels, "maxMult": cap, "counts": counts})
         b = rounds.RoundsBook(cfg=cfg)
-        hist = {}                                # (relation, key) -> the group's positions in open order
+        hist = {}                                # (relation, key, count) -> positions in open order
         live, seq = [], 0
         for i in range(rng.randint(40, 160)):
             while live and (len(live) >= 5 or rng.random() < 0.45):          # close (or release) a random open position
@@ -438,38 +438,38 @@ def block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions(
             keys = rounds.keys_of(rng.choice(("A", "B", "C")), rng.choice((1, -1)), rng.choice(("general", "indications")), rng.choice(("base", "trail")),
                                   rng.choice((5, 9)), "pos", rng.choice(("s1", "s2")))
             want = 1.0
+            rows = []
             for rel in cfg.relations:
-                h = hist.setdefault((rel, keys[rel]), [])
                 for n in rounds.COUNTS:
                     c = counts[str(n)]
-                    if c["on"]:
-                        want += c["ratio"] * _replayed_rounds(h, n, c)[0]
+                    h = hist.setdefault((rel, keys[rel], n), [])
+                    own = c["ratio"] * _replayed_rounds(h, n, c)[0] if c["on"] else 0.0
+                    want += own
+                    row = {"mult": min(cap, 1.0 + own), "net": None, "closed": None}
+                    h.append(row)
+                    rows.append(row)
             want = min(cap, want)
             got = b.ask(keys)[0]
             if abs(got - want) > 1e-9:
                 bad.append((_case, i, round(got, 6), round(want, 6)))
                 break
             b.opened(f"p{i}", keys, got)
-            rows = []
-            for rel in cfg.relations:
-                row = {"mult": got, "net": None, "closed": None}
-                hist[(rel, keys[rel])].append(row)
-                rows.append(row)
             live.append((f"p{i}", rows))
             positions += 1
             raised += got > 1.0 + 1e-9
             top = max(top, got)
-        for (rel, key), h in hist.items():       # every count settled exactly its complete blocks, in order
-            for n in rounds.COUNTS:
-                g = b.groups[b.gid(rel, key, n)]
-                done = 0
-                for j in range(0, len(h) - len(h) % n, n):
-                    if any(p["closed"] is None for p in h[j:j + n]):
-                        break
-                    done += 1
-                pending = sum(1 for _ in range(done * n, len(h), n))
-                if len(g["open"]) != pending or (g["level"], g["pause"]) != _replayed_rounds(h, n, counts[str(n)]):
-                    bad.append((_case, rel, key, n, "state"))
+        if bad and bad[-1][0] == _case:
+            continue
+        for (rel, key, n), h in hist.items():
+            g = b.groups[b.gid(rel, key, n)]
+            done = 0
+            for j in range(0, len(h) - len(h) % n, n):
+                if any(p["closed"] is None for p in h[j:j + n]):
+                    break
+                done += 1
+            pending = sum(1 for _ in range(done * n, len(h), n))
+            if len(g["open"]) != pending or (g["level"], g["pause"]) != _replayed_rounds(h, n, counts[str(n)]):
+                bad.append((_case, rel, key, n, "state"))
         books += 1
     ok = plain_ok and not bad and raised > 1000 and top >= 5.0 - 1e-9
     return ok, (f"worked cases {worked if not plain_ok else 'all equal the hand calculation'}; {books} random books, {positions} positions ({raised} raised, "
@@ -510,47 +510,47 @@ def block_rounds_auto_judges_every_count_on_its_own_newest_results():
     cfg = rounds.config_of({"enabled": True, "relations": ["overall", "direction"], "maxMult": 5, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 0.5,
                             "counts": {"2": {"on": True, "ratio": 0.25, "step": True, "maxLevel": 3}, "4": {"on": False, "ratio": 0.0}}})
     book = rounds.RoundsBook(cfg=cfg)
-    # Plain state and Auto evidence are both per exact Set/lane/relation key/count.
-    lvl, ev, bad, open_ = {}, {}, [], []
-    plain = rounds.RoundsBook(cfg=rounds.config_of({**cfg.to_json(), "auto": False}))     # the procedures without Auto: levels do not depend on Auto
+    # Rebuild levels and Auto evidence from each procedure's own opening history.
+    history, evidence, bad = {}, {}, []
+    configs = cfg.to_json()["counts"]
     seen_auto = 0
     for i in range(600):
         side = 1 if rng.random() < 0.5 else -1
         k = rounds.keys_of("X", side, "p", "base", 5, "pos", "s")
         # the plain verdict, from the plain evidence
-        add = 0.0
+        add, opening = 0.0, []
         for rel in cfg.relations:
             for n in rounds.COUNTS:
-                g = plain.groups.get(plain.gid(rel, k[rel], n))
-                if not g or g["level"] <= 0:
-                    continue
-                e = ev.get((rel, k[rel], n), [])[-30:]
-                gp, gl = sum(x for x in e if x > 0), -sum(x for x in e if x < 0)
+                key = (rel, k[rel], n)
+                h = history.setdefault(key, [])
+                e = evidence.setdefault(key, [])
+                level, _ = _replayed_rounds(h, n, configs[str(n)])
+                tail = e[-30:]
                 c = cfg.counts[n]
-                if len(e) < 15:
+                if len(tail) < 15:
                     on, ratio = c.on, c.ratio
                 else:
+                    gp, gl = sum(x for x in tail if x > 0), -sum(x for x in tail if x < 0)
                     on, ratio = (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)) >= 1.0, (c.ratio if c.ratio > 0 else 0.5)
-                    seen_auto += 1
-                if on and ratio > 0:
-                    add += ratio * g["level"]
-        want = min(5.0, 1.0 + add) if add > 0 else 1.0
+                    seen_auto += level > 0
+                increment = ratio * level if on else 0.0
+                add += increment
+                opening.append((h, e, level, min(5.0, 1.0 + increment)))
+        want = min(5.0, 1.0 + add)
         got, _ = book.ask(k)
         if abs(got - want) > 1e-9:
             bad.append((i, got, want))
-        levels = {(rel, k[rel], n): (plain.groups.get(plain.gid(rel, k[rel], n)) or {}).get("level", 0) for rel in cfg.relations for n in rounds.COUNTS}
         book.opened(f"p{i}", k, got)
-        plain.opened(f"p{i}", k, want)                                   # the same volume: recovery reads the weighted net
         net = rng.gauss(-0.1 if i < 300 else 0.15, 1.0)
         book.closed(f"p{i}", net)
-        plain.closed(f"p{i}", net)
-        for (rel, key, n), L in levels.items():
-            if L > 0:
-                ev.setdefault((rel, key, n), []).append(L * net)
-    ev_same = all(abs(a - b) < 1e-6 for key in ev for a, b in zip(ev[key][-200:], book.evidence.get(book.eid(*key), [])))
+        for h, e, level, own in opening:
+            h.append({"closed": i, "net": net, "mult": own})
+            if level > 0:
+                e.append(level * net)
+    ev_same = all(e[-200:] == book.evidence.get(book.eid(*key), []) for key, e in evidence.items())
     snap = book.snapshot()
-    rows = {(r["relation"], r["key"], r["count"]): r for r in snap["auto"]}
-    return (not bad and ev_same and seen_auto > 100 and len(rows) == 18 and all(r["source"] in ("auto", "manual") for r in rows.values()),
+    rows = {(r["relation"], r["key"], r["side"], r["count"]): r for r in snap["auto"]}
+    return (not bad and ev_same and seen_auto > 100 and len(rows) == 24 and all(r["source"] in ("auto", "manual") for r in rows.values()),
             f"600 positions, independent relation keys x 6 counts; multiples equal the plain reading: {not bad} {bad[:2]}; evidence equal {ev_same}; auto verdicts read {seen_auto}; "
             f"verdict rows {len(rows)}")
 
