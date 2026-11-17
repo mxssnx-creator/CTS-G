@@ -9,7 +9,7 @@ Owner 2026-11-03 ("make Block fully work ... dont use windows ... each block cou
   own on / off. One count's record never moves another's.
 - Stack type: "additive" - count n adds ratio_n x V0 when it fires (the stack is V0 x (1 + sum of the fired ratios)); "shared" - the parent's whole add budget
   is one number R x V0 split equally over the ENABLED counts (each adds R x V0 / k), so a longer table never raises the total.
-- A count adds only when every enabled RELATION agrees: a relation is a key the evidence is kept under, independent of the others -
+- A count adds only when every enabled RELATION agrees: every relation is scoped to the Set, lane and direction and is independent of the others -
   "symbol" (the symbol and side), "indication" (the pack, lane and side), "set" (the strategy configuration: Set, lane, side; the ordinary Block on Main /
   Real Set parents) and "step" (the pack, the TP step, lane and side; the overall Block at stage Real). Each relation holds its own ledgers and lifecycle.
 - Lifecycle per relation (opt-in carry): a parent that closes net negative keeps the highest count it fired as the relation's `level` (the next parent is sized
@@ -19,15 +19,16 @@ Owner 2026-11-03 ("make Block fully work ... dont use windows ... each block cou
 Owner 2026-11-11 ("make Block ... working with high PF as without"; measured on seven windows, docs/verification/block-coordinations-20261111.md): an add's
 result follows its parent's, so no evidence rule made the adds pay out of sample. Three rules keep Block from costing what it cannot earn; each only ever
 removes adds, none creates one:
-- Deficit guard (`guard`): the book's own executed adds must not be in deficit. While their cumulative net (in units of base notional) is below zero no add
+- Deficit guard (`guard`): each Set, relation and count's executed adds must not be in deficit. While their cumulative net (in units of base notional) is below zero no add
   is sent; the adds that would have been sent are followed on paper, and adding resumes when those paper adds have earned the deficit back (both restart
-  at zero). Block so pays for one losing episode and then waits until adds would have paid again; it reads no window and needs no count.
+  at zero). Historical executed results remain in the statistics while the qualification epoch restarts after a paper recovery.
 - Target share (`target_share`): on a fixed-target parent a count adds only while its level is at most this share of the way from the parent's base entry to
   its target. Adds past the middle of the way lost on seven of seven windows (little room left, the whole way back to the stop below).
 - Parent types (`kinds`): the Set types (base / exit / trail) that may receive adds. Adds on Exit-Set parents (no target) lost on seven of seven windows.
 """
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -252,18 +253,26 @@ def guard_after_close(cfg: BlockCfg, guard: Optional[Dict[str, Any]], executed_p
 # ---- relations --------------------------------------------------------------------------------------------------------------------------------------
 
 def relation_keys(cfg: BlockCfg, set_id: str, lane: str, side: str, symbol: str, pack: str, step: int) -> List[str]:
-    """The evidence key of every enabled relation for one parent."""
+    """Each relation is contained within the parent Set, lane and direction."""
     out = []
     for r in cfg.relations:
         if r == "symbol":
-            out.append(f"symbol|{symbol}|{side}")
+            part = [r, symbol]
         elif r == "indication":
-            out.append(f"indication|{pack}|{lane}|{side}")
+            part = [r, pack]
         elif r == "set":
-            out.append(f"set|{set_id}|{lane}|{side}")
+            part = [r]
         elif r == "step":
-            out.append(f"step|{pack}|{int(step)}|{lane}|{side}")
+            part = [r, pack, int(step)]
+        else:
+            continue
+        out.append(json.dumps([3, set_id, lane, side, *part], separators=(",", ":")))
     return out
+
+
+def guard_key(relation_key: str, count: int) -> str:
+    """A deficit belongs to one exact relation and one add count."""
+    return json.dumps([relation_key, int(count)], separators=(",", ":"))
 
 
 # ---- lifecycle --------------------------------------------------------------------------------------------------------------------------------------

@@ -539,7 +539,7 @@ def main() -> int:
                 ev.append((now_t, 2, i, n))
         ev.sort(key=lambda event: (event[0], {1: 0, 2: 1, 0: 2}[event[1]], event[2], event[3]))
         ledgers: Dict[str, Dict[str, Any]] = {}
-        guard = br.new_guard()                    # the book's deficit guard (block_rules): executed adds' net and, in deficit, the paper adds' net
+        guards: Dict[str, Dict[str, float]] = {}   # relation and count keep their own executed and paper deficit
 
         def led(k):
             return ledgers.setdefault(k, {"paper": {}, "executed": {}, "life": br.new_life()})
@@ -570,7 +570,11 @@ def main() -> int:
                                       float(book.floor_for(getattr(wn_, "real_neg_n", wn_.real_n), m["st"].pack, m["st"])))
                 floor = floor_memo[fk][1 if r["lane"] == "neg" else 0]       # the parent's own lane window, as Pulse.set_axis_floor
                 fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
-                if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b["executed"].get(str(n)) for b in books], floor, fired_ratio):
+                held_keys = {k for k in m["rk"] if br.guard_holds(cfg, guards.get(br.guard_key(k, n)))}
+                held = bool(held_keys)
+                execs = [b.get("qualification", b["executed"]).get(str(n)) for b in books]
+                available_execs = [rec for key, rec in zip(m["rk"], execs) if key not in held_keys]
+                if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], available_execs, floor, fired_ratio):
                     continue
                 lvl = m["hits"][n - 1][2]
                 from set_engine import lane_honors_tp
@@ -581,22 +585,31 @@ def main() -> int:
                     if not br.target_covers_cost(lvl, target, m["side"], cf) or not br.share_allows(cfg, m["entry"], lvl, target, m["side"]):
                         continue
                 net = (m["exit"] - lvl) / lvl * m["side"] - cf
-                if br.guard_holds(cfg, guard):
+                if held:
                     m.setdefault("shadow", {})[n] = net      # in deficit: followed on paper, not sent
                 else:
                     m["fired"][n] = net
                 continue
             # close
             add_part = 0.0
+            add_parts = {}
             for n, net in m["fired"].items():
                 ratio = cfg.target_ratio(n)
                 weight = br.base_return_contribution(1.0, m["hits"][n - 1][2], ratio, m["entry"])
                 events.append((float(r["t"]), net, weight * m["scale"]))
                 add_nets.append(net * weight * m["scale"])
                 adds += 1
-                add_part += weight * net
-            shadow_part = sum(net * br.base_return_contribution(1.0, m["hits"][n - 1][2], cfg.target_ratio(n), m["entry"]) for n, net in (m.get("shadow") or {}).items())
-            guard.update(br.guard_after_close(cfg, guard, add_part, shadow_part))
+                add_parts[n] = weight * net
+                add_part += add_parts[n]
+            shadow_parts = {n: net * br.base_return_contribution(1.0, m["hits"][n - 1][2], cfg.target_ratio(n), m["entry"])
+                            for n, net in (m.get("shadow") or {}).items()}
+            for k in m["rk"]:
+                for count in add_parts.keys() | shadow_parts.keys():
+                    gk = br.guard_key(k, count)
+                    was_held = br.guard_holds(cfg, guards.get(gk))
+                    guards[gk] = br.guard_after_close(cfg, guards.get(gk), add_parts.get(count, 0.0), shadow_parts.get(count, 0.0))
+                    if was_held and not br.guard_holds(cfg, guards[gk]):
+                        led(k).setdefault("qualification", {})[str(count)] = br.new_record()
             events.append((float(r["t"]), float(r["net"]), m["scale"]))
             parent_net = float(r["net"]) + add_part
             highest = max(m["fired"]) if m["fired"] else 0
@@ -606,6 +619,7 @@ def main() -> int:
                     br.add_obs(b["paper"].setdefault(str(hn), br.new_record()), (m["exit"] / lvl - 1) * m["side"] - cf)
                 for hn, net in m["fired"].items():
                     br.add_obs(b["executed"].setdefault(str(hn), br.new_record()), net)
+                    br.add_obs(b.setdefault("qualification", {}).setdefault(str(hn), br.new_record()), net)
                 b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
         return events, adds, add_nets
 

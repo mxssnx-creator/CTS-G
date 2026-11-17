@@ -253,7 +253,7 @@ export type PulseOverlay = {
   blockCarry: boolean;
   blockPauseSteps: number;
   blockSkipFirst: number;
-  /** Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back. */
+  /** Deficit guard: each Set, relation and count resumes after its paper adds earn back its own executed deficit. */
   blockGuard: boolean;
   /** A count of a fixed-target parent adds only up to this share of the way to the target (0 = no rule). */
   blockTargetShare: number;
