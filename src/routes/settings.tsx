@@ -1433,6 +1433,9 @@ function SettingsPage() {
                 <p className="mb-3 rounded border border-danger px-3 py-2 text-xs text-danger">Guarded adds are held because an earlier pooled deficit cannot be assigned to an individual Set and count. Reconcile the retained old record before resuming.</p>
               ) : null}
               {stats?.block?.setLanes?.error ? <p className="mb-3 text-xs text-danger">{stats.block.setLanes.error}</p> : null}
+              {Boolean(stats?.block?.setLanes?.archivedLedgers) && (
+                <p className="mb-3 text-xs text-muted">{stats?.block?.setLanes?.archivedLedgers} archived relation ledgers</p>
+              )}
               {stats?.block?.setLanes?.guard ? <p className="mb-3 text-xs text-muted">Guard scopes: {stats.block.setLanes.guard.scopes ?? 0} · {stats.block.setLanes.guard.holding ? "one or more held" : "none held"}</p> : null}
               <Grid>
                 <EnableSlider
@@ -1451,10 +1454,10 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
-                <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Block v2 · each block count on its own (no windows)</div>
+                <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Set Block add counts</div>
                 <p className="col-span-full text-xs text-muted">
                   Every count has its own step (PositionCosts after the count before: 2 + 2 + 2 = three counts at 2, 4 and 6), its own volume ratio of the parent's original
-                  volume and its own cumulative evidence (all observations since the start, no last-N). Additive: each count adds its ratio. Shared: one budget (R × original
+                  volume and its own evidence. Additive: each count adds its ratio. Shared: one budget (R × original
                   volume) split equally over the counts that are on. A count adds only when every selected relation shows enough observations at a PF above its threshold.
                 </p>
                 <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
@@ -1505,7 +1508,19 @@ function SettingsPage() {
                 </div>
                 <Num label="Min observations per count" value={overlay.blockMinObservations} min={1} max={200} step={1}
                   hint="A count adds only after its own record holds this many observations (a count, not a window)." onChange={(v) => patch("blockMinObservations", Math.max(1, Math.round(v)))} />
-                <Toggle label="Carry: keep the stack until the relation's net is back positive, then pause (shared across counts)" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
+                <Num label="Add Auto Last-N (0 = cumulative)" value={overlay.blockAddLastN} min={0} max={100} step={1}
+                  hint="Each Set, policy and count reads only its own most recent outcomes. Changing the policy starts its own history."
+                  onChange={(v) => {
+                    const n = v > 0 ? Math.max(3, Math.round(v)) : 0;
+                    patch("blockAddLastN", n);
+                    if (n && overlay.blockAddAutoMin > n) patch("blockAddAutoMin", n);
+                  }} />
+                {overlay.blockAddLastN > 0 ? (
+                  <Num label="Add Auto minimum observations" value={Math.min(overlay.blockAddAutoMin, overlay.blockAddLastN)} min={3} max={overlay.blockAddLastN} step={1}
+                    hint="A held count can build new paper evidence at qualifying prices. Actual fills stay in the execution ledger."
+                    onChange={(v) => patch("blockAddAutoMin", Math.round(v))} />
+                ) : null}
+                <Toggle label="Carry: recover and pause independently for each count" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
                 <Num label="Pause after the reset (parents)" value={overlay.blockPauseSteps} min={0} max={20} step={1} hint="Parents of the relation without adds after the net is back positive."
                   onChange={(v) => patch("blockPauseSteps", Math.max(0, Math.round(v)))} />
                 <Num label="Skip the first x counts" value={overlay.blockSkipFirst} min={0} max={12} step={1} hint="Those counts never add; they still collect evidence."
