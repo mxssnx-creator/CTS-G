@@ -343,7 +343,7 @@ def _replayed_rounds(history, n, c):
                 unit += p["net"]
                 weighted += p["net"] * p["mult"]
                 scored += 1
-        if not scored:
+        if scored != len(block):
             continue
         if rest > 0:
             rest -= 1
@@ -476,9 +476,8 @@ def block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions(
 
 
 def block_rounds_ship_the_procedure_measured_at_or_above_without():
-    """The shipped overlays, the three presets that carry Block and the desk default hold the same blockRounds object, and it is the measured one: relation
-    step, block count 5 raising (ratio 1.0, step to level 2, no pause), the other five counts forming their blocks without raising, ceiling x 3. The engine's
-    absent-key default is off (fixtures and older overlays raise nothing)."""
+    """The overlays, presets and desk carry the same requested Block-rounds settings. Historical pooled-relation results do not establish performance of the
+    independently scoped procedure. The engine's absent-key default is off (fixtures and older overlays raise nothing)."""
     import json
     import re
     import block_rounds as rounds
@@ -488,7 +487,7 @@ def block_rounds_ship_the_procedure_measured_at_or_above_without():
     files += [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json", "low-steps-coordination-research.json")]
     carried = {os.path.basename(f): json.load(open(f)).get("blockRounds") for f in files}
     # owner 2026-11-15 ("block steps increasing and remaining at the last until net positive for lane, best vol increment ratio"): counts 1 and 2 of the step
-    # relation, ratio 1.0, step to level 3 (held until the lane's net is back at zero), ceiling x4; measured on 50 symbols, dev + sealed (CLAUDE.md)
+    # relation, ratio 1.0, step to level 3 (held until the lane's net is back at zero), ceiling x4. Re-evaluate after any change in scope.
     want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 4, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 1.0,
                              "counts": {"1": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0},
                                         "2": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0}}}).to_json()
@@ -496,7 +495,7 @@ def block_rounds_ship_the_procedure_measured_at_or_above_without():
     desk = open(os.path.join(ROOT, "src", "lib", "block-rounds.ts")).read()
     desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 4,\s*auto: true,\s*autoN: 30,\s*autoMin: 15,\s*autoPf: 1,\s*autoRatio: 1,', desk)) and '"2": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 }' in desk
     off = rounds.config_of(None)
-    return all(same.values()) and len(same) == 7 and desk_ok and not off.enabled and not any(c.on for c in off.counts.values()), f"carried equal to the measured object: {same}; desk {desk_ok}; absent key enabled {off.enabled}"
+    return all(same.values()) and len(same) == 7 and desk_ok and not off.enabled and not any(c.on for c in off.counts.values()), f"carried settings agree: {same}; desk {desk_ok}; absent key enabled {off.enabled}"
 
 
 def block_rounds_auto_judges_every_count_on_its_own_newest_results():
@@ -510,7 +509,7 @@ def block_rounds_auto_judges_every_count_on_its_own_newest_results():
     cfg = rounds.config_of({"enabled": True, "relations": ["overall", "direction"], "maxMult": 5, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 0.5,
                             "counts": {"2": {"on": True, "ratio": 0.25, "step": True, "maxLevel": 3}, "4": {"on": False, "ratio": 0.0}}})
     book = rounds.RoundsBook(cfg=cfg)
-    # plain state: per (relation, key, n): level, net, pause, open blocks; per (relation, n): evidence
+    # Plain state and Auto evidence are both per exact Set/lane/relation key/count.
     lvl, ev, bad, open_ = {}, {}, [], []
     plain = rounds.RoundsBook(cfg=rounds.config_of({**cfg.to_json(), "auto": False}))     # the procedures without Auto: levels do not depend on Auto
     seen_auto = 0
@@ -524,7 +523,7 @@ def block_rounds_auto_judges_every_count_on_its_own_newest_results():
                 g = plain.groups.get(plain.gid(rel, k[rel], n))
                 if not g or g["level"] <= 0:
                     continue
-                e = ev.get((rel, n), [])[-30:]
+                e = ev.get((rel, k[rel], n), [])[-30:]
                 gp, gl = sum(x for x in e if x > 0), -sum(x for x in e if x < 0)
                 c = cfg.counts[n]
                 if len(e) < 15:
@@ -538,21 +537,21 @@ def block_rounds_auto_judges_every_count_on_its_own_newest_results():
         got, _ = book.ask(k)
         if abs(got - want) > 1e-9:
             bad.append((i, got, want))
-        levels = {(rel, n): (plain.groups.get(plain.gid(rel, k[rel], n)) or {}).get("level", 0) for rel in cfg.relations for n in rounds.COUNTS}
+        levels = {(rel, k[rel], n): (plain.groups.get(plain.gid(rel, k[rel], n)) or {}).get("level", 0) for rel in cfg.relations for n in rounds.COUNTS}
         book.opened(f"p{i}", k, got)
         plain.opened(f"p{i}", k, want)                                   # the same volume: recovery reads the weighted net
         net = rng.gauss(-0.1 if i < 300 else 0.15, 1.0)
         book.closed(f"p{i}", net)
         plain.closed(f"p{i}", net)
-        for (rel, n), L in levels.items():
+        for (rel, key, n), L in levels.items():
             if L > 0:
-                ev.setdefault((rel, n), []).append(L * net)
+                ev.setdefault((rel, key, n), []).append(L * net)
     ev_same = all(abs(a - b) < 1e-6 for key in ev for a, b in zip(ev[key][-200:], book.evidence.get(book.eid(*key), [])))
     snap = book.snapshot()
-    rows = {(r["relation"], r["count"]): r for r in snap["auto"]}
-    return (not bad and ev_same and seen_auto > 100 and len(rows) == 12 and all(r["source"] in ("auto", "manual") for r in rows.values()),
-            f"600 positions, 2 relations x 6 counts; multiples equal the plain reading: {not bad} {bad[:2]}; evidence equal {ev_same}; auto verdicts read {seen_auto}; "
-            f"verdicts {{{', '.join(f'{k[0]}:N{k[1]} {v['source']} {v['pf']} on {v['raises']}' for k, v in sorted(rows.items())[:6])}}}")
+    rows = {(r["relation"], r["key"], r["count"]): r for r in snap["auto"]}
+    return (not bad and ev_same and seen_auto > 100 and len(rows) == 18 and all(r["source"] in ("auto", "manual") for r in rows.values()),
+            f"600 positions, independent relation keys x 6 counts; multiples equal the plain reading: {not bad} {bad[:2]}; evidence equal {ev_same}; auto verdicts read {seen_auto}; "
+            f"verdict rows {len(rows)}")
 
 
 CHECKS = [

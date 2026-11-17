@@ -59,6 +59,7 @@ jobs:
           python3 scripts/test_fee_scope_refresh.py
           python3 scripts/test_venue_fill_fees.py
           python3 scripts/test_disjoint_lastn.py
+          python3 scripts/test_block_rounds_set_scope.py
           python3 scripts/test_trailing_control_pacing.py
           python3 scripts/test_project_order_identity.py
           python3 scripts/test_control_coverage.py

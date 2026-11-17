@@ -849,7 +849,8 @@ def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
             snap = p.rounds.snapshot()
             out["counts"] = {r["count"]: (r["groups"], r["blocks"], r["raises"], r["recovered"]) for r in snap["byCount"]}
             p.close_pos(pos5, 99.0, "test")
-            g3 = p.rounds.groups.get(p.rounds.gid("step", "indications|15|pos|L", 3)) or {}
+            g3_key = block_rounds.keys_of(syms[4], 1, "indications", "base", 15, "pos", st.id)["step"]
+            g3 = p.rounds.groups.get(p.rounds.gid("step", g3_key, 3)) or {}
             out["count 3 (off, its own blocks) level"] = g3.get("level")
             u, uapi = make(td, "unscored")                                     # a close made while the engine was down is recorded and teaches nothing
             u.rounds.cfg = block_rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "counts": {"1": {"on": True, "ratio": 1.0}}})
