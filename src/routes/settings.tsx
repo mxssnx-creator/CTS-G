@@ -2641,7 +2641,7 @@ function PfWindowControls({
           checked={overlay.minPfStepAutoScope === "set"}
           onChange={(e) => patch("minPfStepAutoScope", e.target.checked ? "set" : "step")}
         />
-        Auto floor per config Set. A Set with insufficient closes uses its configured manual floor or the manual TP-step formula.
+        Use per-Set Auto PF for ordinary Sets. Configured Last-N profiles always learn from their own closes and use their manual floor while warming up.
       </label>
       <Slider
         label="Auto per Set: orders a Set needs"
