@@ -1,7 +1,10 @@
 """Independent geometry and configuration isolation invariants for the shared initial SL policy."""
 from common import overlay, lane_cfg, synth_bars
+from math import isclose
+from pulse_trader import Position, Pulse, set_kind_of
+from risk_variants import fixed_trail
 from position_cost import SL_RATIOS, sl_floor_frac, resolve_sl_tp, normalize_min_sl_distance_pct
-from set_engine import SetBook, SetLane, bar_signal
+from set_engine import BarIndex, SetBook, SetLane, bar_signal, set_group
 from indication_config import source_name
 
 
@@ -72,9 +75,64 @@ def requested_step_ceiling_is_authoritative():
     assert all(s.step<=7 for s in b.by_idx if s.kind in ('base','exit'))
     return True, 'enabling Wide does not override the explicitly configured maximum step 7'
 
+
+def trailing_distance_modes():
+    settings = overlay(stratGeneral=True, stratIndications=False, stratShortRange=False,
+                       directionMode="split", exitIgnoreTp=True, trailVariants=["0.9:0.5"])
+    book = SetBook()
+    book.load(settings)
+    prior_indices = {st.id: st.idx for st in book.by_idx}
+    book.load({**settings, "setTrailingDistance": "both"})
+    assert all(book.sets[sid].idx == idx for sid, idx in prior_indices.items())
+    trader = Pulse.__new__(Pulse)
+    trader.sets = book
+    trader.close_pos = lambda *_args: None
+    trader.software_exit = lambda pos, kind, price, px: price >= px if pos.side == "LONG" else price <= px
+    moves = []
+    trader.replace_sl = lambda _pos, stop: moves.append(stop) or True
+    fixed_orders = []
+    cfg = lane_cfg(honor_tp=False, time_bars=120, scratch_bars=120)
+    cases = 0
+    for st in book.by_idx:
+        if st.kind != "trail":
+            continue
+        direction = st.side
+        peak = 100 + 10 * direction
+        arm_bar = [100., max(100., peak), min(100., peak), peak, 1.]
+        expected = peak - direction * (100. if fixed_trail(st.id) else peak) * st.trail_give / 100
+        pullback = expected - direction * .01
+        bars = [[100.]*4+[1.], arm_bar, [peak, max(peak, pullback), min(peak, pullback), pullback, 1.]]
+        stream = SetLane(st, 'BTC-USDT')
+        scalar = [closed for i, row in enumerate(bars) if (closed := stream.step(i, row, direction if i == 0 else 0, 1, True, cfg))]
+        fast = SetLane(st, 'BTC-USDT').scan(0, len(bars), bars, [direction, 0, 0], [1., 0., 0.], True, cfg, acc=BarIndex(bars))
+        assert len(scalar) == 1 and scalar == fast and isclose(scalar[0]['exit_px'], expected)
+        sl, tp = book.lane_fracs(st)
+        pos = Position('BTC-USDT', 'LONG' if direction > 0 else 'SHORT', 1., 100. + direction, 0.,
+                       100. * (1 - direction * sl), 100. * (1 + direction * tp), peak,
+                       base_entry=100., set_id=st.id, trail_set_id=st.id, trail_key=st.trail_key,
+                       sl_pct=sl, tp_pct=tp, trail_arm=st.trail_arm/100, trail_give=st.trail_give/100)
+        trader.manage_set_lane(pos, peak, 60., 60., .1)
+        assert isclose(pos.trail, expected) and isclose(moves[-1], expected)
+        assert set_kind_of(st.id) == "trail" and not trader.lane_honors_tp(pos)
+        order = trader.cid(set_id=st.id, pack=st.pack, set_idx=st.idx, lane="neg")
+        assert len(order) <= 32 and trader.parse_track(order)['set_id'] == st.id
+        if fixed_trail(st.id):
+            fixed_orders.append((order, st.id))
+            assert set_group(st.id) != set_group(st.id.replace(":fixed", ""))
+        cases += 1
+    assert cases >= 4 and fixed_orders
+    book.load(settings)
+    for order, sid in fixed_orders:
+        assert sid in book.retired and trader.parse_track(order)['set_id'] == sid
+    book.load({**settings, "setTrailingDistance": "fixed"})
+    assert all(fixed_trail(st.id) for st in book.by_idx if st.kind == "trail")
+    return True, f'{cases} trailing Sets: fixed/dynamic × long/short, replay, stops, exact order identity and retired recovery'
+
+
 CHECKS = [
  ('protection.requested-step-ceiling',requested_step_ceiling_is_authoritative),
  ('protection.geometry-grid-step-scan',geometry_and_replay_parity),
  ('protection.target-and-instance-isolation',resolve_never_moves_target),
  ('protection.indication-config-lane-isolation',duplicate_signal_configs_are_independent),
+    ('protection.trailing-distance-modes', trailing_distance_modes),
 ]

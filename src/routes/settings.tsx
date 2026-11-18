@@ -1753,6 +1753,15 @@ function SettingsPage() {
                 hint="Default 3 (owner 2026-11-03): an indications trailing Set opens at 3 × the volume factor's size; the hard size ceiling and the venue minimum lot still apply."
                 onChange={(v) => patch("volumeByPackKind", { ...(overlay.volumeByPackKind ?? {}), "indications:trail": Math.max(0.1, Math.min(5, Math.round(v * 10) / 10)) })}
               />
+              <label className="flex flex-wrap items-center gap-2 font-mono text-xs text-muted">
+                Set trailing distance
+                <select className="rounded-md border bg-background p-1.5 text-foreground" value={overlay.setTrailingDistance}
+                  onChange={event => patch("setTrailingDistance", event.target.value as typeof overlay.setTrailingDistance)}>
+                  <option value="dynamic">Dynamic, measured from peak</option>
+                  <option value="fixed">Fixed, measured from entry</option>
+                  <option value="both">Both, evaluated independently</option>
+                </select>
+              </label>
               <p className="font-mono text-xs text-muted">Trailing stop families · each builds every arm / give pair again with the initial stop at r × the arm</p>
               <div className="flex flex-wrap gap-2">
                 {TRAIL_SL_RATIOS.map((r) => (
