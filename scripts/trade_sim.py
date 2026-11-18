@@ -176,6 +176,8 @@ class FutureEntryTapes:
 
 def range_of(st):
     if st.kind == "trail":
+        if st.price_sl_pct:
+            return f"trail {st.trail_key} SL {st.price_sl_pct:.2f}%"
         return f"trail {st.trail_key}" + (f" ts{st.trail_sl:.2f}" if getattr(st, "trail_sl", 0) else "")
     return f"step {st.step:02d}"
 
@@ -184,6 +186,8 @@ def tp_range_name(st):
     """The named TP range of a base / Exit Set (Micro .. Wide), or the trailing family of a trailing Set (shipped, or ts<r> of trailSlRatios)."""
     from position_cost import tp_range_of
     if st.kind == "trail":
+        if st.price_sl_pct:
+            return f"trail SL {st.price_sl_pct:.2f}%"
         return f"trail ts{st.trail_sl:.2f}" if getattr(st, "trail_sl", 0) else "trail shipped"
     return tp_range_of(st.step)
 
@@ -297,7 +301,8 @@ def main() -> int:
                 ("tprange", f"{st.pack}/{st.kind}/{tp_range_name(st)}"), ("tprange_all", f"{st.kind}/{tp_range_name(st)}"),
                 ("side", f"{st.pack}/{'long' if st.side > 0 else 'short' if st.side < 0 else 'both'}")]
         if st.kind != "trail":
-            keys.append(("sl", f"{st.pack}/{st.kind}/sl {st.sl_ratio:.2f}"))
+            sl = f"{st.price_sl_pct:.2f}%" if st.price_sl_pct else f"{st.sl_ratio:.2f}"
+            keys.append(("sl", f"{st.pack}/{st.kind}/sl {sl}"))
         by_set_group[st.idx] = keys
         for k in keys:
             g = groups.setdefault(k, collections.defaultdict(float))
@@ -493,6 +498,7 @@ def main() -> int:
            "indications": [summary(k) for k in sorted(groups) if k[0] == "indication"],
            "configurations": [{**summary(('configuration', st.id)), 'pack': st.pack, 'kind': st.kind,
                                'side': st.side, 'step': st.step, 'sl_ratio': st.sl_ratio,
+                               'price_sl_pct': st.price_sl_pct or None,
                                'trail': st.trail_key, 'trail_sl': st.trail_sl} for st in book.by_idx],
            "ranges": [summary(k) for k in sorted(groups) if k[0] == "range"],
            "sl": [summary(k) for k in sorted(groups) if k[0] == "sl"],

@@ -47,6 +47,20 @@ test("SL grids normalize legacy ratios once and empty grids retain the ten defau
   assert.deepEqual(overlayFromCts(cts({setSlRatios:[.1,.3,.6,1,3,5,1]})).setSlRatios,[.25,.5,1,2.5]);
 });
 
+test("absolute protection grids preserve their own valid stops and gaps across reload", () => {
+  const defaults = overlayFromCts(cts());
+  assert.equal(defaults.setPriceDistanceGrid, false);
+  assert.deepEqual(defaults.setPriceSlDistances, Array.from({ length: 21 }, (_, index) => (index + 2) / 10));
+  assert.deepEqual(defaults.setPriceTrailGaps, Array.from({ length: 25 }, (_, index) => (index + 2) / 10));
+  const saved = syncOverlayFlags(overlayFromCts(cts({
+    setPriceDistanceGrid: true, setPriceSlDistances: [.6, .2, .6, 2.3], setPriceTrailGaps: [2.6, .1, 1.25, .4],
+  })));
+  const restored = overlayFromCts(cts(), saved);
+  assert.equal(restored.setPriceDistanceGrid, true);
+  assert.deepEqual(restored.setPriceSlDistances, [.2, .6]);
+  assert.deepEqual(restored.setPriceTrailGaps, [.4, 2.6]);
+});
+
 test("Normal admission is independent and a raw trailing module disable survives a settings save", () => {
   const loaded = overlayFromCts(cts(), { stratNormal: false, stratTrailing: true,
     modules: { "strategy.trailing": false } });

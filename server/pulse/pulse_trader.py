@@ -39,7 +39,7 @@ from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, fixed_trail, self_test as variants_self_test, trailing_stop
-from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, config_key, exec_gates_allow, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
+from set_engine import EXIT_TAG, PRICE_STOP_ID, STAGE_REASONS, TRAIL_SET_ID, SetBook, config_key, exec_gates_allow, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -222,7 +222,7 @@ def set_kind_of(set_id: str) -> str:
     sid = str(set_id or "")
     if sid.endswith(":" + EXIT_TAG):
         return "exit"
-    if re.search(r":tr[0-9.]+:[0-9.]+(?::fixed)?(?::ts[0-9.]+)?$", sid):
+    if TRAIL_SET_ID.search(sid):
         return "trail"
     return "base"
 
@@ -1758,7 +1758,7 @@ class Pulse:
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
         pk = str(pack or (set_id or "").split(":", 1)[0])
-        exact_id = bool(set_id) and (pk not in ("indications", "general", "shortrange") or fixed_trail(set_id))
+        exact_id = bool(set_id) and (pk not in ("indications", "general", "shortrange") or fixed_trail(set_id) or PRICE_STOP_ID.search(set_id))
         p = "x" if exact_id else "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
         sl, tr, st = "06", "03", "08"
         m = re.search(r":sl([0-9.]+)", set_id or "") or re.search(r":ts([0-9.]+)$", set_id or "")    # a trailing stop family carries its stop ratio here
@@ -1873,7 +1873,10 @@ class Pulse:
                         return False
                     if hashlib.sha256(st_obj.id.encode("utf-8")).hexdigest()[:10] != signature:
                         return False
-                elif str(getattr(st_obj, "pack", "")) != pack or int(getattr(st_obj, "side", 0) or 0) != side:
+                    if PRICE_STOP_ID.search(st_obj.id):
+                        return True
+                elif (PRICE_STOP_ID.search(st_obj.id) or str(getattr(st_obj, "pack", "")) != pack
+                      or int(getattr(st_obj, "side", 0) or 0) != side):
                     return False
                 if st_obj.kind == "trail":
                     if fixed_trail(st_obj.id) and not extra_pack:
