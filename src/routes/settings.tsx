@@ -4,7 +4,7 @@ import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
 import { ROUND_AUTO_N_MAX, ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
 import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
-import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
+import { DEFAULT_LAST_N_LANES, WINDOW_GRID_FIELDS, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
 import { SignalConfigEditor } from "@/components/signal-config-editor";
 import { createFileRoute } from "@tanstack/react-router";
@@ -2811,6 +2811,12 @@ function LastNLaneEditor({value,onChange}:{value:LastNLane[];onChange:(value:Las
         {([['baseLong','Base N',30],['baseShort','Base secondary N (0 = off)',15],['mainLong','Main N',20],['realN','Real N',12],['realNegN','Real negative N',12]] as const).map(([key,label,fallback])=>
           <Slider key={key} label={label} value={p.lastN[key]??fallback} min={key==='baseShort'?0:1} max={200} step={1}
             onChange={v=>update(i,{lastN:{...p.lastN,[key]:v}})} />)}
+        {WINDOW_GRID_FIELDS.map(key => <CsvField key={key} label={`${key} independent windows`} value={(p.windowGrid?.[key] ?? []).join(", ")}
+          hint="Enter one or more sample counts. Empty uses the profile window." onCommit={text=>{
+            const windowGrid = {...p.windowGrid}, selected=numbers(text);
+            if (selected.length) windowGrid[key]=selected; else delete windowGrid[key];
+            update(i,{windowGrid:Object.keys(windowGrid).length ? windowGrid : undefined});
+          }} />)}
         <CsvField label="Main short candidates" value={(p.lastN.mainShort??[5,10]).join(', ')} hint="1–200; limited by the configured short/long ratio"
           onCommit={text=>update(i,{lastN:{...p.lastN,mainShort:numbers(text)}})} />
         <CsvField label="Negative recovery windows" value={(p.lastN.negWindows??[5,10]).join(', ')} hint="1–200; the negative lane still needs its own positive Real PF"

@@ -2559,10 +2559,29 @@ class SetBook:
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         # A malformed policy must not partially overwrite the active grid or economic settings.
-        expand_entries(ov.get("indicationConfigs", []))
+        configs = ov.get("indicationConfigs", [])
+        checked = expand_entries(configs)
+        exact = any((c.get("lanePolicy") or {}).get("windowPath") for c in checked if c.get("enabled", True))
+        prepared = expand_indication_configs(configs, extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS) if exact else None
+        if prepared is not None and not ov.get("lastNDisjoint", False):
+            range_windows = last_n_by_range_of(ov.get("lastNByRange"))
+            base_ratio = max(.1,min(1.,float(num(ov, "setGateShortMaxRatio", BASE_SHORT_MAX_RATIO))))
+            raw_ratio = _alias(ov, "mainShortMaxRatio", "mainAutoMaxRatio")
+            main_ratio = max(.1,min(1.,float(MAIN_SHORT_MAX_RATIO if raw_ratio is None else raw_ratio)))
+            for template in prepared["ranges"].values():
+                policy = template.get("lanePolicy") or {}
+                path = policy.get("windowPath", {})
+                if not ("baseShort" in path or "mainShort" in path):
+                    continue
+                for step in range(template["lo"],template["hi"]+1):
+                    windows = {**range_windows.get(tp_range_of(step), {}), **policy["lastN"]}
+                    base_long = int(windows.get("baseLong", ov.get("setGateWindow") or GATE_WINDOW_DEFAULT))
+                    main_long = int(windows.get("mainLong", num(ov, "mainGateN", MAIN_GATE_N_DEFAULT)))
+                    if path.get("baseShort",0) > max(1,int(base_long*base_ratio+1e-9)) or path.get("mainShort",0) > max(1,int(main_long*main_ratio+1e-9)):
+                        raise ValueError("Last-N window choice exceeds this parent's configured short/long ratio")
         with self._lock:
             previous = getattr(self, "_evaluation_config", None)
-            self._load(ov, cts)
+            self._load(ov, cts, prepared)
             signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
                               self.min_sl_distance_pct, self.micro_min_sl_pct, self.micro_min_trail_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
@@ -2615,7 +2634,7 @@ class SetBook:
                     st.stage = {}
                     st.deact_reason = "error"
 
-    def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
+    def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None, prepared=None) -> None:
         cts = cts or {}
         self.normal_entries = range_processing(ov)["normal"]
         self.processing_overlay = dict(ov)
@@ -2789,7 +2808,7 @@ class SetBook:
             extra_names = []
         extra_names = sorted({str(x) for x in extra_names if extra_known(str(x))})
         # indicationConfigs: families x ranges x timeframes x relations, each entry with its own step range, SL ratios, types and pause
-        expanded = expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
+        expanded = prepared if prepared is not None else expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
         extra_names = sorted(set(extra_names) | set(expanded["names"]))
         self.pack_ranges = {EXTRA_INDICATOR_PREFIX + n: r for n, r in expanded["ranges"].items()}
         self.gate_window_max = max([self.gate_window_max] + [int((r.get("lanePolicy") or {}).get("lastN", {}).get("baseLong", self.gate_window)) for r in self.pack_ranges.values()])
@@ -5348,9 +5367,11 @@ class SetBook:
         lanes = self._execution_lanes(st)
         return next((lane for lane in self.lane_order if lane in lanes and lane in allowed), "")
 
-    def relation_cell(self, st: SetState) -> Tuple[str, str, str, str, str]:
+    def relation_cell(self, st: SetState) -> Tuple[str, ...]:
         """The Set's relation cell (indication, direction, type, TP range, step): every relation lane it belongs to is a projection of it."""
-        return relation_lanes.cell_of(st.pack, st.side, st.kind, st.step, self.step_bucket(st), st.trail_arm)
+        cell = relation_lanes.cell_of(st.pack, st.side, st.kind, st.step, self.step_bucket(st), st.trail_arm)
+        policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
+        return (*cell, st.id) if policy.get("windowPath") else cell
 
     def relation_mult(self, st: Optional[SetState], lane: str = "pos") -> Tuple[float, List[str]]:
         """(volume multiple, the relations behind it) for an entry under this Set and lane: 1 + the ratios of the Set's relation lanes that pass now, at most
