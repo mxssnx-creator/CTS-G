@@ -1,0 +1,38 @@
+name: Independent window market replay
+on:
+  push:
+    branches: ['study/owned-auto-window-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Verify 12 public monthly archives and prepare the frozen profile
+        run: python scripts/owned_window_market.py prepare study-result
+      - name: Run seven days after three days of warm-up
+        run: >-
+          python scripts/trade_sim.py --data study-result/candles --cache study-result/shadow.pkl
+          --patch study-result/overlay.json --symbols 12 --last-hours 168 --refresh 0 --eval-every 3600
+          --jobs 2 --stage-details --out study-result/result.json
+      - name: Check coverage and reconcile native hourly settlements
+        run: python scripts/owned_window_market.py summarize study-result
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: owned-window-market-replay
+          path: study-result/*.json
+          if-no-files-found: warn
+          retention-days: 30
