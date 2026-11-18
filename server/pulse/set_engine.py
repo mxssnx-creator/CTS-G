@@ -2446,7 +2446,8 @@ class SetBook:
         self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
         self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
-        self.pf_set_auto = False
+        self.pf_set_auto = True
+        self.owned_auto_packs: set[str] = set()
         self.pf_set_auto_min = 10
         self.sl_auto = False
         self.sl_auto_min = 20
@@ -2811,6 +2812,7 @@ class SetBook:
         expanded = prepared if prepared is not None else expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
         extra_names = sorted(set(extra_names) | set(expanded["names"]))
         self.pack_ranges = {EXTRA_INDICATOR_PREFIX + n: r for n, r in expanded["ranges"].items()}
+        self.owned_auto_packs = {pack for pack, meta in self.pack_ranges.items() if meta.get("lanePolicy")}
         self.gate_window_max = max([self.gate_window_max] + [int((r.get("lanePolicy") or {}).get("lastN", {}).get("baseLong", self.gate_window)) for r in self.pack_ranges.values()])
         self._config_pause = {EXTRA_INDICATOR_PREFIX + n: int(m) for n, m in expanded["pause"].items()}
         self.config_report = {"entries": expanded["entries"], "dropped": expanded["dropped"][:200], "names": len(expanded["names"])}
@@ -3037,7 +3039,7 @@ class SetBook:
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
         self.pf_step_auto_min = int(max(1, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))     # no minimum-orders gate (owner 2026-11-04): down to 1
         # In Set scope, a Set learns from its own causal pairs and uses its own manual value if evidence is insufficient.
-        self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "step").lower() == "set"
+        self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "set").lower() != "step"
         # slAutoRange (owner 2026-11-14): every TP step (and direction) learns its own SL ratio range from the orders closed before the window it judges;
         # a base / Exit Set outside it is not valid (reason "slrange"); trailing Sets have no SL ratio grid. Absent = off (the manual grid alone).
         self.sl_auto = bool(ov.get("slAutoRange", False))
@@ -4300,8 +4302,10 @@ class SetBook:
         if not (self.pf_by_step and self.pf_step_auto):
             self.step_floor_auto, self.step_floor_report, self.set_floor_auto = {}, [], {}
             return
-        own_by_sig: Dict[int, List[Tuple[float, float]]] = {}
-        own_of: Dict[str, int] = {}
+        own_floor: Dict[str, float] = {}
+        # Identical causal observations may reuse a calculation after tuple equality is checked.
+        # A pooled tape fingerprint alone cannot establish an individual Set's evidence.
+        own_cache: Dict[Tuple[Tuple[float, float], ...], Optional[float]] = {}
         cf = cost_as_frac(self.cost_pct)
         n_win = self.pf_step_auto_n
         until = math.nextafter(float(learn_before), float("-inf"))
@@ -4314,34 +4318,34 @@ class SetBook:
             sig = 0
             for r in rows:
                 sig = hash((sig, auto_evidence_key(r[0], r[1], r[4], float(r[0]) - float(r[5]), st.side)))
-            own_of[st.id] = sig
-            if sig in seen:
-                continue                       # a copy of a Set already read (same orders): its pairs would only be counted again
-            seen.add(sig)
+            per_set = self.auto_pf_per_set(st)
+            if sig in seen and not per_set:
+                continue
             ts = [finite(r[0]) for r in rows]
             nets = [finite(r[4]) - cf for r in rows]
             gains, losses = prefix_sums(nets)
-            out = pairs.setdefault((self.auto_step_bucket(st), st.side), [])
-            first = len(out)
+            observations = []
             for k, r in enumerate(rows):
-                e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
+                e = bisect.bisect_left(ts, ts[k] - finite(r[5]))
                 if e < n_win:
                     continue
                 gp, gl = gains[e] - gains[e - n_win], losses[e] - losses[e - n_win]
                 if gl > 0:
-                    out.append((gp / gl, nets[k]))
+                    observations.append((gp / gl, nets[k]))
                 elif gp > 0:
-                    out.append((99.0, nets[k]))
-            own_by_sig[sig] = out[first:]
-        own_floor: Dict[str, float] = {}
-        if self.pf_set_auto:
-            memo: Dict[int, Optional[float]] = {}
-            for sid, sig in own_of.items():
-                if sig not in memo:
-                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates(), self.pf_auto_factor)
-                    memo[sig] = got["floor"] if got else None
-                if memo[sig] is not None:
-                    own_floor[sid] = float(memo[sig])
+                    observations.append((99.0, nets[k]))
+            if per_set and observations:
+                evidence = tuple(observations)
+                if evidence not in own_cache:
+                    got = learn_step_floor(evidence, self.pf_set_auto_min, self.pf_step_auto_tol,
+                                           self.step_auto_candidates(), self.pf_auto_factor)
+                    own_cache[evidence] = got["floor"] if got else None
+                threshold = own_cache[evidence]
+                if threshold is not None:
+                    own_floor[st.id] = float(threshold)
+            if sig not in seen:
+                seen.add(sig)
+                pairs.setdefault((self.auto_step_bucket(st), st.side), []).extend(observations)
         self.set_floor_auto = own_floor
         learned: Dict[Tuple[int, int], float] = {}
         report: List[Dict[str, Any]] = []
@@ -4429,6 +4433,10 @@ class SetBook:
             return int(round(float(st.trail_arm) / TP_UNIT_PCT))
         return int(st.step)
 
+    def auto_pf_per_set(self, st: "SetState") -> bool:
+        """An explicit Last-N profile owns its floor even on a desk with pooled ordinary Sets."""
+        return self.pf_set_auto or st.pack in self.owned_auto_packs
+
     def auto_step_bucket(self, st: "SetState") -> int:
         """The shared Auto table ends at 3.5%; wider targets use its final bucket.
 
@@ -4479,14 +4487,15 @@ class SetBook:
         Auto off: the configuration's own manual floor, else 1 + TP% x ratio. A learned floor is capped by minPfStepAutoHigh, as the manual table is."""
         high = self.pf_step_auto_high
         auto = self.pf_by_step and self.pf_step_auto
-        if auto and self.pf_set_auto:
+        per_set = self.auto_pf_per_set(st)
+        if auto and per_set:
             own = self.set_floor_auto.get(st.id)
             if own is not None:
                 return min(float(own), high), "auto-set"
         mine = self.own_manual_floor(st)
         if mine is not None:
             return mine
-        if auto and not self.pf_set_auto:
+        if auto and not per_set:
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
                 return min(float(learned), high), "auto-step"
@@ -4505,7 +4514,7 @@ class SetBook:
         """The minimum PF a window of n orders of this pack asks. With minPfByStep (default), with a configuration of its own floor (Signals, lanePolicy) or
         with a learned own floor, a Set asks floor_of in every window and stage; else its size class when minPfBySize is on, else the pack's floor."""
         if st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None
-                               or (self.pf_set_auto and st.id in self.set_floor_auto)):
+                               or (self.auto_pf_per_set(st) and st.id in self.set_floor_auto)):
             return self.floor_of(st)[0]
         if is_signal_pack(pack):
             return self.signal_min_pf
@@ -4545,7 +4554,7 @@ class SetBook:
     def stage_params(self, pack: str, st: Optional["SetState"] = None) -> StageParams:
         """The chain's rules for a pack and, with minPfByStep, for the Set's TP step (its one floor for every window and stage)."""
         policy = (self.pack_ranges.get(pack) or {}).get("lanePolicy") or {}
-        by_step = bool(st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None or (self.pf_set_auto and st.id in self.set_floor_auto)))
+        by_step = bool(st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None or (self.auto_pf_per_set(st) and st.id in self.set_floor_auto)))
         step_floor = self.floor_for(0, pack, st) if by_step else 0.0
         w = self.win(st)
         return StageParams(base_long=w.base_long, base_short=w.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
@@ -5957,7 +5966,8 @@ class SetBook:
             "slRanges": {"auto": bool(getattr(self, "sl_auto", False)), "minOrders": int(getattr(self, "sl_auto_min", 20)),
                          "tolPct": round(100 * float(getattr(self, "sl_auto_tol", 0.05)), 2), "steps": list(getattr(self, "step_sl_report", []) or [])[:200]},
             "setFloors": {"scope": "set" if getattr(self, "pf_set_auto", False) else "step", "learned": len(getattr(self, "set_floor_auto", {}) or {}),
-                          "defaults": max(0, len(self.by_idx) - len(getattr(self, "set_floor_auto", {}) or {})) if getattr(self, "pf_set_auto", False) else len(self.by_idx),
+                          "defaults": max(0, len(self.by_idx) - len(self.set_floor_auto)),
+                          "independentProfilePacks": len(self.owned_auto_packs),
                           "minAdmitted": int(getattr(self, "pf_set_auto_min", 10))},
             "coverage": cover,
             "index": index,
