@@ -69,6 +69,9 @@ import {
   TP_STEP_DEFAULT_MAX,
   TP_STEP_MIN,
   TP_UNIT_PCT,
+  PRICE_SL_DISTANCES,
+  PRICE_TRAIL_GAPS,
+  priceDistancesOf,
   TRAIL_SL_RATIOS,
   TRAIL_STEP_CEIL,
   TRAIL_STEP_MAX_DEFAULT,
@@ -2090,6 +2093,11 @@ function SettingsPage() {
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
                 <Slider label="Execution last N (end of Real)" value={overlay.execGateN} min={0} max={60} step={5} hint="the newest N results of the lane's Real Set must pass the minimum PF again right before execution; 0 = off (10 .. 35 tested)" onChange={(v) => patch("execGateN", v)} />
+                <EnableSlider label="Absolute price-distance Sets" on={overlay.setPriceDistanceGrid} hint="Each stop and trailing gap gets its own Set and PF evidence. Existing cost and protection floors still apply." onChange={(value) => patch("setPriceDistanceGrid", value)} />
+                {overlay.setPriceDistanceGrid && <>
+                  <CsvField label="SL distances (%)" value={overlay.setPriceSlDistances.join(", ")} hint="0.2–2.2% in 0.1% steps" onCommit={(value) => patch("setPriceSlDistances", priceDistancesOf(value.trim() ? value.split(/[,;\s]+/) : undefined, PRICE_SL_DISTANCES))} />
+                  <CsvField label="Trailing gaps (%)" value={overlay.setPriceTrailGaps.join(", ")} hint="0.2–2.6% in 0.1% steps" onCommit={(value) => patch("setPriceTrailGaps", priceDistancesOf(value.trim() ? value.split(/[,;\s]+/) : undefined, PRICE_TRAIL_GAPS))} />
+                </>}
                 <EnableSlider label="Auto SL range per TP step" on={overlay.slAutoRange} hint="each TP step (and direction) learns its min / max SL ratio from the orders closed before the window it judges; a Set outside it is not valid (trailing Sets never); without enough orders the manual grid below stands" onChange={(v) => patch("slAutoRange", v)} />
                 <Slider label="Auto SL range: orders a range needs" value={overlay.slAutoMin} min={1} max={500} step={1} onChange={(v) => patch("slAutoMin", v)} />
                 <Slider label="Auto SL range: tolerance to the best PF (%)" value={overlay.slAutoTol} min={0} max={50} step={1} hint="the widest range whose PF is within this of the best" onChange={(v) => patch("slAutoTol", v)} />
@@ -3316,7 +3324,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
               rows.slice(0, 40).map((r) => (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5">
-                    {r.pack} · sl{r.slRatio.toFixed(1)} · st{r.step ?? "—"} · {r.trailKey}
+                    {r.pack} · {r.priceSlPct == null ? `SL ratio ${r.slRatio.toFixed(1)}` : `SL ${r.priceSlPct.toFixed(1)}%`} · st{r.step ?? "—"} · {r.trailKey}
                   </td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
