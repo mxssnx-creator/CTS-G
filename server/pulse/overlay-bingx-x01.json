@@ -66,7 +66,7 @@
   "setPfWindow": 8,
   "exitPfWindow": 8,
   "slMinPct": 0.2,
-  "slMaxPct": 15.75,
+  "slMaxPct": 3.0,
   "tpMinPct": 0.35,
   "tpMaxPct": 4.5,
   "tpCostRatio": 5,

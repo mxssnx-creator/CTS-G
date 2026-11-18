@@ -407,6 +407,22 @@ def trail_min_lock_removes_only_pairs_that_lock_nothing():
     return ok, f"pairs {len(tb)} -> {len(tl)} at lock 0.3 % ({len(gone)} removed, all with arm - give < 0.3); 0 keeps {len(trails(off))}; 99 keeps {len(trails(huge))}"
 
 
+def x01_venue_stop_backstop_covers_every_lane_stop_and_is_tight():
+    """The venue-side protective stop of a Set position sits at max(the Set's own stop, slMaxPct): a software close at the lane's own level handles every normal stop, the venue order only
+    protects the account when the engine is not running. slMaxPct was 15.75 % (live x01 2026-11-18: 49 positions, 166 USDT notional on 27 USDT equity, backstop loss 26 USDT = 96 % of the
+    account). It now covers the widest lane stop any Set of the shipped x01 grid can have and nothing more: the lane stops stay inside it (software decides), the backstop is at most 4 %."""
+    import json as _j
+    import os as _o
+    from common import PULSE
+    ov = _j.load(open(_o.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))
+    b = SetBook()
+    b.load(ov)
+    widest = max(b.lane_fracs(st)[0] for st in b.by_idx) * 100.0
+    cap = float(ov.get("slMaxPct") or 15.75)
+    ok = widest <= cap + 1e-9 and cap <= 4.0
+    return ok, f"widest lane stop over {len(b.by_idx)} Sets {widest:.3f} %, venue backstop slMaxPct {cap} % (covers every lane stop: {widest <= cap + 1e-9}; at most 4 %: {cap <= 4.0})"
+
+
 def x01_runs_the_full_grid_the_replay_measured_best():
     """Owner 2026-11-05 asked to switch off the groups that read badly in isolation (Micro range, Short Range, five SL ratios, trailing pairs that lock under 0.2 %). The counterfactual
     replay of 2026-11-06 (C / B / A, executed positions, `trade_sim.py`) showed removing them LOWERS the result - pooled PF 0.701 on 464 orders (net -61.7 %) with them switched off
@@ -423,11 +439,12 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     # owner 2026-11-13/14 ("open also other coordinations, not only micro ... with max SL ratio 0.8"): x01 now runs every TP range (Normal included) and every signal pack
     # (trend, reversion, flow and multi next to breakout) with the SL ratios 0.25 / 0.5 / 0.75; the earlier trend-off and Normal-off decisions above are superseded by that instruction,
     # their counterfactual numbers stay the evidence they were. Still true: Micro Sets exist, no trailing pair is dropped for its lock, the pack set below is complete.
-    all_packs = {"shortrange", "general", "indications", "trend", "reversion", "flow", "multi", "breakout"}
+    # owner 2026-11-18: trend and multi lost in both 1.35 sims (trend -14.4 % / -8.1 %, multi -6.1 % / -8.0 %): off on x01
+    all_packs = {"shortrange", "general", "indications", "reversion", "flow", "breakout"}
     # owner 2026-11-15 ("update min step defaults to make profit", live x02: TP Sets from 2.6 % PF 1.04 on 92 closes, all 0.77 on 264): the general packs' TP Sets start at
     # tpStepMin 26, then 5 (owner 2026-11-15 later, "set min step to 5"), and the trailing arms at trailStepMin 12 (1.2 %); every pack still runs, the trailing stops keep their reference step
     gen = [st.step for st in base if st.pack in ("general", "indications", "trend", "reversion", "flow", "multi", "breakout")]
-    ok = (all_packs <= {st.pack for st in b.by_idx} and gen and min(gen) == 5 and b.tp_step_min == 5 and b.trail_step_min == 12
+    ok = (all_packs <= {st.pack for st in b.by_idx} and not ({"trend", "multi"} & {st.pack for st in b.by_idx}) and gen and min(gen) == 5 and b.tp_step_min == 5 and b.trail_step_min == 12
           and locks and b.trail_min_lock == 0.0 and b._trail_mid_step() == 17)
     return ok, f"x01 {len(b.by_idx)} Sets, lowest general TP step {min(gen) if gen else None}, trailing reference step {b._trail_mid_step()}, packs {sorted({st.pack for st in b.by_idx})[:8]}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
@@ -444,6 +461,7 @@ CHECKS = [
     ("grid.trail-give-le-arm-and-floor", trail_rules_default),
     ("grid.trail-min-step-clamp", trail_min_step_clamp),
     ("grid.trail-grid-pure", trail_grid_pure),
+    ("grid.x01-venue-stop-backstop-covers-every-lane-stop-and-is-tight", x01_venue_stop_backstop_covers_every_lane_stop_and_is_tight),
     ("grid.x01-runs-the-full-grid-the-replay-measured-best", x01_runs_the_full_grid_the_replay_measured_best),
     ("grid.trail-min-lock-removes-only-pairs-that-lock-nothing", trail_min_lock_removes_only_pairs_that_lock_nothing),
     ("grid.trail-distance-limit", trail_distance_limit),
