@@ -39,12 +39,12 @@
     "*"
   ],
   "axisPrevEnabled": true,
-  "axisPrevMaxWindow": 12,
-  "axisLastEnabled": true,
+  "axisPrevMaxWindow": 4,
+  "axisLastEnabled": false,
   "axisLastMaxWindow": 4,
-  "axisContEnabled": true,
+  "axisContEnabled": false,
   "axisContMaxWindow": 8,
-  "axisPauseEnabled": true,
+  "axisPauseEnabled": false,
   "axisPauseMaxWindow": 8,
   "minPf": 1.25,
   "noise": 0.05,
@@ -204,7 +204,10 @@
   "trailStepMax": 22,
   "trailSlRatios": [],
   "volumeByPack": {},
-  "volumeByKind": {},
+  "volumeByKind": {
+    "trail": 2.0,
+    "exit": 0.5
+  },
   "volumeByRange": {},
   "exitSetsByPack": {},
   "minPfStepAuto": true,
@@ -290,6 +293,11 @@
   "groupGatePf": 1.0,
   "groupGateHours": 6,
   "groupGateMin": 1,
+  "configGate": true,
+  "configGateN": 5,
+  "configGatePf": 1.0,
+  "configGateHours": 24,
+  "configGateMin": 1,
   "stratBlock": true,
   "blockCounts": [
     {
@@ -319,6 +327,8 @@
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
   "blockGuard": true,
+  "blockAddLastN": 0,
+  "blockAddAutoMin": 15,
   "blockTargetShare": 0.5,
   "blockKinds": [
     "base",
@@ -329,46 +339,51 @@
     "relations": [
       "step"
     ],
-    "maxMult": 3,
+    "maxMult": 4.0,
+    "auto": true,
+    "autoN": 30,
+    "autoMin": 15,
+    "autoPf": 1.0,
+    "autoRatio": 1.0,
     "counts": {
       "1": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
+        "on": true,
+        "ratio": 1.0,
+        "step": true,
+        "maxLevel": 3,
         "pause": 0
       },
       "2": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
+        "on": true,
+        "ratio": 1.0,
+        "step": true,
+        "maxLevel": 3,
         "pause": 0
       },
       "3": {
         "on": false,
-        "ratio": 0,
+        "ratio": 0.0,
         "step": false,
         "maxLevel": 1,
         "pause": 0
       },
       "4": {
         "on": false,
-        "ratio": 0,
+        "ratio": 0.0,
         "step": false,
         "maxLevel": 1,
         "pause": 0
       },
       "5": {
-        "on": true,
-        "ratio": 1,
-        "step": true,
-        "maxLevel": 2,
+        "on": false,
+        "ratio": 0.0,
+        "step": false,
+        "maxLevel": 1,
         "pause": 0
       },
       "6": {
         "on": false,
-        "ratio": 0,
+        "ratio": 0.0,
         "step": false,
         "maxLevel": 1,
         "pause": 0
@@ -459,5 +474,11 @@
   "slAutoRange": true,
   "slAutoMin": 20,
   "slAutoTol": 5,
-  "trailStepMin": 3
+  "trailStepMin": 12,
+  "scanWorkers": 3,
+  "trailTimeExit": true,
+  "exitSets": false,
+  "minPfAutoOrdersFactor": 0,
+  "tpStepMin": 5,
+  "gateRecovery": true
 }
