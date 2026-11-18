@@ -9,8 +9,13 @@ jobs:
   replay:
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        end-day: [14, 21, 28]
     env:
       PYTHONUNBUFFERED: "1"
+      WINDOW_END_DAY: ${{ matrix.end-day }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,18 +26,18 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements.txt
       - name: Verify 12 public monthly archives and prepare the frozen profile
-        run: python scripts/owned_window_market.py prepare study-result
+        run: python scripts/owned_window_market.py prepare study-result --end-day "$WINDOW_END_DAY"
       - name: Run seven days after three days of warm-up
         run: >-
           python scripts/trade_sim.py --data study-result/candles --cache study-result/shadow.pkl
           --patch study-result/overlay.json --symbols 12 --last-hours 168 --refresh 0 --eval-every 3600
           --jobs 2 --stage-details --out study-result/result.json
       - name: Check coverage and reconcile native hourly settlements
-        run: python scripts/owned_window_market.py summarize study-result
+        run: python scripts/owned_window_market.py summarize study-result --end-day "$WINDOW_END_DAY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: owned-window-market-replay
+          name: owned-window-market-replay-oct-${{ matrix.end-day }}
           path: study-result/*.json
           if-no-files-found: warn
           retention-days: 30
