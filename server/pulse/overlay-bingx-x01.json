@@ -144,6 +144,7 @@
   "histRefreshS": 120,
   "exitRevOn": false,
   "exitMinHoldS": 45,
+  "exitEnabled": false,
   "exitIgnoreTp": true,
   "exitBestOf": true,
   "exitTimeOn": false,
@@ -389,10 +390,10 @@
       }
     }
   },
-  "stratTrend": true,
+  "stratTrend": false,
   "stratReversion": true,
   "stratFlow": true,
-  "stratMulti": true,
+  "stratMulti": false,
   "stratBreakout": true,
   "manualCloseRestMin": 240,
   "minPfStepAutoHigh": 1.27,
