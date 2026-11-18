@@ -33,6 +33,11 @@ if [ "${ENSURE_X01_DRY:-0}" = "1" ]; then
   exit 0
 fi
 cd "$REPO" || exit 1
+# The engine reads $DIR/overlay-bingx-x01.json and only seeds it from $DIR/overlay.json, which a fresh host does not have: started without it the first
+# history pass runs the engine defaults (the whole ranked universe, the minimum volume factor) and a reload a minute later cannot shrink a pass already
+# in flight. Seed the repo's overlay when the host has none (an existing overlay holds the live settings and is never overwritten).
+mkdir -p "$DIR"
+[ -e "$DIR/overlay-bingx-x01.json" ] || cp "$REPO/server/pulse/overlay-bingx-x01.json" "$DIR/overlay-bingx-x01.json"
 # After a container restart Redis is empty and not running: the engine would start and halt with "missing bingx-x01 credentials". Bring Redis back and restore the
 # x01 key from its mode-600 file (written once outside the repo; never printed). Both steps are skipped when they are already in place.
 CRED_FILE="${CRED_FILE:-/var/lib/cts-g/cred-bingx-x01.json}"

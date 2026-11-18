@@ -531,6 +531,21 @@ if [[ "$2" == disable ]]; then enable_stack 0 && start_stack 1 0; else start_sta
     return all(results), f"disable/stop failures abort before live or target: {results}"
 
 
+def ensure_scripts_seed_the_overlay_before_the_engine_starts():
+    """A host without $DIR/overlay-bingx-xNN.json started x01 on 2026-11-18 with the engine defaults (551 symbols, the minimum volume factor); the overlay with the
+    100-symbol cap arrived a minute after the first history pass began and the pass in flight kept its 551 names. Both ensure scripts now copy the repo overlay when
+    the host has none (never over an existing one, which holds the live settings) and do it before the engine is launched."""
+    bad = []
+    for conn in ("x01", "x02"):
+        text = open(os.path.join(ROOT, "scripts", f"ensure_{conn}.sh"), encoding="utf-8").read()
+        code = re.sub(r"(?m)^\s*#.*$", "", text)
+        seed = code.find(f'[ -e "$DIR/overlay-bingx-{conn}.json" ] || cp "$REPO/server/pulse/overlay-bingx-{conn}.json" "$DIR/overlay-bingx-{conn}.json"')
+        start = code.find("pulse_trader.py", code.find("nohup")) if "nohup" in code else -1
+        if seed < 0 or start < 0 or seed > start:
+            bad.append((conn, seed, start))
+    return not bad, f"seed before start in both scripts, copy only when missing: bad={bad}"
+
+
 def ensure_x01_script_is_idempotent_and_starts_only_x01():
     """The container restarted five times on 2026-11-04 and the engine stayed dead for 25 minutes to 4 hours each time. scripts/ensure_x01.sh (run by the SessionStart hook in
     .claude/settings.json) starts the x01 engine when, and only when, none runs: with a x01 process present it reports and starts nothing, with none it reports missing
@@ -610,6 +625,7 @@ def x01_watchdog_keeps_the_engine_running_once_and_backs_off():
 
 
 CHECKS = [
+    ("logistics.ensure-scripts-seed-the-overlay-before-the-engine-starts", ensure_scripts_seed_the_overlay_before_the_engine_starts),
     ("logistics.ensure-x01-script-is-idempotent-and-starts-only-x01", ensure_x01_script_is_idempotent_and_starts_only_x01),
     ("logistics.x01-watchdog-keeps-the-engine-running-once-and-backs-off", x01_watchdog_keeps_the_engine_running_once_and_backs_off),
     ("logistics.startup-controls-fail-closed", startup_controls_fail_closed_and_respect_disabled_lanes),

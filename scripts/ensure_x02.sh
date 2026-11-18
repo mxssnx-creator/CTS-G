@@ -19,6 +19,11 @@ PY
 fi
 # Owner stop (2026-11-15, "stop x02"): while /var/lib/cts-g/x02-stopped-by-owner exists nothing starts x02 (its open positions stay on the venue with their stops).
 if [ -e "${X02_OWNER_OFF:-/var/lib/cts-g/x02-stopped-by-owner}" ]; then echo "x02 stopped by the owner; not started"; exit 0; fi
+# The engine reads $DIR/overlay-bingx-x02.json and only seeds it from $DIR/overlay.json, which a fresh host does not have: started without it the first
+# history pass runs the engine defaults (the whole ranked universe, the minimum volume factor) and a reload a minute later cannot shrink a pass already
+# in flight. Seed the repo's overlay when the host has none (an existing overlay holds the live settings and is never overwritten).
+mkdir -p "$DIR"
+[ -e "$DIR/overlay-bingx-x02.json" ] || cp "$REPO/server/pulse/overlay-bingx-x02.json" "$DIR/overlay-bingx-x02.json"
 for p in $(pgrep -f pulse_trader.py); do tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -q "^PULSE_CONN=bingx-x02$" && { echo "x02 engine running"; exit 0; }; done
 cd "$REPO" && PULSE_CONN=bingx-x02 PYTHONUNBUFFERED=1 nohup python3 -B server/pulse/pulse_trader.py >> "$DIR/x02_live.log" 2>&1 &
 echo "x02 engine started (pid $!)"
