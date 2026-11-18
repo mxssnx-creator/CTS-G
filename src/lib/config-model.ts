@@ -157,6 +157,13 @@ export const TP_RANGES_DEFAULT: Record<TpRangeId, boolean> = { micro: true, mini
 /** Trailing grid ceiling: arms up to trailStepMax steps (default 22 = 2.2 %, at most 30 = 3.0 %). */
 export const TRAIL_STEP_MAX_DEFAULT = 22;
 export const TRAIL_STEP_CEIL = 30;
+export const PRICE_SL_DISTANCES = Array.from({ length: 21 }, (_, index) => (index + 2) / 10);
+export const PRICE_TRAIL_GAPS = Array.from({ length: 25 }, (_, index) => (index + 2) / 10);
+export function priceDistancesOf(raw: unknown, grid: number[]): number[] {
+  if (!Array.isArray(raw)) return [...grid];
+  const chosen = new Set(raw.filter(value => typeof value === "number" || typeof value === "string").map(Number));
+  return grid.filter(value => chosen.has(value));
+}
 /** Trailing stop families (server: position_cost.TRAIL_SL_RATIOS): each ratio r builds the arm / give pairs again with the initial stop at r x the arm. */
 export const TRAIL_SL_RATIOS = [0.5, 1.0, 1.5, 2.0, 3.0] as const;
 export const tpPctOfStep = (step: number) => Math.round(step * TP_UNIT_PCT * 1000) / 1000;
@@ -578,6 +585,9 @@ export type PulseOverlay = {
   slAutoTol: number;
   execGateN: number;
   slRatiosByRange: Record<string, number[]>;
+  setPriceDistanceGrid: boolean;
+  setPriceSlDistances: number[];
+  setPriceTrailGaps: number[];
   exitSetHoldBars: number;
   trailTimeExit: boolean;
   setTrailingDistance: "dynamic" | "fixed" | "both";
@@ -900,6 +910,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   slAutoTol: 5,
   execGateN: 0,
   slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
+  setPriceDistanceGrid: false,
+  setPriceSlDistances: PRICE_SL_DISTANCES,
+  setPriceTrailGaps: PRICE_TRAIL_GAPS,
   exitSetHoldBars: 720,
   trailTimeExit: true,
   setTrailingDistance: "dynamic",
@@ -1195,6 +1208,9 @@ export type CtsSettings = {
   slAutoTol?: number;
   execGateN?: number;
   slRatiosByRange?: Record<string, number[]>;
+  setPriceDistanceGrid?: boolean;
+  setPriceSlDistances?: number[];
+  setPriceTrailGaps?: number[];
   exitSetHoldBars?: number;
   trailTimeExit?: boolean;
   setTrailingDistance?: PulseOverlay["setTrailingDistance"];
@@ -1798,6 +1814,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       }
       return out;
     })(cts.slRatiosByRange),
+    setPriceDistanceGrid: cts.setPriceDistanceGrid === true,
+    setPriceSlDistances: priceDistancesOf(cts.setPriceSlDistances, PRICE_SL_DISTANCES),
+    setPriceTrailGaps: priceDistancesOf(cts.setPriceTrailGaps, PRICE_TRAIL_GAPS),
     exitSetHoldBars: num(cts.exitSetHoldBars, 720),
     trailTimeExit: typeof cts.trailTimeExit === "boolean" ? cts.trailTimeExit : true,
     setTrailingDistance: cts.setTrailingDistance ?? "dynamic",
@@ -1815,6 +1834,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
   out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);
   out.strategyProcessingByRange = processingByRangeOf(out.strategyProcessingByRange);
+  out.setPriceDistanceGrid = out.setPriceDistanceGrid === true;
+  out.setPriceSlDistances = priceDistancesOf(out.setPriceSlDistances, PRICE_SL_DISTANCES);
+  out.setPriceTrailGaps = priceDistancesOf(out.setPriceTrailGaps, PRICE_TRAIL_GAPS);
   if (out.setTrailingDistance !== "fixed" && out.setTrailingDistance !== "both") out.setTrailingDistance = "dynamic";
   out.minPfByRange = pfRangeFloorsOf(out.minPfByRange);
   for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
