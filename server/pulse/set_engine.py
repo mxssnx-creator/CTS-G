@@ -89,7 +89,7 @@ from indication_engine import (
     timeframe_evals,
 )
 from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
-from risk_variants import parse_trail, trail_grid
+from risk_variants import fixed_trail, parse_trail, trail_grid, trailing_stop
 from indication_config import source_name, expand as expand_indication_configs
 import signal_packs
 
@@ -215,7 +215,7 @@ EXIT_TAG = "xt"                 # id suffix of an Exit Set (no TP: stop, time an
 # results it EXECUTED inside the last `groupGateHours` hours have a PF at or above `groupGatePf` (gains over losses of the net position returns, judged on the results it has: no
 # minimum count; a group without a result in the window runs). Open positions are never touched; the evidence ages out, so a blocked group re-tests itself.
 _GROUP_ST = re.compile(r":st(\d+)")
-_GROUP_TR = re.compile(r":tr([0-9.]+):([0-9.]+)(?::ts[0-9.]+)?$")
+_GROUP_TR = re.compile(r":tr([0-9.]+):([0-9.]+)(?::fixed)?(?::ts[0-9.]+)?$")
 
 
 def set_group(set_id: str, lane: str = "pos", side: Any = False) -> str:
@@ -241,7 +241,8 @@ def set_group(set_id: str, lane: str = "pos", side: Any = False) -> str:
         m = _GROUP_ST.search(sid)
         if m:
             rng = tp_range_of(int(m.group(1)))
-    key = f"group:{pack}:{kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+    group_kind = "trail-fixed" if tr and fixed_trail(sid) else kind
+    key = f"group:{pack}:{group_kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
     if side:
         m = re.search(r":([LS]):", sid)
         key += ":" + (m.group(1) if m else "B")
@@ -1781,7 +1782,7 @@ def rest_after(cooldown: int, pause: int, win: bool) -> int:
 class SetLane:
     """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
     replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
-    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "sl_floor", "tp_frac", "hold", "honor", "pause")
+    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "fixed_gap", "arm", "give", "sl_base", "sl_floor", "tp_frac", "hold", "honor", "pause")
 
     def __init__(self, st: "SetState", symbol: str) -> None:
         self.st = st
@@ -1790,6 +1791,7 @@ class SetLane:
         self.open: Optional[Dict[str, Any]] = None
         self.cool = 0
         self.use_trail = st.kind == "trail"
+        self.fixed_gap = self.use_trail and fixed_trail(st.trail_key)
         # trail values are percent of price on every path (trail_grid, parse_trail): no magnitude guessing
         self.arm = st.trail_arm / 100.0 if self.use_trail else 0.0
         self.give = st.trail_give / 100.0 if self.use_trail else 0.0
@@ -1819,11 +1821,11 @@ class SetLane:
                     if side > 0:
                         o["peak"] = max(o["peak"], float(bar[1]))
                         if (o["peak"] - entry) / entry >= self.arm:
-                            o["trail"] = max(o.get("trail") or 0.0, o["peak"] * (1 - self.give))
+                            o["trail"] = max(o.get("trail") or 0.0, trailing_stop(side, entry, o["peak"], self.give, self.fixed_gap))
                     else:
                         o["peak"] = min(o["peak"], float(bar[2]))
                         if (entry - o["peak"]) / entry >= self.arm:
-                            t = o["peak"] * (1 + self.give)
+                            t = trailing_stop(side, entry, o["peak"], self.give, self.fixed_gap)
                             cur = o.get("trail")
                             o["trail"] = t if cur is None else min(cur, t)
                     # The close follows both extremes. If it crossed the new stop,
@@ -1902,6 +1904,7 @@ class SetLane:
         sl_floor = self.sl_floor if self.sl_floor is not None else sl_floor_frac(cost_pct, min_distance_pct=cfg.get("min_sl_distance_pct"))
         honor_tp = bool(cfg["honor_tp"] if self.honor is None else self.honor)
         use_trail = self.use_trail
+        fixed_gap = self.fixed_gap
         arm = self.arm
         give = self.give
         sl_base = self.sl_base
@@ -2031,11 +2034,11 @@ class SetLane:
                             if side > 0:
                                 peak = max(peak, high)
                                 if (peak - entry) / entry >= arm:
-                                    trail = max(trail or 0.0, peak * (1 - give))
+                                    trail = max(trail or 0.0, trailing_stop(side, entry, peak, give, fixed_gap))
                             else:
                                 peak = min(peak, low)
                                 if (entry - peak) / entry >= arm:
-                                    t = peak * (1 + give)
+                                    t = trailing_stop(side, entry, peak, give, fixed_gap)
                                     trail = t if trail is None else min(trail, t)
                             if trail is not None and (close <= trail if side > 0 else close >= trail):
                                 why, px = "sl", trail
@@ -2960,6 +2963,10 @@ class SetBook:
         self.config_gate_hours = _num("configGateHours", 24.0, 1.0, 72.0)
         self.config_gate_min = int(_num("configGateMin", 1, 1, 50))
         self.trails = [t for t in self.trails if trailing_enabled(ov, tp_range_of(int(round(t[1] / TP_UNIT_PCT))))]
+        distance = ov.get("setTrailingDistance")
+        if distance in ("fixed", "both"):
+            fixed = [(key + ":fixed", arm, give) for key, arm, give in self.trails]
+            self.trails = fixed if distance == "fixed" else self.trails + fixed
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
         except Exception:
@@ -3105,6 +3112,7 @@ class SetBook:
         keep = {**self.retired, **self.sets}
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
+        fixed_sets: List[SetState] = []
         self.steps = self._step_grid()
         trails = list(self.trails)
         # a trail arm at or above the mid-step TP can never trail when TP is honoured: TP exits first. Such Sets are
@@ -3291,7 +3299,13 @@ class SetBook:
                     st.sl_i = -1
                     st.tr_i = tr_i
                     st.step_i = -1
-                    _put(st)
+                    if fixed_trail(tkey):
+                        fixed_sets.append(st)
+                    else:
+                        _put(st)
+        # Preserve legacy indexes when adding a second distance mode to an existing grid.
+        for st in fixed_sets:
+            _put(st)
         built_trail_keys = {st.trail_key for st in by_idx if st.kind == "trail"}
         self.trails_built = [t for t in self.trails if t[0] in built_trail_keys]
         gone = {sid: st for sid, st in keep.items() if sid not in next_sets}

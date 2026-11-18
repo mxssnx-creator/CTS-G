@@ -38,7 +38,7 @@ from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
-from risk_variants import VariantBook, self_test as variants_self_test
+from risk_variants import VariantBook, fixed_trail, self_test as variants_self_test, trailing_stop
 from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, config_key, exec_gates_allow, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
@@ -222,7 +222,7 @@ def set_kind_of(set_id: str) -> str:
     sid = str(set_id or "")
     if sid.endswith(":" + EXIT_TAG):
         return "exit"
-    if re.search(r":tr[0-9.]+:[0-9.]+(:ts[0-9.]+)?$", sid):
+    if re.search(r":tr[0-9.]+:[0-9.]+(?::fixed)?(?::ts[0-9.]+)?$", sid):
         return "trail"
     return "base"
 
@@ -1758,8 +1758,8 @@ class Pulse:
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
         pk = str(pack or (set_id or "").split(":", 1)[0])
-        extra_pack = bool(set_id) and pk not in ("indications", "general", "shortrange")
-        p = "x" if extra_pack else "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
+        exact_id = bool(set_id) and (pk not in ("indications", "general", "shortrange") or fixed_trail(set_id))
+        p = "x" if exact_id else "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
         sl, tr, st = "06", "03", "08"
         m = re.search(r":sl([0-9.]+)", set_id or "") or re.search(r":ts([0-9.]+)$", set_id or "")    # a trailing stop family carries its stop ratio here
         if m:
@@ -1787,7 +1787,7 @@ class Pulse:
                 idx = -1
         # the nonce carries the Set's lane: CID_NEG_MARK first for the Real Negative lane, never otherwise
         alphabet = [c for c in string.ascii_lowercase + string.digits if c != CID_NEG_MARK]
-        if extra_pack:
+        if exact_id:
             if idx < 0 or idx >= 36 ** 4 or not set_id:
                 raise ValueError("extra Set requires a representable index and identity")
             digits = string.digits + string.ascii_lowercase
@@ -1869,13 +1869,15 @@ class Pulse:
             try:
                 if extra_pack:
                     signature = rest[13:23].lower() if len(rest) >= 27 else ""
-                    if str(getattr(st_obj, "pack", "")) in ("indications", "general", "shortrange") or not signature:
+                    if not signature:
                         return False
                     if hashlib.sha256(st_obj.id.encode("utf-8")).hexdigest()[:10] != signature:
                         return False
                 elif str(getattr(st_obj, "pack", "")) != pack or int(getattr(st_obj, "side", 0) or 0) != side:
                     return False
                 if st_obj.kind == "trail":
+                    if fixed_trail(st_obj.id) and not extra_pack:
+                        return False
                     # the SL field holds a trailing stop family's ratio (r x 10) and "06" for the shipped trailing Sets: a family never decodes to its twin
                     ts = float(getattr(st_obj, "trail_sl", 0.0) or 0.0)
                     want_sl = int(round((ts if ts > 0 else 0.6) * 10))
@@ -1890,7 +1892,12 @@ class Pulse:
         if extra_pack:
             # A compact digest identifies the Set, not just the pack. If the
             # grid changes or two candidates match, never guess an owner.
-            cands = [x for x in (getattr(sets_obj, "sets", None) or {}).values() if _agrees(x)]
+            current = getattr(sets_obj, "sets", None) or {}
+            retired = getattr(sets_obj, "retired", None) or {}
+            indexed = sets_obj.get_idx(idx) if idx >= 0 and sets_obj is not None else None
+            if indexed is not None and _agrees(indexed):
+                return _row(indexed)
+            cands = [x for x in {**retired, **current}.values() if _agrees(x)]
             if len(cands) == 1:
                 return _row(cands[0])
             return {"kind": kind, "pack": "", "sl": sl, "trail": tr, "step": step, "idx": -1, "set_id": ""}
@@ -5073,7 +5080,7 @@ class Pulse:
             fav = (pos.peak - e) / e if side > 0 else (e - pos.peak) / e
             if fav >= arm:
                 pos.trail_armed = True
-                trail = pos.peak * (1 - give) if side > 0 else pos.peak * (1 + give)
+                trail = trailing_stop(side, e, pos.peak, give, fixed_trail(pos.trail_key))
                 better = pos.trail is None or (trail > pos.trail + 1e-12 if side > 0 else trail < pos.trail - 1e-12)
                 if better:
                     prev = pos.trail
@@ -7009,7 +7016,8 @@ class Pulse:
                 sl_to_tp=sl_ratio, bind_sl_to_tp=True,
                 cost_pct=self.position_cost_pct, tp_cost_ratio=self.tp_cost_ratio,
             )
-            rec_set = (getattr(self.sets, "sets", None) or {}).get(str(track.get("set_id") or ""))
+            rec_id = str(track.get("set_id") or "")
+            rec_set = (getattr(self.sets, "sets", None) or {}).get(rec_id) or getattr(self.sets, "retired", {}).get(rec_id)
             rec_trail_id = ""
             if rec_set is not None:
                 # a recovered Set position keeps its own lane: the Set's levels (set_engine.lane_fracs) and its own trailing

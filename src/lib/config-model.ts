@@ -580,6 +580,7 @@ export type PulseOverlay = {
   slRatiosByRange: Record<string, number[]>;
   exitSetHoldBars: number;
   trailTimeExit: boolean;
+  setTrailingDistance: "dynamic" | "fixed" | "both";
   trailHoldBars: number;
   trailHoldArmedFree: boolean;
   exitPfWindow: number;
@@ -901,6 +902,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
   exitSetHoldBars: 720,
   trailTimeExit: true,
+  setTrailingDistance: "dynamic",
   trailHoldBars: 0,
   trailHoldArmedFree: false,
   exitPfWindow: 8,
@@ -1195,6 +1197,7 @@ export type CtsSettings = {
   slRatiosByRange?: Record<string, number[]>;
   exitSetHoldBars?: number;
   trailTimeExit?: boolean;
+  setTrailingDistance?: PulseOverlay["setTrailingDistance"];
   trailHoldBars?: number;
   trailHoldArmedFree?: boolean;
   exitPfWindow?: number;
@@ -1797,6 +1800,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     })(cts.slRatiosByRange),
     exitSetHoldBars: num(cts.exitSetHoldBars, 720),
     trailTimeExit: typeof cts.trailTimeExit === "boolean" ? cts.trailTimeExit : true,
+    setTrailingDistance: cts.setTrailingDistance ?? "dynamic",
     trailHoldBars: Math.max(0, Math.min(4320, num(cts.trailHoldBars, 0))),
     trailHoldArmedFree: cts.trailHoldArmedFree === true,
     exitPfWindow: num(cts.exitPfWindow, 15),
@@ -1811,6 +1815,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
   out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);
   out.strategyProcessingByRange = processingByRangeOf(out.strategyProcessingByRange);
+  if (out.setTrailingDistance !== "fixed" && out.setTrailingDistance !== "both") out.setTrailingDistance = "dynamic";
   out.minPfByRange = pfRangeFloorsOf(out.minPfByRange);
   for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
     out[key] = pfFloor(out[key] == null ? PF_TYPE_DEFAULTS[key] : num(out[key], PF_TYPE_DEFAULTS[key]));
