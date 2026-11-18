@@ -24,7 +24,7 @@ _RAW=('entry_conf','hist_time_bars','scratch_s','scratch_min','cooldown_bars','c
       'min_sl_distance_pct','hist_honor_tp','warmup','hold_auto','direction_split','lookback',
       'pause_mode','pause_fixed','pause_candidates','pause_auto_min','pause_auto_max','pause_pack')
 _LANE=('id','idx','pack','kind','side','step','tp_pct','sl_ratio','trail_arm','trail_give',
-       'trail_sl','hold_bars','pause_bars')
+       'trail_sl','price_sl_pct','hold_bars','pause_bars')
 
 
 class PauseLookup:

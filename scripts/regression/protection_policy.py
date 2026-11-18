@@ -4,7 +4,7 @@ from math import isclose
 from pulse_trader import Position, Pulse, set_kind_of
 from risk_variants import fixed_trail
 from position_cost import SL_RATIOS, sl_floor_frac, resolve_sl_tp, normalize_min_sl_distance_pct
-from set_engine import BarIndex, SetBook, SetLane, bar_signal, set_group
+from set_engine import BarIndex, SetBook, SetLane, bar_signal, config_key, set_group
 from indication_config import source_name
 
 
@@ -129,10 +129,45 @@ def trailing_distance_modes():
     return True, f'{cases} trailing Sets: fixed/dynamic × long/short, replay, stops, exact order identity and retired recovery'
 
 
+def absolute_price_distance_grid():
+    settings = overlay(stratGeneral=True, stratIndications=False, stratShortRange=False,
+                       stratSignals=False, indicationConfigs=[], setStepAdapt=False, setMinStep=2, setStepMax=2,
+                       tpStepMin=0, setPriceDistanceGrid=True, setTrailingDistance="both", trailMinStep=2,
+                       trailStepMin=0, trailStepMax=2, trailMinLockPct=0, positionCostPct=.01,
+                       histIgnoreTp=True, minSlDistancePct=.1, minSlSteps=0, minTrailSteps=0)
+    book = SetBook()
+    book.load(settings)
+    sets = [st for st in book.by_idx if st.pack == "general"]
+    base = [st for st in sets if st.kind == "base"]
+    trail = [st for st in sets if st.kind == "trail" and isclose(st.trail_arm, 2.6)]
+    gaps = {step / 10 for step in range(2, 27)}
+    stops = {step / 10 for step in range(2, 23)}
+    assert {st.price_sl_pct for st in base} == stops
+    assert {(st.price_sl_pct, st.trail_give, fixed_trail(st.id)) for st in trail} == {
+        (sl, gap, fixed) for sl in stops for gap in gaps for fixed in (False, True)
+    }
+    assert len({config_key(st.id) for st in trail}) == 21 * 25 * 2
+    trader = Pulse.__new__(Pulse)
+    trader.sets = book
+    for st in (base[0], next(st for st in sets if st.kind == "exit"), trail[0], trail[-1]):
+        assert isclose(book.lane_fracs(st)[0], st.price_sl_pct / 100)
+        assert isclose(SetLane(st, "BTC-USDT").sl_base, st.price_sl_pct / 100)
+        assert set_kind_of(st.id) == st.kind
+        order = trader.cid(set_id=st.id, pack=st.pack, set_idx=st.idx, lane="neg")
+        assert len(order) <= 32 and trader.parse_track(order)["set_id"] == st.id
+    assert any(":trail-fixed:" in set_group(st.id) for st in trail)
+    book.load({**settings, "setPriceSlDistances": [.2, 1.4], "setPriceTrailGaps": [.2, .4],
+               "positionCostPct": .176, "minSlDistancePct": .4})
+    assert {st.price_sl_pct for st in book.by_idx} == {1.4}
+    assert all(st.trail_give in (.2, .4) for st in book.by_idx if st.kind == "trail")
+    return True, f"{len(trail)} distinct trailing Sets, exact protection and compact order ownership"
+
+
 CHECKS = [
  ('protection.requested-step-ceiling',requested_step_ceiling_is_authoritative),
  ('protection.geometry-grid-step-scan',geometry_and_replay_parity),
  ('protection.target-and-instance-isolation',resolve_never_moves_target),
  ('protection.indication-config-lane-isolation',duplicate_signal_configs_are_independent),
     ('protection.trailing-distance-modes', trailing_distance_modes),
+    ('protection.absolute-price-grid', absolute_price_distance_grid),
 ]

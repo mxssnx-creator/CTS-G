@@ -814,6 +814,7 @@ export type LiveStats = {
       pack: string;
       tf: string;
       slRatio: number;
+      priceSlPct?: number | null;
       trailKey: string;
       step?: number;
       tpPct?: number;
