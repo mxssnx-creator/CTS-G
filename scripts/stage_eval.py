@@ -801,11 +801,12 @@ class AutoFloors:
         seen: set = set()
         own: Dict[str, float] = {}
         set_scope = bool(getattr(book, "pf_set_auto", False))
+        owned_packs = getattr(book, "owned_auto_packs", ())
         for key, tx, sig, pairs, sid in self.sets:
             cut = bisect.bisect_left(tx, boundary)        # native now - lookback; strict close boundary
             if cut <= n_win:
                 continue
-            if set_scope:
+            if set_scope or (owned_packs and book.sets[sid].pack in owned_packs):
                 got_own = se.learn_step_floor([(p_, n_) for (t_, p_, n_) in pairs if t_ < boundary], book.pf_set_auto_min, book.pf_step_auto_tol,
                                               book.step_auto_candidates(), getattr(book, "pf_auto_factor", 0.0))
                 if got_own:
