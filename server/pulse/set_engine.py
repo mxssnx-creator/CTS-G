@@ -2995,8 +2995,7 @@ class SetBook:
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
         self.pf_step_auto_min = int(max(1, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))     # no minimum-orders gate (owner 2026-11-04): down to 1
-        # minPfStepAutoScope "set" (owner 2026-11-14): every config Set learns its OWN Auto floor from its own causal pairs; a Set with fewer than
-        # minPfSetAutoMin admitted orders uses the defaults (its TP step's floor, then the direction's pooled floor, then the manual floor)
+        # In Set scope, a Set learns from its own causal pairs and uses its own manual value if evidence is insufficient.
         self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "step").lower() == "set"
         # slAutoRange (owner 2026-11-14): every TP step (and direction) learns its own SL ratio range from the orders closed before the window it judges;
         # a base / Exit Set outside it is not valid (reason "slrange"); trailing Sets have no SL ratio grid. Absent = off (the manual grid alone).
@@ -4413,8 +4412,8 @@ class SetBook:
 
     def floor_of(self, st: "SetState") -> Tuple[float, str]:
         """The one minimum PF of a Set (every window, every stage) and where it comes from. Auto on (minPfByStep + minPfStepAuto): the Set's own learned floor
-        (scope "set") first; a configuration with its own manual floor (own_manual_floor) falls back to THAT value, never to a floor learned on other
-        configurations' orders; every other Set falls back to its step's learned floor (step, else the direction's pool), then the manual step table.
+        (scope "set") first, then the configured manual floor or the manual TP-step formula. In step scope, Sets without an explicit manual floor
+        can use the step's learned floor or the direction's pool.
         Auto off: the configuration's own manual floor, else 1 + TP% x ratio. A learned floor is capped by minPfStepAutoHigh, as the manual table is."""
         high = self.pf_step_auto_high
         auto = self.pf_by_step and self.pf_step_auto
@@ -4425,7 +4424,7 @@ class SetBook:
         mine = self.own_manual_floor(st)
         if mine is not None:
             return mine
-        if auto:
+        if auto and not self.pf_set_auto:
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
                 return min(float(learned), high), "auto-step"

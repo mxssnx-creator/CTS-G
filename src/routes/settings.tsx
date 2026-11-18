@@ -2633,7 +2633,7 @@ function PfWindowControls({
           checked={overlay.minPfStepAutoScope === "set"}
           onChange={(e) => patch("minPfStepAutoScope", e.target.checked ? "set" : "step")}
         />
-        Auto floor per config Set (each Set learns its own floor; with too few orders a configuration with its own manual floor — Signals, Micro range, an indication entry's lane policy — uses that value, every other Set the step, pooled, then manual floor)
+        Auto floor per config Set. A Set with insufficient closes uses its configured manual floor or the manual TP-step formula.
       </label>
       <Slider
         label="Auto per Set: orders a Set needs"
