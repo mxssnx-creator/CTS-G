@@ -39,6 +39,16 @@ TRAIL_GIVE_MAX = 0.5
 TRAIL_GIVE_FACTOR = 1.0 / 3.0
 
 
+def fixed_trail(key: str) -> bool:
+    """Fixed-distance trailing keys and the Set IDs that contain them."""
+    return key.endswith(":fixed") or ":fixed:ts" in key
+
+
+def trailing_stop(side: int, entry: float, peak: float, gap: float, fixed: bool) -> float:
+    """Trail the favorable extreme with either an original-entry or a peak-relative gap."""
+    return peak - side * entry * gap if fixed else peak * (1 - side * gap)
+
+
 def parse_trail(raw: Any) -> Tuple[float, float]:
     text = str(raw or "0.3:0.1")
     if ":" not in text:
