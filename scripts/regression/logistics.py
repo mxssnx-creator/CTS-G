@@ -26,7 +26,7 @@ def overlays_share_grid_contract():
     detail = []
     for path in (X01, X02):
         ov = json.load(open(path))
-        want = {"setMinStep": 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
+        want = {"setMinStep": 5 if path == X01 else 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.35, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
@@ -70,6 +70,8 @@ def desk_defaults_equal_shipped_overlay():
             continue
         checked.append(key)
         if abs(float(m.group(1)) - float(shipped[key])) > 1e-9:
+            if key in DESK_DEFAULT_EXCEPTIONS:      # a recorded x01-only owner decision (the shared desk default stays)
+                continue
             drift.append(f"{key}: desk={m.group(1)} shipped={shipped[key]}")
     ok = not drift and len(checked) >= 6
     return ok, f"checked={len(checked)} drift={drift}" if drift else f"{len(checked)} shared numeric defaults equal the shipped overlay"
@@ -112,6 +114,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     "stratBreakout": "owner 2026-11-04: signals on at x01 and x02 (trend + breakout packs); the shared desk default keeps the extra packs off",
     "stratShortRange": "owner 2026-11-05: x01 switches Short Range off (live 0.26 on 5, replay 0.76 on 39 orders over C / B / A); the shared desk default keeps it on",
     "trailMinLockPct": "owner 2026-11-05: x01 builds no trailing pair that locks under 0.2 % (live 0.14 PF on 53 closes); the shared desk default is 0 (every pair)",
+    "setMinStep": "owner 2026-11-18: x01 runs the grid minimum 5 (it also moves the trailing Sets' reference step 17 -> 19); the shared desk and engine default stays 2",
     "ddHaltPct": "owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (x01 and x02); the Bybit overlays keep 18",
 }
 
