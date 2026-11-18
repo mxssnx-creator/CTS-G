@@ -1,0 +1,74 @@
+name: Compare independent window market replays
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Completed reference market workflow run ID
+        required: true
+        type: string
+      candidate:
+        description: Completed candidate market workflow run ID
+        required: true
+        type: string
+  push:
+    branches: ['study/compare-owned-window-*-*']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Select two completed runs
+        id: runs
+        env:
+          BASELINE: ${{ inputs.baseline }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^study/compare-owned-window-([0-9]+)-([0-9]+)$ ]]
+            BASELINE="${BASH_REMATCH[1]}"
+            CANDIDATE="${BASH_REMATCH[2]}"
+          fi
+          [[ "$BASELINE" =~ ^[0-9]+$ && "$CANDIDATE" =~ ^[0-9]+$ && "$BASELINE" != "$CANDIDATE" ]]
+          echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
+          echo "candidate=$CANDIDATE" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.runs.outputs.baseline }}
+          pattern: owned-window-market-replay-oct-*
+          path: baseline
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.runs.outputs.candidate }}
+          pattern: owned-window-market-replay-oct-*
+          path: candidate
+      - name: Compare inputs, configuration outcomes, stage verdicts and individual fills
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def read(root, week, filename):
+              return json.loads((Path(root) / f"owned-window-market-replay-oct-{week}" / filename).read_text())
+
+          for week in (14, 21, 28):
+              for name in ("overlay.json", "provenance.json"):
+                  if read("baseline", week, name) != read("candidate", week, name):
+                      raise ValueError(f"week ending {week}: different {name}")
+              baseline = read("baseline", week, "result.json")
+              candidate = read("candidate", week, "result.json")
+              for field in ("symbols", "hours", "all", "configurations", "stage_evaluations",
+                            "signal_coverage", "trades", "open_at_end", "settled_hourly"):
+                  if baseline[field] != candidate[field]:
+                      raise ValueError(f"week ending {week}: different {field}")
+              trades = candidate["trades"]
+              digest = hashlib.sha256(json.dumps(trades, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+              print(f"October {week-7}–{week}: {len(trades)} identical closes, "
+                    f"{len(candidate['configurations'])} Sets, {len(candidate['stage_evaluations'])} stage rows, "
+                    f"{len(candidate['settled_hourly'])} settlement hours; trade SHA-256 {digest}")
+          PY
