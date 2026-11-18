@@ -89,9 +89,13 @@ def main():
     universe.add_argument("--top-symbols", type=int, default=None,
                           help="fetch N eligible crypto USDT contracts ranked by public 24h quote volume")
     p.add_argument("--jobs", type=int, default=4)
+    p.add_argument("--max-hours", type=int, default=72,
+                   help="upper bound of --hours (default 72, the owner's three-day limit for simulations); raise it only on the owner's explicit request (up to 720)")
     a = p.parse_args()
-    if not 25 <= a.hours <= 72:
-        p.error("history must be between 25 and 72 hours")
+    if not 25 <= a.max_hours <= 720:
+        p.error("--max-hours must be between 25 and 720")
+    if not 25 <= a.hours <= a.max_hours:
+        p.error(f"history must be between 25 and {a.max_hours} hours")
     target = Path(a.out)
     target.mkdir(parents=True, exist_ok=True)
     contracts = {r["symbol"]: r for r in get("/openApi/swap/v2/quote/contracts")}
