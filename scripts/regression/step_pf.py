@@ -292,7 +292,7 @@ def the_simulator_learns_the_engines_floors():
 
 def the_simulator_learns_the_engines_own_floor_of_every_set():
     """minPfStepAutoScope "set" (owner 2026-11-14): every config Set learns its own Auto floor from its own orders closed before the hour; a Set with too few
-    admitted orders keeps the defaults (step -> pooled -> manual). The simulator and the engine learn the same floor for every Set."""
+    admitted orders uses its manual policy. The simulator and the engine learn the same floor for every Set."""
     import json as _json
     import os as _os
     import stage_eval as sg
@@ -637,8 +637,8 @@ def shipped_floors_are_all_above_one():
 def every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default():
     """Owner 2026-11-15 ("min PF has for each coord own values and if auto enabled use the auto values with fallback to their manual defaults .. no
     collisions"): with Auto on, a Set's own learned floor comes first; a configuration with its own manual floor (Micro range, Signals pack, an indication
-    entry's lane policy) falls back to THAT value and never to a floor learned on other configurations' orders; every other Set falls back to its step's
-    learned floor, then the manual table. Auto off: the configuration's own manual floor, else the table. The chain's StageParams ask the same value."""
+    entry's lane policy) falls back to that value. Other Sets use the manual TP table until their own Auto floor is learned. The chain's StageParams
+    use the same floor. Step scope can still use the learned step floor."""
     import copy
     from position_cost import tp_range_of
     b = _book(setStepMax=12, minPfStepAuto=True, minPfStepAutoScope="set", minPfStepAutoHigh=1.3, minPfByRange={"micro": 1.01}, minPfSignals=2.4)
@@ -661,7 +661,10 @@ def every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default
     ask("micro, no own", micro, 1.01, "range")
     ask("signals, no own", sig, 2.4, "signals")
     ask("policy, no own", pol, 1.33, "lanePolicy")
-    ask("generic, no own", gen, 1.12, "auto-step")
+    ask("generic, no own", gen, min(manual, 1.3), "manual-step")
+    b.pf_set_auto = False
+    ask("explicit step scope", gen, 1.12, "auto-step")
+    b.pf_set_auto = True
     for x in (micro, sig, pol, gen):
         b.set_floor_auto[x.id] = 1.18
     ask("micro, own", micro, 1.18, "auto-set")

@@ -117,7 +117,7 @@ MUTATIONS = [
     ("own floor: a configuration's own manual floor overrides its learned Auto floor",
      "set_engine.py", "        if auto and self.pf_set_auto:\n            own = self.set_floor_auto.get(st.id)", "        if auto and self.pf_set_auto and self.own_manual_floor(st) is None:\n            own = self.set_floor_auto.get(st.id)"),
     ("own floor: an own-floor configuration falls back to the floor learned on other packs",
-     "set_engine.py", "        mine = self.own_manual_floor(st)\n        if mine is not None:\n            return mine\n        if auto:", "        mine = self.own_manual_floor(st)\n        if mine is not None and not auto:\n            return mine\n        if auto:"),
+     "set_engine.py", "        mine = self.own_manual_floor(st)\n        if mine is not None:\n            return mine\n        if auto and not self.pf_set_auto:", "        mine = self.own_manual_floor(st)\n        if mine is not None and not auto:\n            return mine\n        if auto:"),
     ("own floor: the chain asks the generic floor of a Signals pack",
      "set_engine.py", "        by_step = bool(st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None", "        by_step = bool(st is not None and (self.pf_by_step and not is_signal_pack(pack) or self.own_manual_floor(st) is not None and False"),
     ("trail hold: the scan ignores an armed trail's freedom",
