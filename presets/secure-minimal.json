@@ -483,6 +483,7 @@
   "setMinSamples": 12,
   "setMinStep": 2,
   "setStepMax": 8,
+  "setTrailingDistance": "dynamic",
   "setStepAdapt": false,
   "trailMinStep": 3,
   "exitEnabled": true,
