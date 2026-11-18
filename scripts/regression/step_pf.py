@@ -729,7 +729,47 @@ def the_orders_factor_trades_pf_against_admitted_orders_by_its_rule():
     return not bad and mono and exit_ok, f"200 random pair sets x 5 factors against the plain rule: mismatches {bad[:3]}; admitted orders rise with the factor {mono}; exitSets {kinds}"
 
 
+def explicit_window_profiles_own_auto_pf_in_a_mixed_desk():
+    from types import SimpleNamespace
+    import stage_eval as sg
+    from compact_replay_memory import CompactMemory
+
+    policy = {"id": "two-bases", "lastN": {"baseShort": 0, "mainLong": 4, "mainShort": [1]},
+              "windowGrid": {"baseLong": [4, 8], "realN": [2]}}
+    entry = {"names": ["momchg_n5_t1"], "stepMin": 5, "stepMax": 5,
+             "slRatios": [.5], "types": ["base"], "lastNLanes": [policy]}
+    book = _book(stratGeneral=True, directionMode="split", indicationConfigs=[entry],
+                 minPfStepAuto=True, minPfStepAutoScope="step", minPfStepAutoN=5,
+                 minPfStepAutoMin=8, minPfSetAutoMin=8, slAutoRange=False)
+    trained, cold = [st for st in book.by_idx if st.pack in book.pack_ranges and st.side == 1 and st.kind == "base"]
+    ordinary = next(st for st in book.by_idx if st.pack == "general" and st.step == 5 and st.side == 1 and st.kind == "base")
+    rows = _rows(73, 900)
+    hour = T0 // 3600 * 3600
+    _learn(book, {trained.id: rows}, hour - book.lookback * se.BAR_S)
+    native = dict(book.set_floor_auto)
+    assert set(native) == {trained.id}, "only the profile with its own evidence may learn a floor"
+    assert book.floor_of(trained)[1] == "auto-set"
+    assert book.floor_of(cold)[1] == "manual-step", "an empty sibling cannot borrow a step or direction's PF"
+    assert book.floor_of(ordinary)[1] == "auto-step", "the explicitly pooled ordinary desk still uses its step floor"
+    assert book.stage_params(cold.pack, cold).floor == book.floor_of(cold)[0]
+
+    by_set = {st.idx: ([], [], []) for st in book.by_idx}
+    by_set[trained.idx] = ([r[0] for r in rows], [r[0] - r[5] for r in rows], [r[4] for r in rows])
+    tapes = SimpleNamespace(by_set=by_set, cf=se.cost_as_frac(book.cost_pct),
+                            symbols_by_set={trained.idx: [r[1] for r in rows]})
+    sg.AutoFloors(book, tapes).apply(book, hour)
+    assert book.set_floor_auto == native, "ordinary replay reproduces independent native learning"
+    compact = CompactMemory(sg).install()
+    try:
+        sg.AutoFloors(book, tapes).apply(book, hour)
+        assert book.set_floor_auto == native, "packed replay preserves the same owners"
+    finally:
+        compact.restore()
+    return True, "native and both replay paths isolate the selected profile while preserving pooled ordinary Sets"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
+    explicit_window_profiles_own_auto_pf_in_a_mixed_desk,
     ratio_midpoints_match_desk_half_up_normalization,
     auto_wide_steps_use_the_last_table_bucket_but_keep_policy_identity,
     auto_replay_matches_native_boundary_and_complete_tape_identity,
