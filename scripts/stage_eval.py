@@ -991,11 +991,9 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 else:
                     continue
                 lane = se.SetLane(st, s)
-                dd = [0] * len(bars[s])
-                cc = [0.0] * len(bars[s])
-                dd[i], cc[i] = d, conf
                 end = end_of[s]
-                tr = lane.scan(i, end, bars[s], dd, cc, True, cfg, [i], accs[s])
+                # The explicit candidate admits only this bar. Later signals on the same tape cannot reopen it.
+                tr = lane.scan(i, end, bars[s], dirs[pack], confs[pack], True, cfg, (i,), accs[s])
                 if not tr:
                     if lane.open is not None:
                         # An unfinished position still occupies its symbol.  Do not
