@@ -1,6 +1,7 @@
 """Independent per-configuration stage windows. The policy is part of the lane identity."""
 from __future__ import annotations
 import copy
+import itertools
 import math
 
 DEFAULT_LAST_N_LANES = [
@@ -52,6 +53,40 @@ def last_n(raw):
         else: raise ValueError('Unknown lastN field '+str(k))
     return result
 
+GRID_FIELDS = ('baseLong', 'baseShort', 'mainLong', 'mainShort', 'negWindows', 'realN', 'realNegN')
+MAX_WINDOW_PACKS = 384
+
+def window_grid(raw):
+    if not isinstance(raw, dict) or any(key not in GRID_FIELDS for key in raw):
+        raise ValueError('Invalid Last-N window grid')
+    out = {}
+    for key in GRID_FIELDS:
+        if key not in raw:
+            continue
+        values = raw[key]
+        if (not isinstance(values, list) or not values or
+                any(not number(n, 0 if key == 'baseShort' else 1, 200, True) for n in values) or
+                len(set(values)) != len(values)):
+            raise ValueError('Invalid Last-N window choices for ' + key)
+        out[key] = sorted(int(n) for n in values)
+    if math.prod(len(values) for values in out.values()) > MAX_WINDOW_PACKS:
+        raise ValueError('Last-N window grid exceeds the configured pack capacity')
+    return out
+
+
+def window_paths(profile):
+    grid = profile.get('windowGrid') if profile else None
+    if not grid:
+        yield profile
+        return
+    template = {k: v for k, v in profile.items() if k != 'windowGrid'}
+    for values in itertools.product(*grid.values()):
+        path = dict(zip(grid, values))
+        windows = dict(profile['lastN'])
+        windows.update({k: [n] if k in ('mainShort', 'negWindows') else n for k, n in path.items()})
+        yield {**template, 'lastN': windows, 'windowPath': path}
+
+
 def profiles(raw):
     if raw is None: return []  # preserve existing configuration until explicitly migrated
     if not isinstance(raw,list) or len(raw)>8: raise ValueError('At most 8 independent Last-N lanes')
@@ -63,6 +98,7 @@ def profiles(raw):
         if role not in ROLES or scope not in SCOPES: raise ValueError('Invalid Last-N role or scope')
         ids.add(ident)
         p={'id':ident,'role':role,'scope':scope,'lastN':last_n(item.get('lastN',{}))}
+        if 'windowGrid' in item: p['windowGrid'] = window_grid(item['windowGrid'])
         if 'negativeFilter' in item: p['negativeFilter']=negative_filter(item['negativeFilter'])
         for key in ('minPfByStep','minPfBySlRatio'):
             m=item.get(key,{})
@@ -91,9 +127,11 @@ def expand_entries(configs):
         variants=profiles(item.get('lastNLanes')) or [None]
         symbols=item.get('symbols',[])
         if not isinstance(symbols,list) or len(symbols)>200 or any(not isinstance(s,str) or not s.strip() for s in symbols): raise ValueError('Invalid lane symbols')
+        template = {k: v for k, v in item.items() if k not in ('lastNLanes', 'symbols')}
         for variant in variants:
-            for symbol in sorted(set(symbols)) or ['']:
-                p=copy.deepcopy(item);p.pop('lastNLanes',None);p.pop('symbols',None)
-                p['lanePolicy']=variant;p['symbol']=symbol
-                result.append(p)
+            for path in window_paths(variant):
+                for symbol in sorted(set(symbols)) or ['']:
+                    if path and path.get('windowPath') and len(result) >= MAX_WINDOW_PACKS:
+                        raise ValueError('Last-N window grid exceeds the configured pack capacity')
+                    result.append({**copy.deepcopy(template), 'lanePolicy': path, 'symbol': symbol})
     return result

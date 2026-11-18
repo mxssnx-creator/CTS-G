@@ -101,3 +101,44 @@ def low_windows_survive_global_and_range():
         assert b.last_n_by_range['micro']['baseLong']==n and b.last_n_by_range['micro']['mainLong']==n
     return True,'1,2,3,5,8,10,200 preserved globally, in linked windows and per range'
 CHECKS.append(('policy.low-global-and-range-windows',low_windows_survive_global_and_range))
+
+def cartesian_parent_profiles():
+    import itertools
+    import relation_lanes as rl
+    grid = {'baseLong':[4,8], 'mainLong':[6,10], 'mainShort':[1,3], 'realN':[2,4]}
+    ov = overlay(stratGeneral=False,stratIndications=False,stratShortRange=False,directionMode='split',holdAuto=False,
+        indicationConfigs=[{'names':['momchg_n5_t1'],'symbols':['BTC-USDT','ETH-USDT'],'stepMin':7,'stepMax':7,
+                            'slRatios':[.5],'types':['base'],'lastNLanes':[{'id':'fork','lastN':{'baseShort':1},'windowGrid':grid}]}])
+    b=SetBook();b.load(ov)
+    assert len(b.by_idx)==64, len(b.by_idx)
+    wanted=set(itertools.product([4,8],[6,10],[1,3],[2,4]))
+    assert {(b.win(st).base_long,b.win(st).main_n,b.win(st).short_windows[0],b.win(st).real_n) for st in b.by_idx}==wanted
+    cells=[b.relation_cell(st) for st in b.by_idx]
+    assert len({rl.keys_of(c)['overall'] for c in cells})==64
+    acc=rl.Accumulator()
+    for index,cell in enumerate(cells):
+        acc.add(cell,[(float(n+1),float(n), 'BTC-USDT', -.1 if index else .1) for n in range(9)])
+    policy=rl.config_of({'enabled':True,'mainN':2,'realN':2,'fullWindow':True})
+    rows=acc.lanes(policy)
+    assert len(rows)==len(cells)*5
+    assert rl.multiple(cells[0],'pos',rows,policy)[0]>1
+    assert all(rl.multiple(c,'pos',rows,policy)[0]==1 for c in cells[1:])
+    previous=set(b.sets)
+    grid['realN'].append(5)
+    b.load(ov);assert previous < set(b.sets), 'adding a sibling must preserve prior Set identities'
+    return True, '64 independent geometry/symbol/side/window Sets; each gets 5 exact relation descendants'
+
+CHECKS.append(('policy.cartesian-parent-windows',cartesian_parent_profiles))
+
+def invalid_parent_grid_is_atomic():
+    b=book()
+    before=set(b.sets);cost=b.cost_pct
+    for grid in ({'realN':[8,8]}, {'baseLong':[4],'baseShort':[4]}, {'mainLong':[6],'mainShort':[4]}, {'mainLong':[0]}, {'unowned':[8]}, {'realN':list(range(1,201)), 'mainLong':[5,10]}):
+        try:
+            b.load({'makerFeeRate':.01,'indicationConfigs':[{'names':['momchg_n5_t1'],'lastNLanes':[{'id':'unsafe','windowGrid':grid}]}]})
+        except ValueError:
+            assert set(b.sets)==before and b.cost_pct==cost
+        else:
+            raise AssertionError('accepted invalid or truncated grid')
+    return True,'malformed or oversized Cartesian grids leave running state intact'
+CHECKS.append(('policy.parent-capacity-atomic',invalid_parent_grid_is_atomic))
