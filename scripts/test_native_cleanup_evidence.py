@@ -123,6 +123,15 @@ class CleanupEvidence(unittest.TestCase):
         self.assertEqual(terminal_intents(api,[{**intent,'response':rejected}],time.monotonic()+2,order_bodies),[])
         self.assertEqual(calls,[])
 
+    def test_maximum_leverage_refusal_does_not_leave_a_pending_order(self):
+        _, _, intent = self.fixture()
+        rejected = {'code': 101414, 'msg': 'The maximum leverage for the trading pair is 25.'}
+        api = SimpleNamespace(get=lambda *args: self.fail('a definite refusal requires no venue read'))
+        self.assertEqual(terminal_intents(api, [{**intent, 'response': rejected}], time.monotonic() + 2, order_bodies), [])
+        self.assertFalse(definite_refusal({**rejected, 'error': True}))
+        self.assertFalse(definite_refusal({**rejected, 'data': {'orderId': '123'}}))
+        self.assertFalse(definite_refusal({**rejected, 'msg': 'order state unknown'}))
+
     def test_slow_placements_yield_and_all_eligible_entries_still_progress(self):
         p=pt.Pulse.__new__(pt.Pulse);p.halted=False;p.real_stage_paper=False
         p.sets=SimpleNamespace(enabled=True,packs={},use_historic_gate=False)

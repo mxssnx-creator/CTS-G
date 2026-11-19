@@ -217,6 +217,7 @@ class Journal:
         bodies = order_bodies(path, body) if method == "POST" else []
         if method == 'POST' and not bodies:
             raise RuntimeError('an identified session order is required')
+        normalized_quantity = False
         for order in bodies:
             if self.symbols is not None and order.get('symbol') not in self.symbols:
                 raise RuntimeError('order symbol is outside this session selected universe')
@@ -234,11 +235,19 @@ class Journal:
                              'path': path, 'body': body, 'result': 'locally-rejected', 'response': reply})
                 return reply
             if not is_entry(order):
+                raw_quantity = order.get('quantity')
                 try:
-                    qty = Decimal(str(order.get('quantity')))
+                    qty = Decimal(str(raw_quantity))
                 except InvalidOperation:
                     qty = Decimal('NaN')
                 available = self.inventory.get((str(order['symbol']), str(order.get('positionSide')).upper()), Decimal(0))
+                if (isinstance(raw_quantity, float) and qty.is_finite() and qty > available > 0
+                        and qty - available <= Decimal(str(math.ulp(raw_quantity))) * 4):
+                    # The native book adds/subtracts float fills. Use the exact
+                    # confirmed decimal balance when only float noise exceeds it.
+                    order['quantity'] = format(available, 'f')
+                    qty = available
+                    normalized_quantity = True
                 if not qty.is_finite() or qty <= 0 or qty > available:
                     reply = {'code': 101400, 'localPolicyRejection': True,
                              'msg': 'closing quantity exceeds confirmed session-owned fills'}
@@ -247,6 +256,8 @@ class Journal:
                     return reply
             if is_entry(order) and (self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline):
                 return {"code": 101209, "error": True, "cooled": True, "msg": "session admission paused or deadline reached"}
+        if normalized_quantity and path.endswith('/batchOrders'):
+            body['batchOrders'] = json.dumps(bodies, separators=(',', ':'))
         with self.lock:
             identities = [(str(order['symbol']), str(order.get('clientOrderID') or order.get('clientOrderId')).lower()) for order in bodies]
             if len(set(identities)) != len(identities) or any(identity in self.owned_clients for identity in identities):

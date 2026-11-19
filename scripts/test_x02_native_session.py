@@ -461,6 +461,27 @@ class NativeSessionTests(unittest.TestCase):
             api._req('DELETE','/openApi/swap/v2/trade/order',{'symbol':'S0-USDT','orderId':'123'})
             self.assertEqual([x[0] for x in calls], ['POST','GET','DELETE'])
 
+    def test_float_noise_can_only_close_the_exact_confirmed_decimal_quantity(self):
+        from decimal import Decimal
+
+        sent = []
+        with tempfile.TemporaryDirectory() as directory:
+            api = SimpleNamespace(base=session.HOST, _req=lambda method, path, body: sent.append(body) or {'code': 0})
+            journal = session.Journal(api, directory, 'G1234')
+            journal.phase = 'cleanup'
+            journal.inventory[('S0-USDT', 'LONG')] = Decimal('2.01')
+            path = '/openApi/swap/v2/trade/order'
+            close = dict(symbol='S0-USDT', side='SELL', positionSide='LONG', type='MARKET', clientOrderID='G1234close')
+            api._req('POST', path, {**close, 'quantity': 2.0100000000000002})
+            self.assertEqual(sent[-1]['quantity'], '2.01')
+            batch = json.dumps([{**close, 'clientOrderID': 'G1234batch', 'quantity': 2.0100000000000002}])
+            api._req('POST', '/openApi/swap/v2/trade/batchOrders', {'batchOrders': batch})
+            self.assertEqual(json.loads(sent[-1]['batchOrders'])[0]['quantity'], '2.01')
+            for oversized in (2.02, '2.0100000000000002'):
+                reply = api._req('POST', path, {**close, 'clientOrderID': 'G1234refused', 'quantity': oversized})
+                self.assertTrue(reply['localPolicyRejection'])
+            self.assertEqual(len(sent), 2)
+
     def test_unknown_submission_can_bind_only_its_exact_reconciled_client_identity(self):
         calls = []
         def request(method, path, body):

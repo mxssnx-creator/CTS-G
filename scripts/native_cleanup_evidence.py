@@ -8,7 +8,8 @@ TERMINAL = {'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED'}
 def definite_refusal(reply):
     code = str(reply.get('code'))
     no_position = code == '101205' and str(reply.get('msg') or '').strip().lower() == 'no position to close'
-    return reply.get('cooled') is True or ((code in ('101400','109420') or no_position)
+    leverage_limit = code == '101414' and 'maximum leverage' in str(reply.get('msg') or '').lower()
+    return reply.get('cooled') is True or ((code in ('101400','109420') or no_position or leverage_limit)
         and not reply.get('error') and not reply.get('data'))
 
 

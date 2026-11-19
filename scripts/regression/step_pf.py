@@ -390,7 +390,10 @@ def shipped_micro_floor_is_positive_and_shared_by_every_stage():
     failures, checked = [], 0
     for path in Path(PULSE).glob('overlay-*.json'):
         raw = json.loads(path.read_text())
-        book = se.SetBook(); book.load({**raw, 'minPfByStep': True})   # the step table itself (the shipped overlays run one floor, 1.3)
+        # Exercise the stored Micro floor by admitting Micro steps in the fixture.
+        # The x02 demo starts above Micro for its current 80-symbol test.
+        book = se.SetBook()
+        book.load({**raw, 'minPfByStep': True, 'setMinStep': 2, 'tpStepMin': 2, 'shortRangeStepMin': 2})
         micro_sets = [st for st in book.by_idx if book.step_bucket(st) in (2, 3) and not se.is_signal_pack(st.pack)]
         if raw.get('minPfByRange', {}).get('micro') != 1.01 or not micro_sets:
             failures.append(path.name + ': missing Micro')
