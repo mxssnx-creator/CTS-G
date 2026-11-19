@@ -2,6 +2,7 @@
 """Read-only Pulse health checks. Never starts engines or accesses order/control APIs.
 
 Example: python scripts/monitor_readonly.py --url http://HOST:3015 --conn live --symbols 50
+Use --stats-file to monitor the private state of an isolated demo run.
 Use --once for a single check. Repeated checks print one JSON record per interval;
 service supervision is external. Endpoint downtime is reported, never auto-repaired.
 """
@@ -10,12 +11,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from pathlib import Path
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-MAX_RESPONSE = 4 * 1024 * 1024
+# An 80-symbol x02 snapshot includes the complete Set index and exceeds 6 MiB.
+MAX_RESPONSE = 16 * 1024 * 1024
 
 
 def finite(value):
@@ -24,6 +27,22 @@ def finite(value):
         return value if math.isfinite(value) else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def decode_stats(stream):
+    raw = stream.read(MAX_RESPONSE + 1)
+    if len(raw) > MAX_RESPONSE:
+        return {"_error": f"status response exceeds {MAX_RESPONSE // (1024 * 1024)} MiB"}
+    data = json.loads(raw)
+    return data if isinstance(data, dict) else {"_error": "status response is not an object"}
+
+
+def read_stats_file(path):
+    try:
+        with path.open("rb") as stream:
+            return decode_stats(stream)
+    except (OSError, ValueError) as exc:
+        return {"_error": type(exc).__name__}
 
 
 def read_stats(base, conn, timeout=8, opener=urllib.request.urlopen):
@@ -37,13 +56,7 @@ def read_stats(base, conn, timeout=8, opener=urllib.request.urlopen):
     request = urllib.request.Request(target, method="GET", headers={"Accept": "application/json", "Cache-Control": "no-cache"})
     try:
         with opener(request, timeout=timeout) as response:
-            raw = response.read(MAX_RESPONSE + 1)
-        if len(raw) > MAX_RESPONSE:
-            return {"_error": "status response exceeds 4 MiB"}
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            return {"_error": "status response is not an object"}
-        return data
+            return decode_stats(response)
     except urllib.error.HTTPError as exc:
         return {"_error": f"HTTP {exc.code}"}
     except (OSError, ValueError) as exc:
@@ -116,7 +129,9 @@ class HealthMonitor:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--url")
+    source.add_argument("--stats-file", type=Path)
     parser.add_argument("--conn", choices=("live", "vst"), default="live")
     parser.add_argument("--symbols", type=int, default=50)
     parser.add_argument("--interval", type=float, default=60)
@@ -129,7 +144,8 @@ def main():
     while True:
         started = time.monotonic()
         try:
-            result = monitor.sample(read_stats(args.url, args.conn), time.time())
+            stats = read_stats_file(args.stats_file) if args.stats_file else read_stats(args.url, args.conn)
+            result = monitor.sample(stats, time.time())
         except ValueError as exc:
             parser.error(str(exc))
         print(json.dumps(result, allow_nan=False), flush=True)

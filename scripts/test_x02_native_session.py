@@ -258,6 +258,34 @@ class NativeSessionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 48))
 
+    def test_eighty_symbol_session_keeps_the_requested_strategy_grid(self):
+        from exit_engine import ExitBook
+        from modules import resolve
+        from set_engine import SetBook
+
+        raw = json.loads((session.ROOT / 'server/pulse/overlay-bingx-x02.json').read_text())
+        symbols = [f'S{i}-USDT' for i in range(80)]
+        ov = session.frozen_overlay(raw, symbols, symbol_count=80, use_overlay_grid=True)
+        self.assertEqual((raw['symbolCap'], ov['symbols'], ov['symbolCap']), (80, symbols, 80))
+        self.assertEqual(ov['minSlDistancePct'], raw['minSlDistancePct'])
+        self.assertEqual(ov['signalCachePath'], '')
+        self.assertTrue(resolve(ov)['exec.controls'])
+        self.assertFalse(ov['tpRanges']['wide'])
+        self.assertFalse(ov['trailRanges']['wide'])
+        exits = ExitBook()
+        exits.load(ov)
+        self.assertFalse(exits.enabled)
+        book = SetBook()
+        book.load(ov)
+        base_steps = [st.step for st in book.by_idx if st.kind == 'base']
+        trails = [st for st in book.by_idx if st.kind == 'trail']
+        self.assertEqual((min(base_steps), max(base_steps)), (5, 32))
+        self.assertAlmostEqual(min(st.trail_arm for st in trails), .8)
+        self.assertAlmostEqual(min(st.trail_give for st in trails), .8)
+        self.assertFalse(any(st.kind == 'exit' for st in book.by_idx))
+        with self.assertRaises(ValueError):
+            session.frozen_overlay(raw, symbols + ['EXTRA-USDT'], symbol_count=81, use_overlay_grid=True)
+
     def test_relocation_is_complete_and_does_not_move_unrelated_values(self):
         mod = SimpleNamespace(DIR='/opt/native', STATS_PATH='/opt/native/stats.json', OTHER='/opt/other')
         session.relocate_runtime(mod, Path('/private/run'), 'G1234')

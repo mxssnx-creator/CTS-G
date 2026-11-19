@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select 50 disjoint VST symbols using contract, liquidity and data checks only.
+"""Select disjoint VST symbols using contract, liquidity and data checks only.
 
 Only unauthenticated public market GETs are used. No return, PF, strategy score
 or account-setting mutation participates in selection.
@@ -18,7 +18,7 @@ sys.path.insert(0,str(ROOT/'server/pulse'))
 from bingx_fast import FastBingX,ErrorLog
 from set_engine import SetBook
 from pulse_trader import Pulse
-from x02_native_session import HOST,CONN,atomic_json,frozen_overlay,seed_history
+from x02_native_session import HOST,CONN,MAX_SESSION_SYMBOLS,atomic_json,frozen_overlay,seed_history
 
 
 def ordinary_crypto_contract(row):
@@ -34,8 +34,11 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--exclude',nargs='+',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
-    ap.add_argument('--symbol-count',type=int,default=50,choices=range(1,51))
+    ap.add_argument('--symbol-count',type=int,default=50,choices=range(1,MAX_SESSION_SYMBOLS+1),
+                    metavar=f'1..{MAX_SESSION_SYMBOLS}')
     ap.add_argument('--overlay',type=Path,default=ROOT/'server/pulse/overlay-bingx-x02.json')
+    ap.add_argument('--history-hours',type=int,default=12)
+    ap.add_argument('--overlay-grid',action='store_true',help='use the supplied strategy grid for history coverage')
     ap.add_argument('--seed',type=Path,help='reuse recent, validated VST candles without re-downloading them')
     args=ap.parse_args()
     if args.out.exists():ap.error('choose a new market snapshot directory')
@@ -61,7 +64,9 @@ def main():
                        and row['symbol']not in excluded),key=lambda s:(-volume(s),s))
     count=args.symbol_count
     if len(candidates)<count:raise RuntimeError('fewer disjoint active contracts than requested')
-    raw=json.loads(args.overlay.read_text());book=SetBook();book.load(frozen_overlay(raw,candidates[:count],symbol_count=count))
+    raw=json.loads(args.overlay.read_text())
+    book=SetBook()
+    book.load(frozen_overlay(raw,candidates[:count],args.history_hours,count,use_overlay_grid=args.overlay_grid))
     if args.seed:seed_history(book,args.seed,candidates,time.time())
     seeded=frozenset(book.bars)
     target=book.history_bars()+1
@@ -117,7 +122,7 @@ def main():
                 'sourceSha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
     atomic_json(args.out/'candles.json',{'capturedAt':time.time(),'barSeconds':60,'symbols':selected})
     atomic_json(args.out/'symbols.json',symbols)
-    print('Prepared 50 disjoint, valid VST histories',flush=True)
+    print(f'Prepared {count} disjoint, valid VST histories',flush=True)
 
 
 if __name__=='__main__':main()

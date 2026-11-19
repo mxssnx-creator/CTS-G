@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import urllib.error
 
 spec = importlib.util.spec_from_file_location("ctsg_readonly_monitor", Path(__file__).parents[1] / "monitor_readonly.py")
@@ -73,6 +74,16 @@ def unavailable_and_response_limit():
     return not got["healthy"] and not got["reachable"] and "exceeds" in big["_error"] and not malformed["healthy"], "HTTP 503, oversized responses and nonfinite metrics cannot report healthy or crash JSON output"
 
 
+def complete_x02_state_file_is_monitorable():
+    stats = {**healthy(), "connection": "bingx-x02", "symbolCount": 80, "index": " " * (6 * 1024 * 1024)}
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "stats.json"
+        path.write_text(json.dumps(stats))
+        observed = m.HealthMonitor("vst", 80).sample(m.read_stats_file(path), 1000)
+    return observed["healthy"], f"read 6 MiB x02 status with {observed.get('symbolCount')} symbols"
+
+
 CHECKS = [("monitoring." + f.__name__.replace("_", "-"), f) for f in (
     exact_get_and_no_controls, rejects_credentials_and_control_urls, stale_identity_symbols_and_halt,
-    stalls_and_recovers_without_pf_clamping, error_increases_only, unavailable_and_response_limit)]
+    stalls_and_recovers_without_pf_clamping, error_increases_only, unavailable_and_response_limit,
+    complete_x02_state_file_is_monitorable)]

@@ -26,6 +26,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 ROOT = Path(__file__).resolve().parents[1]
 HOST = "https://open-api-vst.bingx.com"
 CONN = "bingx-x02"
+MAX_SESSION_SYMBOLS = 80
+MAX_OBSERVATION_MINUTES = 180
 TERMINAL = {"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 
 
@@ -43,22 +45,24 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
-def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50):
-    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= 50 or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
+def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50, *, use_overlay_grid=False):
+    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= MAX_SESSION_SYMBOLS or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
         not isinstance(s, str) or not s.endswith("-USDT") or not s.replace("-", "").isalnum() for s in symbols
     ):
         raise ValueError(f"exactly {symbol_count} distinct explicit USDT symbols required")
     if not 1 <= history_hours <= 72:
         raise ValueError("history hours must be between 1 and 72")
     ov = json.loads(json.dumps(raw))
-    ranges = {"micro": True, "minimal": True, "short": True, "normal": False, "long": False, "wide": False}
+    if not use_overlay_grid:
+        ranges = {"micro": True, "minimal": True, "short": True, "normal": False, "long": False, "wide": False}
+        ov.update(setMinStep=2, setStepMax=7, shortRangeStepMin=2, shortRangeStepMax=7,
+                  tpRanges=ranges, trailRanges=ranges, minSlDistancePct=.1)
     ov.update(symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=symbol_count,
               volumeFactor=.05, sizePctOfBalance=0, targetNotional=2.15, sizeMaxNotional=25,
-              maxOpen=symbol_count, setMinStep=2, setStepMax=7, setStepAdapt=False,
-              shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges,
-              minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
+              maxOpen=symbol_count, setStepAdapt=False,
+              slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
-              indExtraSources=False, ownedQuantityControls=True)
+              indExtraSources=False, ownedQuantityControls=True, signalCachePath="")
     for name, default in (('microMinSlDistancePct', .1), ('microMinTrailDistancePct', .05)):
         value = ov.setdefault(name, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 10:
@@ -614,7 +618,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--overlay", type=Path, required=True)
     ap.add_argument("--symbols", type=Path, required=True, help="JSON array of the exact requested explicit symbols")
-    ap.add_argument("--symbol-count", type=int, default=50)
+    ap.add_argument("--symbol-count", type=int, default=50, choices=range(1, MAX_SESSION_SYMBOLS + 1),
+                    metavar=f"1..{MAX_SESSION_SYMBOLS}")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--credentials", type=Path)
     ap.add_argument("--fee-cache",type=Path,help="private account-bound cache of measured rates, refreshed after one hour")
@@ -627,19 +632,22 @@ def main(argv=None):
     ap.add_argument("--heartbeat-seconds", type=float, default=60)
     ap.add_argument("--history-hours", type=int, default=12,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
+    ap.add_argument("--overlay-grid", action="store_true",
+                    help="keep the supplied strategy step bounds, ranges and distance floors")
     ap.add_argument("--execute", action="store_true")
     ap.add_argument('--admission',choices=('native','full-universe'),default='native')
     ap.add_argument('--allow-foreign-symbols',action='store_true',
                     help='allow other positions/orders outside a deliberately disjoint selected universe')
     args = ap.parse_args(argv)
-    if not 0 < args.minutes <= 30 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
-        ap.error("observation<=30min, warmup<=60min and cleanup<=600s must be positive")
+    if not 0 < args.minutes <= MAX_OBSERVATION_MINUTES or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
+        ap.error(f"observation<={MAX_OBSERVATION_MINUTES}min, warmup<=60min and cleanup<=600s must be positive")
     if not 15 <= args.heartbeat_seconds <= 300:
         ap.error('heartbeat must be between15 and300 seconds')
     if args.out.exists():
         ap.error("choose a new private output directory; sessions cannot overwrite prior evidence")
     symbols = json.loads(args.symbols.read_text())
-    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours, args.symbol_count)
+    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours, args.symbol_count,
+                             use_overlay_grid=args.overlay_grid)
     required_history = context_requirement(overlay)
     os.umask(0o077)
     args.out.mkdir(parents=True, mode=0o700)
