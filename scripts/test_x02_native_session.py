@@ -445,10 +445,12 @@ class NativeSessionTests(unittest.TestCase):
             for method, path, body in (
                 ('DELETE','/openApi/swap/v2/trade/order',{'symbol':'S0-USDT','orderId':'999'}),
                 ('DELETE','/openApi/swap/v2/trade/allOpenOrders',{'symbol':'S0-USDT'}),
-                ('POST','/openApi/swap/v2/trade/leverage',{'symbol':'S0-USDT','leverage':5}),
                 ('POST','/openApi/swap/v2/trade/marginType',{'symbol':'S0-USDT','marginType':'CROSSED'}),
             ):
                 with self.assertRaises(RuntimeError): api._req(method,path,body)
+            leverage=api._req('POST','/openApi/swap/v2/trade/leverage',{'symbol':'S0-USDT','leverage':5})
+            self.assertEqual(leverage['code'],101414)
+            self.assertTrue(leverage['localPolicyRejection'])
             for body in (
                 {'symbol':'S0-USDT','clientOrderID':'G1234close','side':'SELL','positionSide':'LONG','type':'STOP_MARKET','closePosition':'true'},
                 {'symbol':'S0-USDT','clientOrderID':'G1234close2','side':'SELL','positionSide':'LONG','type':'MARKET','positionId':'55'},
@@ -740,10 +742,12 @@ class NativeSessionTests(unittest.TestCase):
             for method, path, body in (
                 ('DELETE','/openApi/swap/v2/trade/order',{'symbol':'S0-USDT','orderId':'999'}),
                 ('DELETE','/openApi/swap/v2/trade/allOpenOrders',{'symbol':'S0-USDT'}),
-                ('POST','/openApi/swap/v2/trade/leverage',{'symbol':'S0-USDT','leverage':5}),
                 ('POST','/openApi/swap/v2/trade/marginType',{'symbol':'S0-USDT','marginType':'CROSSED'}),
             ):
                 with self.assertRaises(RuntimeError): api._req(method,path,body)
+            leverage=api._req('POST','/openApi/swap/v2/trade/leverage',{'symbol':'S0-USDT','leverage':5})
+            self.assertEqual(leverage['code'],101414)
+            self.assertTrue(leverage['localPolicyRejection'])
             for extra in ({'closePosition':'true'}, {'positionId':'55'}):
                 reply=api._req('POST','/openApi/swap/v2/trade/order',
                     {'symbol':'S0-USDT','clientOrderID':'G1234close','side':'SELL','positionSide':'LONG','type':'MARKET',**extra})

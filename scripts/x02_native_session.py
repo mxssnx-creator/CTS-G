@@ -205,6 +205,13 @@ class Journal:
         if method == 'DELETE':
             if path != '/openApi/swap/v2/trade/order' or not self.owns_order(body.get('symbol'), body.get('orderId')):
                 raise RuntimeError('cancellation requires this session\'s exact journaled venue order ID')
+        elif method == 'POST' and path == '/openApi/swap/v2/trade/leverage':
+            # A market-entry leverage rejection invokes a direct native retry.
+            # A definite refusal lets the trader apply its normal symbol cooldown.
+            reply = {'code': 101414, 'localPolicyRejection': True, 'msg': 'demo session keeps exchange leverage fixed'}
+            self.append({'at': time.time(), 'phase': self.phase, 'method': method, 'path': path,
+                         'body': body, 'result': 'locally-rejected', 'response': reply})
+            return reply
         elif method != 'POST' or path not in ('/openApi/swap/v2/trade/order', '/openApi/swap/v2/trade/batchOrders'):
             raise RuntimeError('session forbids account-setting and unrecognized mutations')
         bodies = order_bodies(path, body) if method == "POST" else []
