@@ -2847,13 +2847,26 @@ class Pulse:
                 sl = min(sl, self.exits.optimal_sl("SHORT", e, pos.peak, sl))
         return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
 
-    def max_range_prices(self, pos: Position) -> Tuple[float, float]:
-        """Overall security SL/TP: widest of the order range and overlay max."""
+    def max_range_prices(self, pos: Position, *, additional_entry: float = 0.0) -> Tuple[float, float]:
+        """Overall security SL/TP for the combined position."""
         if pos.relate_receipt and pos.relate_receipt.get("total", 0) > pos.relate_receipt.get("base", 0) + 1e-12:
             # A Relate raise was admitted against this immutable Set stop; an outer
             # control must not silently widen that recorded risk after sizing.
             return self.security_prices(pos)
         sl_f, tp_f, sl_lo, sl_hi = self.opt_fracs(pos)
+        if getattr(self, "overlay", {}).get("overallFromOrderRanges") is True:
+            if pos.set_id and not self.lane_honors_tp(pos):
+                tp_f = max(tp_f, float(self.tp_max))
+            entries = [pos.base_entry or pos.dca_ref or pos.entry, additional_entry]
+            entries.extend(f["price"] for f in pos.block_fills if f.get("qty", 0) > 0)
+            entries.extend(price for price, qty in pos.dca_fills if qty > 0)
+            entries = [price for price in entries if math.isfinite(price) and price > 0]
+            if entries:
+                direction = 1 if pos.side == "LONG" else -1
+                outer = min(entries) if direction > 0 else max(entries)
+                target = max(entries) if direction > 0 else min(entries)
+                return (self.clamp_ctrl_price(pos, "sl", outer * (1 - direction * sl_f)),
+                        self.clamp_ctrl_price(pos, "tp", target * (1 + direction * tp_f)))
         sl_w = max(sl_f, sl_hi, float(self.sl_max), float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
         tp_w = max(tp_f, float(self.tp_max), float(getattr(pos, "tp_pct", 0) or 0), float(self.tp_min))
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
@@ -3229,13 +3242,15 @@ class Pulse:
         log(f"CTRL {kind} {pos.symbol} {pos.side} oid={oid} closePos={pos.close_position} qty={pos.qty} @{price}")
         return oid
 
-    @staticmethod
-    def control_covers_quantity(pos: Position, order: Dict[str, Any]) -> bool:
+    def control_covers_quantity(self, pos: Position, order: Dict[str, Any]) -> bool:
         if str(order.get("closePosition")).lower() in ("true", "1"):
-            return True
+            return not self.quantity_controls_only()
         try:
             remaining = float(order.get("origQty") or order.get("quantity") or 0) - max(0, float(order.get("executedQty") or 0))
-            return math.isfinite(remaining) and remaining + max(1e-12, pos.qty * 1e-10) >= pos.qty
+            tolerance = max(1e-12, pos.qty * 1e-10)
+            if self.quantity_controls_only():
+                return math.isfinite(remaining) and abs(remaining - pos.qty) <= tolerance
+            return math.isfinite(remaining) and remaining + tolerance >= pos.qty
         except (TypeError, ValueError):
             return False
 
@@ -3246,6 +3261,9 @@ class Pulse:
             return True
         has_sl = bool(real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", "")))
         has_tp = bool(real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", "")))
+        if self.quantity_controls_only():
+            wrong_qty = abs(float(pos.ctrl_qty or 0) - pos.qty) > max(1e-12, pos.qty * 1e-10)
+            return not (has_sl and has_tp) or pos.ctrl_undercovered or pos.close_position or wrong_qty
         grown = (not getattr(pos, "close_position", False) and float(getattr(pos, "ctrl_qty", 0) or 0) + 1e-12 < pos.qty)
         return not (has_sl and has_tp) or bool(getattr(pos, "ctrl_undercovered", False)) or grown
 
@@ -3497,6 +3515,8 @@ class Pulse:
                 covered, full = qty_ok(selected), close_all(selected)
             legal = self.sl_legal(pos, price) if is_sl else self.tp_legal(pos, price)
             covered = covered and legal
+            if is_sl and old and legal and self.quantity_controls_only():
+                want = max(want, price) if side == "LONG" else min(want, price)
             # Never widen an already tighter, legal SL. TP remains the outer
             # safety target; each Set's own inner exits are managed separately.
             moved = ((want > price * 1.0008 if side == "LONG" else want < price * .9992)
@@ -3655,11 +3675,19 @@ class Pulse:
             self.save_open_book()
             self.last_error = f"close {pos.symbol} partial settled; remainder retained"
             return False, px
-        forms = [{"quantity": pos.qty, "clientOrderID": self.cid("c", pos=pos)}]
-        if not self.quantity_controls_only():
+        owned_quantity_only = self.quantity_controls_only()
+        quantity = pos.qty
+        if owned_quantity_only:
+            contract = self.contracts.get(pos.symbol)
+            if contract:
+                # Match protective orders: serialize stacked lots at venue
+                # precision before the exact owned-quantity guard checks them.
+                quantity = self.fmt_qty(contract, pos.qty)
+        forms = [{"quantity": quantity, "clientOrderID": self.cid("c", pos=pos)}]
+        if not owned_quantity_only:
             forms.append({"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)})
         pid = str(getattr(pos, "position_id", "") or "")
-        if pid and not self.quantity_controls_only():
+        if pid and not owned_quantity_only:
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
         for f in forms:                       # the manager records this close itself: the fill sync must not count it again
             self.seen_fill_cids.add(f["clientOrderID"])
@@ -6222,7 +6250,11 @@ class Pulse:
                 room = min(room, max(0.0, RELATE_MAX_STACK * pos.relate_origin_qty - pos.qty) * px)
             # Total parent loss at its existing stop, fees included, when a risk budget is set; 0 (owner 2026-11-04) = no cap: the add is its count's ratio x
             # the parent's ORIGINAL base volume. Adds never move that stop, and a minimum lot cannot override a budget.
-            risk_qty = block_risk_qty(self.block_risk_pct, self.equity, pos.side, px, pos.sl, pos.entry, pos.qty, cf)
+            risk_stop = pos.sl
+            if self.block_risk_pct and getattr(self, "overlay", {}).get("overallFromOrderRanges") is True:
+                outer_sl, _ = self.max_range_prices(pos, additional_entry=px)
+                risk_stop = min(risk_stop, outer_sl) if pos.side == "LONG" else max(risk_stop, outer_sl)
+            risk_qty = block_risk_qty(self.block_risk_pct, self.equity, pos.side, px, risk_stop, pos.entry, pos.qty, cf)
             qty = self.round_qty(c, min(row["qty"]*relational_strategy_weight(getattr(self,"relational_volume_ratios",None),"block"), room / px, risk_qty))
             # No minimum-lot bump beyond the independent group's planned volume.
             if qty < self.min_order_qty(c, px) or qty <= 0:

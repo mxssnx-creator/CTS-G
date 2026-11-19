@@ -43,8 +43,8 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
-def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50):
-    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= 50 or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
+def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50, *, preserve_strategy_grid=False):
+    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= 100 or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
         not isinstance(s, str) or not s.endswith("-USDT") or not s.replace("-", "").isalnum() for s in symbols
     ):
         raise ValueError(f"exactly {symbol_count} distinct explicit USDT symbols required")
@@ -54,11 +54,13 @@ def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50):
     ranges = {"micro": True, "minimal": True, "short": True, "normal": False, "long": False, "wide": False}
     ov.update(symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=symbol_count,
               volumeFactor=.05, sizePctOfBalance=0, targetNotional=2.15, sizeMaxNotional=25,
-              maxOpen=symbol_count, setMinStep=2, setStepMax=7, setStepAdapt=False,
-              shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges,
+              maxOpen=symbol_count,
               minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
               indExtraSources=False, ownedQuantityControls=True)
+    if not preserve_strategy_grid:
+        ov.update(setMinStep=2, setStepMax=7, setStepAdapt=False,
+                  shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges)
     for name, default in (('microMinSlDistancePct', .1), ('microMinTrailDistancePct', .05)):
         value = ov.setdefault(name, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 10:
@@ -627,19 +629,22 @@ def main(argv=None):
     ap.add_argument("--heartbeat-seconds", type=float, default=60)
     ap.add_argument("--history-hours", type=int, default=12,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
+    ap.add_argument("--preserve-strategy-grid", action="store_true",
+                    help="use the supplied overlay's step bounds and range switches")
     ap.add_argument("--execute", action="store_true")
     ap.add_argument('--admission',choices=('native','full-universe'),default='native')
     ap.add_argument('--allow-foreign-symbols',action='store_true',
                     help='allow other positions/orders outside a deliberately disjoint selected universe')
     args = ap.parse_args(argv)
-    if not 0 < args.minutes <= 30 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
-        ap.error("observation<=30min, warmup<=60min and cleanup<=600s must be positive")
+    if not 0 < args.minutes <= 180 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
+        ap.error("observation<=180min, warmup<=60min and cleanup<=600s must be positive")
     if not 15 <= args.heartbeat_seconds <= 300:
         ap.error('heartbeat must be between15 and300 seconds')
     if args.out.exists():
         ap.error("choose a new private output directory; sessions cannot overwrite prior evidence")
     symbols = json.loads(args.symbols.read_text())
-    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours, args.symbol_count)
+    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours, args.symbol_count,
+                             preserve_strategy_grid=args.preserve_strategy_grid)
     required_history = context_requirement(overlay)
     os.umask(0o077)
     args.out.mkdir(parents=True, mode=0o700)
