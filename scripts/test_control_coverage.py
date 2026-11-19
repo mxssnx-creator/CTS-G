@@ -169,6 +169,25 @@ class Controls(unittest.TestCase):
         self.assertNotIn("positionId", calls[0])
         self.assertEqual(calls[0]["quantity"], pos.qty)
 
+    def test_quantity_only_market_close_formats_stacked_lots_at_venue_precision(self):
+        for initial, added, precision, expected in (
+            (265.6, 132.6, 1, "398.2"),
+            (.0596, .0298, 4, "0.0894"),
+            (.778, .390, 3, "1.168"),
+        ):
+            with self.subTest(precision=precision):
+                p, pos = fixture()
+                p.overlay = {"ownedQuantityControls": True}
+                p.contracts[pos.symbol] = SimpleNamespace(qprec=precision)
+                del p.fmt_qty
+                p.seen_fill_cids, p.errors = set(), 0
+                calls = []
+                pos.qty = initial + added
+                p.api.post = lambda path, body: calls.append(body) or {"code": 101400, "msg": "test request"}
+                p.market_close(pos)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["quantity"], expected)
+
     def test_refused_close_never_removes_existing_controls(self):
         p,pos=fixture()
         pos.sl_oid=pos.sec_sl_oid="100";pos.tp_oid=pos.sec_tp_oid="101"
@@ -271,6 +290,43 @@ class Controls(unittest.TestCase):
         p.ensure_controls(pos)
         self.assertEqual(p.cancelled,[])
         self.assertEqual((pos.sl_oid,pos.sl),("100",94))
+
+    def test_overall_range_uses_outer_confirmed_leg_prices(self):
+        for side in ("LONG", "SHORT"):
+            with self.subTest(side=side):
+                p, pos = fixture(side)
+                p.overlay = {"overallFromOrderRanges": True}
+                pos.base_entry = 100
+                pos.entry = 101
+                pos.block_fills = [{"price": 98, "qty": 2}, {"price": 104, "qty": 1},
+                                   {"price": 110, "qty": 0}]
+                pos.block_pending = {"price": 120, "qty": 20}
+                stop, target = p.max_range_prices(pos)
+                expected = (98 * .99, 104 * 1.02) if side == "LONG" else (104 * 1.01, 98 * .98)
+                self.assertAlmostEqual(stop, expected[0])
+                self.assertAlmostEqual(target, expected[1])
+
+    def test_overall_trailing_keeps_outer_tp_when_lane_has_no_tp_exit(self):
+        p, pos = fixture()
+        p.overlay = {"overallFromOrderRanges": True}
+        p.lane_honors_tp = lambda _: False
+        pos.set_id = "trail"
+        pos.base_entry = 100
+        stop, target = p.max_range_prices(pos)
+        self.assertAlmostEqual(stop, 99)
+        self.assertAlmostEqual(target, 108)
+
+    def test_owned_controls_match_the_remaining_position_after_a_partial(self):
+        p, pos = fixture()
+        p.overlay = {"ownedQuantityControls": True}
+        pos.qty = 7
+        pos.ctrl_qty = 10
+        pos.close_position = False
+        pos.sl_oid, pos.tp_oid = "100", "101"
+        self.assertTrue(p.missing_controls(pos))
+        self.assertFalse(p.control_covers_quantity(pos, {"origQty": "10"}))
+        self.assertFalse(p.control_covers_quantity(pos, {"closePosition": "true"}))
+        self.assertTrue(p.control_covers_quantity(pos, {"origQty": "10", "executedQty": "3"}))
 
     def test_batch_values_are_actual_clamped_prices(self):
         p,pos=fixture()

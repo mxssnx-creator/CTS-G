@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select 50 disjoint VST symbols using contract, liquidity and data checks only.
+"""Select disjoint VST symbols using contract, liquidity and data checks only.
 
 Only unauthenticated public market GETs are used. No return, PF, strategy score
 or account-setting mutation participates in selection.
@@ -34,7 +34,7 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--exclude',nargs='+',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
-    ap.add_argument('--symbol-count',type=int,default=50,choices=range(1,51))
+    ap.add_argument('--symbol-count',type=int,default=50,choices=range(1,101))
     ap.add_argument('--overlay',type=Path,default=ROOT/'server/pulse/overlay-bingx-x02.json')
     ap.add_argument('--seed',type=Path,help='reuse recent, validated VST candles without re-downloading them')
     args=ap.parse_args()
@@ -117,7 +117,7 @@ def main():
                 'sourceSha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
     atomic_json(args.out/'candles.json',{'capturedAt':time.time(),'barSeconds':60,'symbols':selected})
     atomic_json(args.out/'symbols.json',symbols)
-    print('Prepared 50 disjoint, valid VST histories',flush=True)
+    print(f'Prepared {count} disjoint, valid VST histories',flush=True)
 
 
 if __name__=='__main__':main()
