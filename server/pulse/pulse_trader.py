@@ -1693,6 +1693,8 @@ class Pulse:
 
     def flatten_untracked(self, symbol: str, side: str, qty: float, px: float) -> bool:
         # Never flatten independent / other-system positions.
+        if self.quantity_controls_only():
+            return False
         tagged = []
         try:
             tagged = self.our_orders(symbol)
@@ -4023,6 +4025,8 @@ class Pulse:
             return
         if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or sym in self.open:
             return
+        if self.quantity_controls_only() and sym in getattr(self, "unverified_venue_symbols", ()):
+            return
         if any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
                for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
             return   # reconcile an uncertain Relate order before another admission
@@ -6223,7 +6227,8 @@ class Pulse:
                 or self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > now):
             return
         for pos in parents:
-            if pos.block_pending or pos.dca_fills or pos.close_filled_qty > 0 or pos.close_pending:
+            if (pos.block_pending or pos.dca_fills or pos.close_filled_qty > 0 or pos.close_pending
+                    or pos.symbol in getattr(self, "unverified_venue_symbols", ())):
                 continue
             px = float(self.px.get(pos.symbol) or 0)
             c = self.contracts.get(pos.symbol)
@@ -6950,6 +6955,8 @@ class Pulse:
         self._adopt_empty_n = 0
         live = set()
         foreign = set()
+        unverified = set()
+        exact_quantity = self.quantity_controls_only()
         for p in rows:
             try:
                 amt = float(p.get("positionAmt") or p.get("availableAmt") or 0)
@@ -6975,7 +6982,9 @@ class Pulse:
                 tagged = [o for o in self.our_orders(sym) if str(o.get("positionSide") or "").upper() in (side, "")]
             except Exception:
                 tagged = []
-            owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
+            owned_cid = bool(ours and ours.client_id and self.cid_ours(ours.client_id))
+            owned = bool(ours and getattr(ours, "ours", True)
+                         and (owned_cid or not exact_quantity and (ours.sl_oid or ours.tp_oid)))
             if not owned and any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
                                  for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
                 probe = Position(sym, side, qty, px, time.time(), px, px, px)
@@ -6983,6 +6992,15 @@ class Pulse:
                     self.open[sym] = ours = probe
                     self.owned_syms.add(sym)
                     owned = True
+            if exact_quantity and not owned:
+                # A tagged control or recent unknown write identifies an
+                # order, but supplies no executed inventory to protect.
+                unverified.add(sym)
+                foreign.add(f"{sym}:{side}")
+                if tagged:
+                    self.last_error = f"owned inventory unverified: {sym} {side}; keeping existing protection"
+                    log(self.last_error, every=60.0, key=f"unverified:{sym}:{side}", quiet=True)
+                continue
             unknown = time.time() - float((getattr(self, "unknown_entry", {}) or {}).get(f"{sym}:{side}", 0) or 0) < 180.0
             if not tagged and not owned and not unknown:
                 foreign.add(f"{sym}:{side}")
@@ -7019,6 +7037,8 @@ class Pulse:
                     if ours.block_pending:self.reconcile_block_pending(ours,qty)
                     if qty>ours.qty+max(1e-12,ours.qty*1e-10):
                         self.last_error=f'unattributed position increase ignored: {sym} {side}; waiting for exact own fills'
+                        if exact_quantity:
+                            unverified.add(sym)
                     # The snapshot average can be rounded by a whole tick.
                     # Keep the confirmed fill ledger even when quantity agrees.
                     ours.notional=ours.qty*ours.entry
@@ -7108,6 +7128,7 @@ class Pulse:
                 continue
             self.drop_ghost(pos,'stale')
             self.cooldown[sym] = time.time() + 90.0
+        self.unverified_venue_symbols = unverified
         self.ignored_foreign = len(foreign)
         ours_live = {k.split(":")[0] for k in live if k not in {x.split(":")[0] for x in foreign}}
         book_syms = set(self.open)

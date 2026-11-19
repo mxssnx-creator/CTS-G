@@ -23,6 +23,8 @@
   "cooldownS": 3,
   "staggerS": 0.12,
   "controlOrders": true,
+  "ownedQuantityControls": true,
+  "overallFromOrderRanges": true,
   "blockEnabled": true,
   "blockMaxStack": 6,
   "blockVolumeRatio": 1,
