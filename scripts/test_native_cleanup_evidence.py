@@ -22,14 +22,14 @@ class CleanupEvidence(unittest.TestCase):
                       body=body, response={'code': 0, 'data': {'order': row}})
         return body, row, intent
 
-    def test_archived_market_and_batch_controls_resolve_in_one_history_read(self):
+    def test_venue_acknowledgements_and_archive_resolve_together(self):
         body, entry, intent = self.fixture()
         controls = [{**body, 'clientOrderID': cid, 'type': typ, 'side': 'SELL'}
                     for cid, typ in [('GabcSl', 'STOP_MARKET'), ('GabcTp', 'TAKE_PROFIT_MARKET')]]
         rows = [entry] + [{**b, 'clientOrderID': b['clientOrderID'].lower(), 'orderId': str(i+2),
                            'status': 'CANCELLED', 'executedQty': '0'} for i, b in enumerate(controls)]
         batch = dict(method='POST', path='/openApi/swap/v2/trade/batchOrders', at=101,
-                     body={'batchOrders': __import__('json').dumps(controls)}, response={'code': 0, 'data': {'orders': rows[1:]}})
+                     body={'batchOrders': __import__('json').dumps(controls)}, response={'code': 0, 'data': {'orders': rows[1:2]}})
         calls = []; remembered = []
         api = SimpleNamespace(get=lambda *args: calls.append(args) or {'code': 0, 'data': {'orders': rows}})
         self.assertEqual(terminal_intents(api, [intent, batch], time.monotonic()+2, order_bodies,
@@ -40,6 +40,7 @@ class CleanupEvidence(unittest.TestCase):
 
     def test_wrong_id_symbol_side_type_or_unknown_status_stays_unresolved(self):
         body, row, intent = self.fixture()
+        intent['response']['data']['order'] = {**row, 'status': 'NEW'}
         for key, value in [('orderId','88'), ('symbol','OTHER-USDT'), ('positionSide','SHORT'),
                            ('side','SELL'), ('type','LIMIT'), ('status','NEW'), ('clientOrderID','foreign')]:
             with self.subTest(key=key):
@@ -49,8 +50,18 @@ class CleanupEvidence(unittest.TestCase):
             api=SimpleNamespace(get=lambda *a:reply)
             self.assertEqual(terminal_intents(api,[intent],time.monotonic()+2,order_bodies),[body['clientOrderID']])
 
+    def test_authoritative_fill_acknowledgment_needs_no_archive_read(self):
+        body, receipt, intent = self.fixture()
+        api = SimpleNamespace(get=lambda *args: self.fail('an exact terminal receipt requires no archive read'))
+        remembered = []
+        remaining = terminal_intents(api, [intent], time.monotonic() + 2, order_bodies,
+                                     lambda order, submission: remembered.append((order, submission)))
+        self.assertEqual(remaining, [])
+        self.assertEqual(remembered, [(receipt, body)])
+
     def test_expired_deadline_dispatches_no_history_reads(self):
         body, _, intent = self.fixture(); calls=[]
+        intent['response'] = {'code': -1, 'error': True}
         api=SimpleNamespace(get=lambda *a:calls.append(a))
         self.assertEqual(terminal_intents(api,[intent],time.monotonic()-1,order_bodies),[body['clientOrderID']])
         self.assertEqual(calls,[])

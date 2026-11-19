@@ -1,5 +1,6 @@
 """Bounded, read-only terminal evidence for exact journaled VST orders."""
 from concurrent.futures import ThreadPoolExecutor, wait
+from decimal import Decimal, InvalidOperation
 import time
 
 TERMINAL = {'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED'}
@@ -11,6 +12,21 @@ def definite_refusal(reply):
     leverage_limit = code == '101414' and 'maximum leverage' in str(reply.get('msg') or '').lower()
     return reply.get('cooled') is True or ((code in ('101400','109420') or no_position or leverage_limit)
         and not reply.get('error') and not reply.get('data'))
+
+
+def exact_ack_resolves(reply, row, body, allow_open_controls):
+    """A complete, exact venue acknowledgment already supplies order evidence."""
+    order_id = str(row.get('orderId') or '')
+    if (str(reply.get('code')) != '0' or reply.get('error') or not order_id.isdigit() or int(order_id) <= 0
+            or any(row.get(key) != body.get(key) for key in ('symbol', 'side', 'positionSide', 'type'))):
+        return False
+    try:
+        filled = Decimal(str(row.get('executedQty')))
+    except InvalidOperation:
+        return False
+    status = str(row.get('status') or '').upper()
+    open_control = allow_open_controls and body.get('type') != 'MARKET' and status in ('NEW', 'PENDING', 'TRIGGERED')
+    return filled.is_finite() and filled >= 0 and (status != 'FILLED' or filled > 0) and (status in TERMINAL or open_control)
 
 
 def resolve_bound_intents(api, intents, unresolved, deadline, order_bodies, bindings, remember=None, allow_open_controls=True):
@@ -72,6 +88,10 @@ def terminal_intents(api, intents, deadline, order_bodies, remember=None, allow_
             cid = body['clientOrderID']
             matches = [r for r in candidates if isinstance(r, dict) and
                        str(r.get('clientOrderID') or r.get('clientOrderId') or '').lower() == cid.lower()]
+            if len(matches) == 1 and exact_ack_resolves(ack, matches[0], body, allow_open_controls):
+                if remember is not None:
+                    remember(matches[0], body)
+                continue
             oid = str(matches[0].get('orderId') or matches[0].get('orderID') or '') if len(matches) == 1 else ''
             required.append((body, oid))
             starts[body['symbol']] = min(starts.get(body['symbol'], float('inf')), intent['at'])

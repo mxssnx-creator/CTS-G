@@ -362,7 +362,10 @@ class NativeSessionTests(unittest.TestCase):
                 oid=str(len(orders)+1);control=body['type']!='MARKET'
                 row={**body,'orderId':oid,'status':'NEW'if control else'FILLED',
                      'executedQty':'0'if control else body['quantity']}
-                orders[oid]=row;return {'code':0,'data':{'order':dict(row)}}
+                orders[oid]=row
+                if unknown_exit and body['clientOrderID']=='G1234close':
+                    return {'code':-1,'error':True}
+                return {'code':0,'data':{'order':dict(row)}}
             if method=='DELETE':
                 deletes.append(dict(body));orders[body['orderId']]['status']='CANCELED'
                 return {'code':0}
