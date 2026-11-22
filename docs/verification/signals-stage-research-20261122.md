@@ -76,8 +76,27 @@ includes open positions at the final mark, with modeled exit slippage and fees.
 | OBV, low | 51 / 0 | 0.533 / 0.533 | 27 / 5 | 5.154 / 2.762 |
 
 The high later closed-only OBV PF drops after the five open positions are
-marked, and its earlier period lost. The signed-window volume-momentum
-replay with the corrected Real context opened no positions in either period.
+marked, and its earlier period lost. The earlier signed-window volume-momentum
+replay with eight Real context closes opened no positions in either period.
+
+### Re-test after the Base/Main aggregate fix
+
+The same two 72+72 hour tapes were replayed again after adding the full
+long-plus-Last positive PF check. VWAP and SAR were run at two Real context
+lengths; the new source was run with two prior Real closes. The extra recent
+Real window remains independent and is required in addition to the context.
+
+| Source and Real context | First: closed / open | First closed PF | Later: closed / open | Later closed PF |
+| --- | ---: | ---: | ---: | ---: |
+| VWAP, 2 prior | 1 / 0 | no losses; not finite | 0 / 0 | unavailable |
+| SAR, 2 prior | 0 / 0 | unavailable | 0 / 0 | unavailable |
+| VWAP or SAR, 8 prior | 0 / 0 | unavailable | 0 / 0 | unavailable |
+| Volume momentum, 2 prior | 2 / 0 | 0.000 | 0 / 0 | unavailable |
+
+The one VWAP winner added 0.0490 model-book units; the two volume-momentum
+losses totaled -0.1221. Each source is a separate model book. A single winner
+or two losses is not enough to choose a production minimum. Neither the
+source nor the shorter Real context is promoted into the shipped defaults.
 
 An additional comparison used checksum-verified public BingX candles for the
 same three symbols: 17–19 November as prehistory and 19–21 November for trading.
@@ -123,11 +142,39 @@ impact. No arm achieved a PF above 1 in any of the three windows.
 Most exact Auto procedures did not reach their 15-observation minimum, so
 manual fallback predominated. No profitability claim or default change follows.
 
+## Bounded x02 observation
+
+A separate 30-symbol BingX VST session used the existing EMA and OBV Signal
+packs and the parent-return guard, with eight maximum open positions and a
+30-entry submission cap. The experimental volume-momentum pack and the later
+transport changes were not part of this session. It was stopped after 624
+seconds because an entry write received a non-JSON response, leaving its exact
+outcome unknown. The journal records 11 entry submissions. The engine recorded
+10 closes: three natural and seven requested during session cleanup.
+
+The three natural closes had recorded return PF 0.124 and net cash -0.0538
+VST. The seven cleanup closes are excluded from that natural PF. These figures
+come from native statistics; one natural close used an exchange-rate fee
+estimate, and a full independent venue fill audit is not complete. Ten active
+snapshots contained 50 position observations; each had verified controls and
+none was flagged undercovered. This cannot rule out events between snapshots.
+
+The final local position book was empty. The cleanup deadline expired with 26
+order intents lacking terminal evidence, so the session did not claim confirmed
+flat. A subsequent read showed zero open positions and zero open orders in the
+selected 30-symbol scope. The one uncertain submission was absent from exact-ID
+lookups and a later history read; absence is not a terminal receipt. Other
+symbols and other sessions were outside this cleanup scope. The observed active
+cycle work p95 was 499 ms, with a 7.65 s maximum; cycle spacing p95 was 634 ms.
+This short run did not meet the requested one-hour verification or demonstrate
+consistently high execution PF.
+
 ## Verification and interpretation
 
-The volume Signals archive was checked against an independent scalar replay on
-151 Base/Main paths across four roots; a second catalogue audit checked 360 paths
-across four roots. These checks cover the sampled data, not all possible paths.
+The corrected volume Signals archive was checked against an independent scalar
+replay on 340 Base/Main paths across four roots; a VWAP catalogue audit checked
+365 paths across four roots. These checks cover the sampled data, not all
+possible paths.
 The earlier signed 12-source experiments observed worst per-minute processing
 steps of 427 ms and 323 ms under concurrent load (largest per-source p95
 42.30/42.19 ms; worker peak RSS 70.6/68.0 MiB). This is not a live-loop
