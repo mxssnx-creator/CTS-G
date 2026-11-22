@@ -13,7 +13,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server/pulse"))
-from signal_sources import SOURCES, TIMEFRAMES, onsets, validate_bars  # noqa: E402
+from signal_sources import RESEARCH_SOURCES, TIMEFRAMES, onsets, validate_bars  # noqa: E402
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
     args = parser.parse_args()
     if (args.out.exists() or args.start < 0 or args.start % 60000 or args.end % 60000 or args.end <= args.start or
             not args.symbols or len(args.symbols) != len(set(args.symbols)) or
-            not args.sources or len(args.sources) != len(set(args.sources)) or any(s not in SOURCES for s in args.sources) or
+            not args.sources or len(args.sources) != len(set(args.sources)) or any(s not in RESEARCH_SOURCES for s in args.sources) or
             not args.timeframes or len(args.timeframes) != len(set(args.timeframes)) or any(t not in TIMEFRAMES for t in args.timeframes)):
         parser.error("invalid window, duplicate or unsupported identity, or output already exists")
     payload = args.feed.read_bytes()

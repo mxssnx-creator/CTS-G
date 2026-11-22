@@ -11,7 +11,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server" / "pulse"))
 import signal_replay as model
-from signal_sources import SOURCES, completed_bars, onsets, states, validate_bars, warmup_bars
+from signal_sources import RESEARCH_SOURCES, completed_bars, onsets, states, validate_bars, warmup_bars
 from signal_scalar_oracle import normal_stages
 
 T0 = 1791460800000
@@ -74,7 +74,7 @@ class SignalContracts(unittest.TestCase):
         rng = random.Random(884)
         closes = [100 + 4 * math.sin(i / 9) + rng.random() for i in range(500)]
         highs, lows = [x+1 for x in closes], [x-1 for x in closes]
-        for source in SOURCES:
+        for source in RESEARCH_SOURCES:
             for range_name in ("short", "medium"):
                 volumes = [1+i%7 for i in range(len(closes))]
                 full = states(closes, source, range_name, highs, lows, volumes)

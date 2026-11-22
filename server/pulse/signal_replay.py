@@ -15,7 +15,7 @@ import itertools
 import json
 import math
 
-from signal_sources import SOURCES, RANGES, TIMEFRAMES, onsets, validate_bars, completed_bars, warmup_bars
+from signal_sources import RESEARCH_SOURCES, RANGES, TIMEFRAMES, onsets, validate_bars, completed_bars, warmup_bars
 from position_cost import sl_floor_frac
 
 MINUTE = 60000
@@ -51,7 +51,7 @@ def validate_config(raw):
     if type(minimum) not in (int, float) or not math.isfinite(minimum) or not .1 <= minimum <= 1:
         raise ValueError("minSlDistancePct must be 0.1–1.0 percent of price")
     cfg["minSlDistancePct"] = minimum
-    for key, supported in (("sources", SOURCES), ("ranges", RANGES), ("timeframes", TIMEFRAMES)):
+    for key, supported in (("sources", RESEARCH_SOURCES), ("ranges", RANGES), ("timeframes", TIMEFRAMES)):
         if not cfg[key] or len(set(cfg[key])) != len(cfg[key]) or any(x not in supported for x in cfg[key]):
             raise ValueError(f"unsupported or repeated {key}")
     for key in ("normalEnabled", "trailingEnabled"):

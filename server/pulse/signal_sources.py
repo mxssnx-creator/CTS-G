@@ -10,14 +10,17 @@ import math
 from collections import deque
 
 SOURCES = ("ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian",
-           "bb-bounce", "cci-reversal", "obv-trend", "volume-momentum")
+           "bb-bounce", "cci-reversal", "obv-trend")
+# This separate catalogue is consumed only by offline experiments. In
+# particular, signal_packs imports SOURCES for ordinary Pulse live entry.
+RESEARCH_SOURCES = (*SOURCES, "volume-momentum")
 RANGES = ("short", "medium")
 TIMEFRAMES = (1, 5, 15, 30)
 
 
 def warmup_bars(source, range_name):
     """Minimum completed TF bars for the first possible nonzero source state."""
-    if source not in SOURCES or range_name not in RANGES:
+    if source not in RESEARCH_SOURCES or range_name not in RANGES:
         raise ValueError("unsupported Signal source/range")
     return {"ema-cross": (21, 55), "ema-trend": (26, 50),
             "macd-cross": (26, 35), "rsi-reversal": (8, 15),
@@ -99,7 +102,7 @@ def held(events, keep=6):
 
 
 def states(closes, source, range_name, highs=None, lows=None, volumes=None):
-    if source not in SOURCES or range_name not in RANGES:
+    if source not in RESEARCH_SOURCES or range_name not in RANGES:
         raise ValueError("unsupported Signal source/range")
     if source == "volume-momentum":
         # Exploratory within-asset momentum: volume-weighted completed-bar

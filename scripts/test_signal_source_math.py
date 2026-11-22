@@ -10,6 +10,14 @@ from signal_sources import states
 
 
 class SourceMath(unittest.TestCase):
+    def test_experimental_source_cannot_enter_live_signal_packs(self):
+        from signal_packs import parse,expand
+        self.assertIsNone(parse('sig-volume-momentum-short-t1'))
+        result=expand([{'sources':['volume-momentum'],'ranges':['short'],'timeframes':[1]}],
+                      2,20,lambda x:x,[1])
+        self.assertEqual(result['packs'],[])
+        self.assertEqual(result['dropped'][0]['reason'],'unknown source, range or timeframe')
+
     def test_volume_momentum_matches_independent_rolling_calculation(self):
         values=[100+4*math.sin(i/11)+math.sin(i/3) for i in range(700)]
         volume=[1+(i*7)%13 for i in range(len(values))]
