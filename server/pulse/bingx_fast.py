@@ -418,7 +418,7 @@ class FastBingX:
             for k, v in extra.items():
                 if v is None:
                     continue
-                if method == "GET" and path.endswith("/trade/order") and k == "clientOrderID":
+                if method == "GET" and path.endswith("/trade/order") and k in ("clientOrderID", "clientOrderId"):
                     k = "clientOrderId"  # lookup uses the canonical lower-camel spelling
                     v = str(v).lower()
                 params[k] = v if isinstance(v, str) else str(v)
@@ -458,7 +458,13 @@ class FastBingX:
             if prepared is not None and prepared.url.raw_path == expected:
                 try:
                     response = client.send(prepared)
-                    return loads(response.content)
+                    try:
+                        return loads(response.content)
+                    except Exception as exc:
+                        # The HTTP status helps diagnose a gateway or venue
+                        # failure without logging the signed URL or response
+                        # body. A malformed write response is still unknown.
+                        return {"code": -1, "msg": f"{type(exc).__name__} (HTTP {response.status_code})", "error": True}
                 except Exception as exc:
                     # A write may have reached the venue. Return its unknown
                     # outcome for exact-ID reconciliation; never resend it on
