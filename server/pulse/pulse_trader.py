@@ -7149,12 +7149,13 @@ class Pulse:
                 live_lev = int(float(p.get("leverage") or 0))
             except Exception:
                 live_lev = 0
-            tagged = []
-            try:
-                tagged = [o for o in self.our_orders(sym) if str(o.get("positionSide") or "").upper() in (side, "")]
-            except Exception:
-                tagged = []
             owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
+            tagged = []
+            if not owned or not ours.set_id:
+                try:
+                    tagged = [o for o in self.our_orders(sym) if str(o.get("positionSide") or "").upper() in (side, "")]
+                except Exception:
+                    tagged = []
             if not owned and any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
                                  for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
                 probe = Position(sym, side, qty, px, time.time(), px, px, px)

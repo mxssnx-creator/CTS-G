@@ -33,18 +33,23 @@ def plain(grid, rows, now, lookback, floor):
         short = seen[-w.short - w.last:-w.last]
         last = seen[-w.last:]
 
-        def positive(block):
+        def meets_floor(block, negative=False):
             gain = math.fsum(x for x in block if x > 0)
             loss = math.fsum(-x for x in block if x < 0)
+            if negative:
+                gain, loss = loss, gain
             threshold = floor(decision) if callable(floor) else floor
             return gain > 0 and gain >= threshold * loss
 
-        if long and not positive(long):
+        if long and not meets_floor(long):
             return True, None
-        if not (positive(short) if w.short_mode == "positive" else math.fsum(short) < -1e-12):
+        negative_short = w.short_mode == "negative"
+        if not meets_floor(short, negative_short) or (negative_short and math.fsum(short) >= -1e-12):
             return True, None
         net = math.fsum(last)
-        if not (net > 1e-12 if w.last_mode == "positive" else net < -1e-12):
+        negative_last = w.last_mode == "negative"
+        if (not meets_floor(last, negative_last) or
+                not (net < -1e-12 if negative_last else net > 1e-12)):
             return True, None
         values = long + short + last
         return True, (len(values), math.fsum(x for x in values if x > 0), math.fsum(-x for x in values if x < 0))
@@ -324,16 +329,17 @@ class StageGridTest(unittest.TestCase):
             expected = {p: se._variant_signal(bars[:index + 1], [p.removeprefix("extra.")]) for p in packs}
             self.assertEqual(se.bar_signal(bars, index, packs, {}, 60.0 * (index + 1)), expected)
 
-    def test_exec_short_thirty_reads_only_its_real_parent(self):
+    def test_real_and_exec_short_thirty_read_their_own_parents(self):
         base = {"long": [10], "short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
         child = {"short": [4], "last": [1], "longModes": ["none"],
                  "shortModes": ["positive"], "lastModes": ["positive"]}
-        grid = sg.StageGrid.from_settings({"base": base, "main": child, "real": child,
+        grid = sg.StageGrid.from_settings({"base": base, "main": child, "real": {**child, "short": [30]},
                                            "exec": {**child, "short": [28, 30]}})
         rows = [(60.0 * t, 60.0 * t - 1, .005) for t in range(95)]
         actual = sg.StageHistory(grid, *zip(*rows), 2400, lambda _: 1.1).evaluate(95 * 60, streams=True)
         counts, expected = plain(grid, rows, 95 * 60, 2400, 1.1)
         self.assertTrue(actual.ready)
+        self.assertEqual(actual.path[-2].short, 30)
         self.assertEqual(actual.path[-1].short, 30)
         self.assertEqual(actual.counts[-1].qualified, counts[-1][2])
         self.assertEqual(actual.streams[-1], expected[actual.path])
@@ -374,14 +380,14 @@ class StageGridTest(unittest.TestCase):
 
     def test_default_paths_and_signed_windows(self):
         grid = sg.StageGrid.from_settings({})
-        self.assertEqual(grid.capacities(), (350, 49000, 6860000, 1509200000))
+        self.assertEqual(grid.capacities(), (350, 49000, 10780000, 2371600000))
         for depth in range(4):
             choices = grid.windows(depth, 30)
             self.assertEqual({(w.last, w.last_mode) for w in choices},
                              {(size, sign) for size in (1, 2, 3, 4, 5) for sign in ("positive", "negative")})
             self.assertEqual({w.short for w in choices if w.short_mode == "negative"}, {4, 8, 12})
             self.assertEqual({w.short for w in choices if w.short_mode == "positive"},
-                             set(sg.EXEC_SHORT if depth == 3 else sg.SHORT))
+                             set(sg.LATE_SHORT if depth >= 2 else sg.SHORT))
             if depth:
                 self.assertEqual({w.long for w in choices}, {0, 30})
         grid_setting = grid.settings()
@@ -391,8 +397,69 @@ class StageGridTest(unittest.TestCase):
         extended = sg.StageGrid.from_settings({"exec": {"short": [12, 20, 24, 28, 30]}})
         self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "negative"}, {12})
         self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "positive"}, {12, 20, 24, 28, 30})
+        self.assertEqual(sg.StageGrid.from_settings({"real": {"short": [30]}}).options[2].shorts, (30,))
         with self.assertRaises(ValueError):
-            sg.StageGrid.from_settings({"real": {"short": [30]}})
+            sg.StageGrid.from_settings({"main": {"short": [30]}})
+
+    def test_auto_floor_is_local_to_parent_window_sign_and_training_prefix(self):
+        rng = random.Random(730)
+        rows = [(i * 300.0, i * 300.0 - 10, rng.choice((.022, .019, -.010, -.041, .015, -.005)))
+                for i in range(128)]
+        policy = sg.WindowAuto(1.12, 12, (1.1, 1.25, 1.5, 2.0, 3.0), .01, 0.0)
+        at = 11 * 3600
+        lookback = 3600 * 4
+        grid = sg.StageGrid.from_settings({})
+        sg_auto = sg.StageHistory(grid, *zip(*rows), lookback, lambda _: 1.12, window_auto=policy)
+        observed_fits = []
+        original = auto_set_pf.fit
+        def record(pairs, *args):
+            observed_fits.append(tuple(pairs))
+            return original(pairs, *args)
+        def reference(ids, n, offset, kind):
+            pairs = []
+            for i in ids:
+                close, entry, net = rows[i]
+                if close >= at:
+                    break
+                visible = [rows[j][2] for j in ids if entry - lookback <= rows[j][0] < entry]
+                if len(visible) < n + offset:
+                    continue
+                block = visible[len(visible)-offset-n:len(visible)-offset]
+                gain = math.fsum(max(0.0, v) for v in block)
+                loss = math.fsum(max(0.0, -v) for v in block)
+                numerator, denominator = (loss, gain) if kind == "negative" else (gain, loss)
+                if numerator > 0 and (kind not in sg.SIGN_MODES or numerator > denominator + sg.NEG_EPS):
+                    pairs.append((numerator/denominator if denominator else math.inf, net))
+            return pairs
+        probe = []
+        with patch.object(auto_set_pf, "fit", side_effect=record):
+            for ids in (range(len(rows)), tuple(i for i in range(len(rows)) if i % 3 != 1)):
+                tape = sg._Tape(sg_auto, ids)
+                for n, offset, kind in ((4, 2, "pf"), (4, 3, "pf"), (5, 0, "positive"), (5, 0, "negative")):
+                    actual = tape.floor(n, offset, kind, at + 30)
+                    expected = reference(ids, n, offset, kind)
+                    self.assertEqual(len(observed_fits[-1]), len(expected))
+                    for (x, nx), (y, ny) in zip(observed_fits[-1], expected):
+                        self.assertEqual(nx, ny)
+                        self.assertAlmostEqual(x, y, places=10)
+                    probe.append(actual)
+                self.assertEqual(tape.floor(1, 0, "positive", at), 1.12)
+                self.assertEqual(tape.floor(1, 0, "negative", at), 1.12)
+        self.assertEqual(len(observed_fits), 8)
+        self.assertGreater(len(set(observed_fits)), 4)
+        future = [v if c < at else 900.0 for c, _, v in rows]
+        unaffected = sg.StageHistory(grid, sg_auto.closes, sg_auto.entries, future, lookback,
+                                     lambda _: 1.12, window_auto=policy)
+        self.assertEqual(unaffected.root.floor(4, 2, "pf", at + 30), probe[0])
+        self.assertEqual(sg._Tape(sg_auto, tuple(range(10))).floor(4, 2, "pf", at), 1.12)
+
+    def test_positive_and_negative_last_require_configured_pf(self):
+        grid = sg.StageGrid.from_settings({})
+        for kind, sign in (("positive", 1), ("negative", -1)):
+            for floor, allowed in ((1.2, True), (1.4, False)):
+                owner = sg.StageHistory(grid, (1, 2), (.5, 1.5), (.01 * sign, -.008 * sign),
+                                        100, lambda n: floor)
+                self.assertEqual(owner.root.test(2, 2, kind, 3) is not None, allowed)
 
     def test_each_parent_and_sign_matches_plain_walk(self):
         downstream = {"short": [4], "last": [1], "longModes": ["none", "inherit"]}

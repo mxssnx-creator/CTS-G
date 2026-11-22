@@ -4,15 +4,22 @@
 orders of each parent Set. A derived Set contains only its parent's orders
 that qualified at entry time. An order needs a complete window and can use
 only settlements strictly earlier than its decision. The configured
-positive and negative Short and Last windows are evaluated independently,
-including Exec Short windows through 30. Live takes the selected Exec path.
+positive and negative Short and Last windows are evaluated independently.
+Real and Exec include positive Short windows through 30. Live takes the
+selected Exec path.
 
 The live book and the replay use configuration order as the final rank key
 when profit-factor evidence ties. The replay applies the live rules for
 enabled Set types and uses the Exec kind order even if a saved legacy
 setting prefers the Negative lane. A Set with insufficient samples remains
 ineligible. Per-Set Auto PF refits when a late symbol supplies an earlier
-training close. The hourly boundary excludes the close at that exact hour.
+training close. Each Last-N block learns from its own parent Set, sample
+count, block offset and sign. With the default sample bounds a fit reads up to
+the latest 256 candidate outcomes in the prior 48 hours and requires support
+in both chronological halves. A window with too few outcomes for training
+uses its fallback threshold. Positive blocks compare gain to loss. Negative
+blocks compare loss to gain and retain their own evaluations. The hourly
+boundary excludes the close at that exact hour.
 
 A completed live position rests its own symbol and direction. The observed
 net return determines whether the winning-trade pause applies. The engine

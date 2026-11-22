@@ -250,7 +250,9 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                               const evidence = blocks[k];
                               if (!evidence) return [];
                               const pf = evidence.pf?.toFixed(2) ?? (evidence.gain > 0 && evidence.loss === 0 ? "no losses" : "—");
-                              return [`${k} PF ${pf}`];
+                              const floor = grid?.selectedFloors?.[name]?.[k];
+                              const negative = k === "short" ? w.shortMode === "negative" : k === "last" && w.lastMode === "negative";
+                              return [`${k} PF ${pf}${floor == null ? "" : negative ? ` (loss/gain ≥ ${floor.toFixed(2)})` : ` (≥ ${floor.toFixed(2)})`}`];
                             }).join(" · ")}
                           </div>}
                           {post && <div className="text-muted">

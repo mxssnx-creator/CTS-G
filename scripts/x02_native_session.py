@@ -673,8 +673,8 @@ def main(argv=None):
     ap.add_argument('--allow-foreign-symbols',action='store_true',
                     help='allow other positions/orders outside a deliberately disjoint selected universe')
     args = ap.parse_args(argv)
-    if not 0 < args.minutes <= 30 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
-        ap.error("observation<=30min, warmup<=60min and cleanup<=600s must be positive")
+    if not 0 < args.minutes <= 60 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
+        ap.error("observation<=60min, warmup<=60min and cleanup<=600s must be positive")
     if not 15 <= args.heartbeat_seconds <= 300:
         ap.error('heartbeat must be between15 and300 seconds')
     if args.max_entry_orders is not None and args.max_entry_orders < 1:
@@ -759,6 +759,8 @@ def main(argv=None):
     watchdog_stop = threading.Event()
     watchdog_reason = [None]
     next_capture = [0.0]
+    active_cycle_ms, active_gap_ms = [], []
+    last_active_start = [None]
     def cycle():
         now = time.monotonic()
         reason = end_reason(journal.phase, now, warming_since + args.warmup_minutes*60,
@@ -766,8 +768,10 @@ def main(argv=None):
                             (args.out / 'STOP_SESSION').exists())
         if reason:
             raise SessionEnd(reason)
-        if pulse.ignored_foreign and not args.allow_foreign_symbols:
-            raise SessionEnd('foreign account position detected during session')
+        if pulse.ignored_foreign:
+            foreign_symbols = {slot.split(":", 1)[0] for slot in getattr(pulse, "foreign_slots", ())}
+            if not args.allow_foreign_symbols or foreign_symbols.intersection(symbols):
+                raise SessionEnd('foreign position detected in the session scope')
         if journal.phase == "warming":
             if (native_admission_ready(pulse) if args.admission=='native' else ready(pulse, symbols, required_history, time.time())):
                 if args.max_active is not None and pt.MAX_OPEN != args.max_active:
@@ -784,8 +788,15 @@ def main(argv=None):
                 save()
             elif now - warming_since >= args.warmup_minutes * 60:
                 raise SessionEnd("readiness deadline")
+        started = time.monotonic()
+        if journal.phase == "active":
+            if last_active_start[0] is not None:
+                active_gap_ms.append((started - last_active_start[0]) * 1000)
+            last_active_start[0] = started
         original_cycle()
         finished = time.monotonic()
+        if journal.phase == "active":
+            active_cycle_ms.append((finished - started) * 1000)
         # Also check synchronously: a long GIL-holding operation may delay the
         # watcher thread. It must not erase its own stale heartbeat on return.
         reason = end_reason(journal.phase, finished, warming_since + args.warmup_minutes*60,
@@ -863,6 +874,13 @@ def main(argv=None):
         report["activeEndedAt"] = time.time()
         report["entryOrdersDispatched"] = journal.entry_orders
         report['watchdogReason'] = watchdog_reason[0]
+        report["activeLatencyMs"] = {
+            key: {"samples": len(values), **{
+                label: round(values[math.ceil(len(values) * fraction) - 1], 3)
+                for label, fraction in (("p50", .50), ("p95", .95), ("max", 1.0)) if values
+            }}
+            for key, values in (("work", sorted(active_cycle_ms)), ("cycleSpacing", sorted(active_gap_ms)))
+        }
         pulse._hist_stop = pulse._warm_stop = True
         Path(pt.STOP_PATH).touch()
         try:

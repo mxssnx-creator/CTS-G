@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import type { LiveStats } from "@/lib/live-stats";
 import {
-  type StageGridConfig, type StageName, LONG_COUNTS, SHORT_COUNTS, EXEC_SHORT_COUNTS, LAST_COUNTS,
+  type StageGridConfig, type StageName, LONG_COUNTS, SHORT_COUNTS, LATE_SHORT_COUNTS, LAST_COUNTS,
   SIGN_MODES, LONG_MODES, STAGE_ORDER, STAGE_LABEL, stageGridOf, postStageEvidence,
 } from "@/lib/stage-grid";
 
@@ -63,7 +63,7 @@ export function StageGridSettings({ value, onChange }: {
                   {stage === "base"
                     ? <Choices<number> label="Long" choices={LONG_COUNTS} values={value.base.long} onChange={(long) => changeStage(stage, { long })} />
                     : <Choices label="Long" choices={LONG_MODES} values={value[stage].longModes} onChange={(longModes) => changeStage(stage, { longModes })} display={(mode) => mode === "inherit" ? "Inherit Base Long" : "Without Long"} />}
-                  <Choices<number> label="Short" choices={stage === "exec" ? EXEC_SHORT_COUNTS : SHORT_COUNTS} values={options.short} onChange={(short) => changeStage(stage, { short })} />
+                  <Choices<number> label="Short" choices={stage === "real" || stage === "exec" ? LATE_SHORT_COUNTS : SHORT_COUNTS} values={options.short} onChange={(short) => changeStage(stage, { short })} />
                   <Choices label="Short sign" choices={options.short.some((n) => n <= 12) ? SIGN_MODES : ["positive"] as const} values={options.shortModes} onChange={(shortModes) => changeStage(stage, { shortModes })} display={signLabel} />
                   <Choices<number> label="Last" choices={LAST_COUNTS} values={options.last} onChange={(last) => changeStage(stage, { last })} />
                   <Choices label="Last sign" choices={SIGN_MODES} values={options.lastModes} onChange={(lastModes) => changeStage(stage, { lastModes })} display={signLabel} />

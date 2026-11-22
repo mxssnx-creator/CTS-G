@@ -4769,9 +4769,11 @@ class SetBook:
                                      params.max_dd_s, params.consistency)
         main_filter = (lambda values: negative_filter_ok(values, params.negative_filter)) if params.negative_filter else None
         need = max(params.negative_filter["windows"]) if params.negative_filter else 0
-        model = self._grid_auto_models.get(st.id) if self.grid_auto_enabled() else None
+        auto = (stage_grid.WindowAuto(self.grid_auto_fallback(st)[0], self.pf_set_auto_min,
+                                     tuple(self.step_auto_candidates()), self.pf_step_auto_tol, self.pf_auto_factor)
+                if self.grid_auto_enabled() else None)
         return stage_grid.StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
-                                       params.floor_for, risk, main_filter, need, model.at if model else None)
+                                       params.floor_for, risk, main_filter, need, window_auto=auto)
 
     def exec_lane_id(self, st: SetState) -> str:
         result = st.exec_grid
