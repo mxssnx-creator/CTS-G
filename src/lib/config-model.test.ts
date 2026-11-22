@@ -25,7 +25,9 @@ test("experimental Signal source is saved only when explicitly selected", () => 
   assert.equal(DEFAULT_OVERLAY.signalConfigs.some((entry) => entry.sources.includes("volume-momentum")), false);
   const [entry] = signalConfigList([{ sources: ["volume-momentum"], ranges: ["short"], timeframes: [1] }]);
   assert.deepEqual(entry.sources, ["volume-momentum"]);
-  assert.deepEqual(overlayFromCts(cts(), { signalConfigs: [entry] }).signalConfigs[0].sources, ["volume-momentum"]);
+  const loaded = overlayFromCts(cts(), { signalConfigs: [entry] });
+  assert.deepEqual(loaded.signalConfigs[0].sources, ["volume-momentum"]);
+  assert.deepEqual(overlayFromCts(cts(), syncOverlayFlags(loaded)).signalConfigs[0].sources, ["volume-momentum"]);
 });
 
 test("global and per-range Last-N retain the lowest requested windows", () => {
