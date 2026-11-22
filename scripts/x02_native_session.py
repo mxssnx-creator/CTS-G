@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 ROOT = Path(__file__).resolve().parents[1]
 HOST = "https://open-api-vst.bingx.com"
 CONN = "bingx-x02"
+MAX_SESSION_SYMBOLS = 200
 TERMINAL = {"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 
 
@@ -43,22 +44,28 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
-def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50):
-    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= 50 or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
+def frozen_overlay(raw, symbols, history_hours=None, symbol_count=50):
+    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= MAX_SESSION_SYMBOLS or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
         not isinstance(s, str) or not s.endswith("-USDT") or not s.replace("-", "").isalnum() for s in symbols
     ):
         raise ValueError(f"exactly {symbol_count} distinct explicit USDT symbols required")
+    full_grid = isinstance(raw.get("stageLastN"), dict) and raw["stageLastN"].get("enabled", True)
+    if history_hours is None:
+        history_hours = 11 if full_grid else 12
     if not 1 <= history_hours <= 72:
         raise ValueError("history hours must be between 1 and 72")
     ov = json.loads(json.dumps(raw))
     ranges = {"micro": True, "minimal": True, "short": True, "normal": False, "long": False, "wide": False}
-    ov.update(symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=symbol_count,
+    geometry = {} if full_grid else dict(setMinStep=2, setStepMax=7, shortRangeStepMin=2, shortRangeStepMax=7,
+                                        tpRanges=ranges, trailRanges=ranges)
+    ov.update(**geometry, symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=symbol_count,
               volumeFactor=.05, sizePctOfBalance=0, targetNotional=2.15, sizeMaxNotional=25,
-              maxOpen=symbol_count, setMinStep=2, setStepMax=7, setStepAdapt=False,
-              shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges,
+              maxOpen=symbol_count, setStepAdapt=False,
               minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
               indExtraSources=False, ownedQuantityControls=True)
+    if full_grid:
+        ov.update(scanS=.25, maxOpen=2 * symbol_count)
     for name, default in (('microMinSlDistancePct', .1), ('microMinTrailDistancePct', .05)):
         value = ov.setdefault(name, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 10:
@@ -303,6 +310,12 @@ def save_fee_cache(path, credentials, rates):
     if path:atomic_json(path,dict(accountIdentity=fee_cache_identity(credentials),rates=rates))
 
 
+def valid_history_bar(bar):
+    return (len(bar) == 5 and all(isinstance(v, (int, float)) and math.isfinite(v) for v in bar)
+            and min(bar[:4]) > 0 and bar[4] >= 0 and bar[1] >= max(bar[0], bar[3], bar[2])
+            and bar[2] <= min(bar[0], bar[3]))
+
+
 def seed_history(book, path, symbols, now):
     """Resume raw VST candles only; never reuse qualification scores or trades."""
     if not path:return 0
@@ -318,10 +331,8 @@ def seed_history(book, path, symbols, now):
         if not bars or last is None:continue
         if (len(bars)>4320 or not isinstance(last,(int,float)) or not math.isfinite(last)
                 or last+60>data['capturedAt']+1):raise ValueError('invalid captured history clock')
-        for bar in bars:
-            if (len(bar)!=5 or any(not isinstance(v,(int,float)) or not math.isfinite(v) for v in bar)
-                    or min(bar[:4])<=0 or bar[4]<0 or bar[1]<max(bar[0],bar[3],bar[2])
-                    or bar[2]>min(bar[0],bar[3])):raise ValueError('invalid captured OHLCV')
+        if not all(map(valid_history_bar, bars)):
+            raise ValueError('invalid captured OHLCV')
         book.ingest_bars(symbol,bars,last_t=last)
         loaded+=1
     return loaded
@@ -625,7 +636,7 @@ def main(argv=None):
     ap.add_argument("--warmup-minutes", type=float, default=30)
     ap.add_argument("--cleanup-seconds", type=float, default=180)
     ap.add_argument("--heartbeat-seconds", type=float, default=60)
-    ap.add_argument("--history-hours", type=int, default=12,
+    ap.add_argument("--history-hours", type=int,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
     ap.add_argument("--execute", action="store_true")
     ap.add_argument('--admission',choices=('native','full-universe'),default='native')
@@ -655,7 +666,6 @@ def main(argv=None):
                               "external Binance/Bybit indication sources disabled; BingX VST data only",
                               "cleanup closes are reported separately from natural strategy closes",
                               "leverage and margin settings remain unchanged; margin estimates use 1x",
-                              "native shared one-position-per-symbol constraint remains active",
                               "minimum venue lots may exceed nominal volume-factor sizing"],
               "sourceSha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in (Path(__file__), ROOT / "server/pulse/pulse_trader.py", ROOT / "server/pulse/set_engine.py")}}

@@ -1,3 +1,4 @@
+import { STAGE_LABEL, STAGE_ORDER } from "@/lib/stage-grid";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Legend, ReferenceLine, Tooltip, XAxis, YAxis } from "recharts";
 import { ClientChart } from "@/components/visual-stats";
@@ -231,7 +232,17 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                   <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} / ${r.realWindowN ?? "—"} · ${formatPfWithCount(r.realPf, r.realWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} / ${r.realNegWindowN ?? "—"} · ${formatPfWithCount(r.realNegPf, r.realNegWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.mainShortN ?? "—"}`}</td>
-                  <td className="py-1.5">{r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
+                  <td className="py-1.5">{r.execId ? (
+                    <details>
+                      <summary className="cursor-pointer text-primary">Exec</summary>
+                      {STAGE_ORDER.map((name) => {
+                        const w = r.stageGrid?.windows[name];
+                        return w ? <div key={name} title={r.stageGrid?.parentIds[name]} className="whitespace-nowrap">
+                          {STAGE_LABEL[name]} {w.long || "—"} / {w.short}{w.shortMode === "negative" ? "−" : "+"} / {w.last}{w.lastMode === "negative" ? "−" : "+"}
+                        </div> : null;
+                      })}
+                    </details>
+                  ) : r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
                 </tr>
               ))
             )}

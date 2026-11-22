@@ -1,3 +1,4 @@
+import type { StageGridReport } from "./stage-grid.ts";
 import type { SetIndexRow } from "./sets-view.ts";
 export type LiveOpen = {
   symbol: string;
@@ -31,6 +32,8 @@ export type LiveOpen = {
   slPct?: number;
   tpPct?: number;
   setId?: string;
+  execLaneId?: string;
+  filledOrders?: number;
   pack?: string;
   clientId?: string;
   ours?: boolean;
@@ -226,7 +229,7 @@ export type Execution = {
     invalid: number;
     reasons: Record<string, number>;
     /** Sets at each stage now: passed Base, passed Main, in a Main dip, valid on Real, valid on Real Negative. */
-    stages?: { base: number; main: number; negative: number; real: number; realNeg: number };
+    stages?: { base: number; main: number; negative: number; real: number; realNeg: number; exec?: number };
   };
   /** Positions and closes per lane: Real (positive) and Real Negative. */
   lanes?: { openPos: number; openNeg: number; closedPos: number; closedNeg: number; winsPos: number; lossesPos: number; winsNeg: number; lossesNeg: number };
@@ -238,6 +241,13 @@ export type Execution = {
   lift?: ExecutionLift;
   /** The replay's result next to the exchange's result of the same settled Set closes (server: sim_diff.diff_report). */
   simDiff?: SimDiff;
+  exec?: Partial<NonNullable<OverallScope["executed"]>> & {
+    activePositions: number;
+    activeFilledOrders: number;
+    activeControlOrders?: number;
+    closedFilledOrders: number;
+    unverifiedPositions?: number;
+  };
   /** Profit group gate: settings and per group (pack x type x range x lane x side) the newest executed results it judges. */
   groups?: { enabled: boolean; n: number; pf: number; hours: number; min: number; scopes: Record<string, { orders: number; pf: number | null; allow: boolean }> };
   /** Entries never sent: thin venue book, or a Real scope blocked. */
@@ -311,6 +321,7 @@ export type LiveStats = {
   costModel?: CostModel;
   /** Sets and orders after every validation gate, as executed (open positions stay handled until closed). */
   execution?: Execution;
+  execStage?: Execution["exec"];
   running: boolean;
   mode: string;
   connection: string;
@@ -546,6 +557,7 @@ export type LiveStats = {
   connType?: string;
   paused?: boolean;
   volumeFactor?: number;
+  sizingVolumeFactor?: number;
   /** The three exchange slots the desk lists; none is connected yet. */
   slots?: Array<{ type: string; label: string; ready: boolean }>;
   lanes?: Array<{
@@ -707,6 +719,7 @@ export type LiveStats = {
   sets?: {
     normalEntriesEnabled?: boolean;
     lastNMode?: string;
+    stageGrid?: StageGridReport | null;
     independentLastNLanes?: boolean;
     stageContextBars?: number;
     stageContextFullSymbols?: number;
@@ -750,7 +763,7 @@ export type LiveStats = {
     signalConfigs?: { enabled?: boolean; packs?: number; entries?: Array<{ label: string; packs: number; stepMin: number; stepMax: number; ratios: number; types: string[] }>;
       dropped?: Array<{ entry: string; name: string; reason: string }> };
     /** The Auto floor per config Set (minPfStepAutoScope "set"): Sets with their own learned floor, Sets on the defaults. */
-    setFloors?: { scope?: string; learned?: number; defaults?: number; minAdmitted?: number };
+    setFloors?: { scope?: string; learned?: number; defaults?: number; minAdmitted?: number; trainingHours?: number | null };
     /** Auto SL range per TP step (slAutoRange): the learned min / max SL ratio per step and side, the orders behind it and the PF in the range against all. */
     slRanges?: { auto?: boolean; minOrders?: number; tolPct?: number;
       steps?: Array<{ step: number; side: number; tpPct: number; ratios: number[]; lo: number | null; hi: number | null; orders: number; pfIn: number | null; pfAll: number | null; source: string }> };

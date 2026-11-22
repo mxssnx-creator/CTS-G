@@ -111,6 +111,7 @@ DETAIL_KEYS = (
     "tpPct",
     "targetNotional",
     "volumeFactor",
+    "sizingVolumeFactor",
     "cts",
     "pfCost",
     "profitFactor",
@@ -534,6 +535,41 @@ def _pick_detail(lane_defs: list) -> tuple:
     return lane_defs[0], {}
 
 
+def merge_exec_stats(stats):
+    """Add each connection's fills and returns without mixing cash units."""
+    rows = [(st.get("execution") or {}).get("exec") for st in stats]
+    rows = [row for row in rows if row]
+    if not rows:
+        return None
+    totals = {key: sum(int(row.get(key) or 0) for row in rows) for key in (
+        "orders", "wins", "returnOrders", "unverifiedPositions", "activePositions",
+        "activeFilledOrders", "activeControlOrders", "closedFilledOrders",
+    )}
+    complete = all(not row.get("returnOrders") or ("returnGain" in row and "returnLoss" in row) for row in rows)
+    gain = sum(row.get("returnGain", 0.0) for row in rows)
+    loss = sum(row.get("returnLoss", 0.0) for row in rows)
+    return {**totals, "basis": "net-position-return",
+            "pf": round(gain / loss, 4) if complete and loss > 0 else None,
+            "noLoss": complete and gain > 0 and loss == 0}
+
+
+def merge_stage_grids(stats):
+    grids = [(st.get("sets") or {}).get("stageGrid") for st in stats]
+    grids = [grid for grid in grids if grid]
+    if not grids:
+        return None
+    combined = {}
+    for stage in ("base", "main", "real", "exec"):
+        rows = [grid.get("stages", {}).get(stage, {}) for grid in grids]
+        result = {key: sum(row.get(key, 0) for row in rows) for key in (
+            "configured", "evaluated", "sampleFull", "qualified", "negativeShort", "negativeLast", "orders", "gain", "loss",
+        )}
+        result["samplePct"] = round(100 * result["sampleFull"] / result["evaluated"], 2) if result["evaluated"] else 0
+        result["pf"] = round(result["gain"] / result["loss"], 4) if result["loss"] > 0 else None
+        combined[stage] = result
+    return {"baseSets": sum(grid.get("baseSets", 0) for grid in grids), "stages": combined}
+
+
 def merge_overall() -> dict:
     lanes = [lane_summary(l) for l in LANES]
     opens = []
@@ -578,6 +614,8 @@ def merge_overall() -> dict:
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     sets = dict(detail_st.get("sets") or {})
     sets["lanes"] = sets_lanes
+    if grid := merge_stage_grids(stats_by_id.values()):
+        sets["stageGrid"] = grid
     out = {
         "running": running_any,
         "mode": "OVERALL",
@@ -625,6 +663,8 @@ def merge_overall() -> dict:
         "detailType": detail_lane.get("type"),
         "sets": sets,
     }
+    if executed := merge_exec_stats(stats_by_id.values()):
+        out["execStage"] = executed
     for k in DETAIL_KEYS:
         if k == "tests":
             continue

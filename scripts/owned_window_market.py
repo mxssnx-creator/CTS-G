@@ -74,7 +74,7 @@ def prepare(root, start, end):
              "trailStepMin": 6, "trailStepMax": 6, "types": ["base", "trail"], "lastNLanes": [profile]}
     settings = {key: False for key in ("stratGeneral", "stratIndications", "stratShortRange", "stratTrend",
                                         "stratBreakout", "stratReversion", "stratFlow", "stratMulti", "stratSignals")}
-    settings.update({"extraIndicators": [], "indicationConfigs": [entry], "directionMode": "split",
+    settings.update({"stageLastN": False, "extraIndicators": [], "indicationConfigs": [entry], "directionMode": "split",
                      "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoScope": "step",
                      "holdAuto": False, "histLookbackAuto": False, "histLookbackBars": 1440,
                      "setPriceDistanceGrid": True, "setPriceSlDistances": [.6], "setPriceTrailGaps": [.4],

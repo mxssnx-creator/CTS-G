@@ -1,0 +1,13 @@
+{
+  "ctsC": [
+    { "label": "CTS-C trend efficiency", "names": ["ctsc_efficiency_n6_t1"], "stepMin": 5, "stepMax": 6, "trailStepMin": 6, "trailStepMax": 6, "types": ["base", "trail"] },
+    { "label": "CTS-C volume breakout", "names": ["ctsc_volume_break_n10_t1"], "stepMin": 4, "stepMax": 5, "types": ["base", "exit"] },
+    { "label": "CTS-C ATR breakout", "names": ["ctsc_atr_break_n6_t5"], "stepMin": 7, "stepMax": 8, "types": ["base"] }
+  ],
+  "common": [
+    { "label": "EMA crossover · short", "families": ["emax"], "ranges": [5, 8], "timeframes": [1], "stepMin": 4, "stepMax": 5, "trailStepMin": 6, "trailStepMax": 6, "types": ["base", "trail"], "slRatios": [0.75, 1] },
+    { "label": "MACD histogram · short", "families": ["macdh"], "ranges": [5, 8], "timeframes": [1], "stepMin": 4, "stepMax": 5, "types": ["base"], "slRatios": [0.75, 1] },
+    { "label": "RSI(2) pullback · short", "families": ["rsishort"], "ranges": [5, 8], "timeframes": [1], "stepMin": 3, "stepMax": 4, "types": ["base", "exit"], "slRatios": [0.75, 1] },
+    { "label": "Bollinger breakout · short", "families": ["bbb"], "ranges": [5, 8], "timeframes": [1], "stepMin": 4, "stepMax": 5, "types": ["base", "exit"], "slRatios": [0.75, 1] }
+  ]
+}

@@ -946,6 +946,41 @@ def breakout_signal(rows: Sequence[Row], n: int, tf: int, vol_mult: float = 1.1)
     return None
 
 
+def cts_c_technical(rows: Sequence[Row], n: int, tf: int, kind: str) -> Signal:
+    """CTS-C Trend_Efficiency, Break_Volume and Break_ATR in the bounded CTS-G window.
+
+    Source: CTS-C 5d0a111a, core/technical-signals.ts. Baselines exclude the
+    current bar. EMA and Wilder ATR retain the warmup supplied by CTS-G.
+    """
+    tail = rows[-(6 * n + 1) * tf:]
+    bars = tail if tf == 1 else _agg(tail, tf)
+    if len(bars) < 2 * n + 2:
+        return None
+    closes = _closes(bars)
+    fast, slow = _ema_list(closes, n), _ema_list(closes, 2 * n)
+    c = closes[-1]
+    side = 1 if fast[-1] > slow[-1] > slow[-2] and c > fast[-1] else (
+        -1 if fast[-1] < slow[-1] < slow[-2] and c < fast[-1] else 0
+    )
+    if not side:
+        return None
+    if kind == "efficiency":
+        recent = closes[-n - 1:]
+        distance = sum(abs(a - b) for a, b in zip(recent[1:], recent))
+        return (side, 0.75) if distance > 0 and abs(c - recent[0]) >= 0.3 * distance else None
+    if kind == "volume_break":
+        prior = bars[-n - 1:-1]
+        volume = sum(row[4] for row in prior) / n
+        bound = max(row[1] for row in prior) if side > 0 else min(row[2] for row in prior)
+        return (side, 0.75) if volume > 0 and bars[-1][4] >= 1.5 * volume and side * (c - bound) > 0 else None
+    ranges = _true_ranges(bars[:-1])[1:]
+    atr = sum(ranges[:n]) / n
+    for tr in ranges[n:]:
+        atr += (tr - atr) / n
+    bound = fast[-2] + side * 2 * atr
+    return (side, 0.75) if atr > 0 and side * (closes[-2] - bound) <= 0 < side * (c - bound) else None
+
+
 def _combine(sigs: List[Signal], need: int = 2) -> Signal:
     """Timeframes (or families) agreeing: at least `need` fire the same way and none fires the other way."""
     fired = [s for s in sigs if s]
@@ -975,6 +1010,13 @@ def _make_family() -> Dict[str, Callable[[Sequence[Row]], Signal]]:
 
 FAMILY = _make_family()
 WINDOWS: Dict[str, int] = {name: FAMILY_WINDOW for name in FAMILY}
+
+CTS_C_TECHNICAL = {
+    f"ctsc_{kind}_n{n}_t{tf}": (lambda rows, n=n, tf=tf, kind=kind: cts_c_technical(rows, n, tf, kind))
+    for kind in ("efficiency", "volume_break", "atr_break") for n in (6, 10, 20) for tf in (1, 5, 15)
+}
+WINDOWS.update({f"ctsc_{kind}_n{n}_t{tf}": (6 * n + 1) * tf
+                for kind in ("efficiency", "volume_break", "atr_break") for n in (6, 10, 20) for tf in (1, 5, 15)})
 
 
 def window_of(name: str) -> int:
@@ -1034,6 +1076,7 @@ INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "mean_stretch_revert": mean_stretch_revert,
 }
 INDICATORS.update(FAMILY)
+INDICATORS.update(CTS_C_TECHNICAL)
 from indication_lib import LIB as _LIB, WINDOW as _LIB_WINDOW  # noqa: E402  (the library imports nothing from this module)
 INDICATORS.update(_LIB)
 WINDOWS.update({name: _LIB_WINDOW for name in _LIB})

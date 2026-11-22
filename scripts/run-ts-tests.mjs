@@ -31,6 +31,7 @@ const files = [
   "src/lib/relation-lanes.test.ts",
   "src/lib/block-rounds.test.ts",
   "src/lib/settings-menu.test.ts",
+  "src/lib/stage-grid.test.ts",
   "src/lib/base-progress.test.ts",
   "src/lib/execution-scope.test.ts",
   "src/lib/evidence-view.test.ts",

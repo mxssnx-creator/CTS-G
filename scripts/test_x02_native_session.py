@@ -253,7 +253,7 @@ class NativeSessionTests(unittest.TestCase):
     def test_total_context_is_bounded_before_any_connection(self):
         raw = json.loads((session.ROOT / 'server/pulse/overlay-bingx-x02.json').read_text())
         self.assertLessEqual(session.context_requirement(session.frozen_overlay(raw, SYMBOLS)), 4320)
-        with self.assertRaisesRegex(ValueError, "4710 minutes"):
+        with self.assertRaisesRegex(ValueError, "5790 minutes"):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 18))
         with self.assertRaises(ValueError):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 48))

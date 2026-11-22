@@ -40,6 +40,7 @@ def _calculate(payload):
     if _BOOK is None or policy!=_POLICY:
         _BOOK=se.SetBook();_BOOK.load(overlay);_POLICY=policy
     book=_BOOK
+    book.scan_workers=0   # this process already owns a symbol; avoid nested scan processes
     if [st.id for st in book.by_idx]!=[row['id'] for row in lanes]:
         raise ValueError('worker grid differs from native parent')
     for key,value in raw.items():setattr(book,key,value)
@@ -112,11 +113,24 @@ class ParallelReplay:
                     self.book.progress.elapsed_ms=(time.monotonic()-self.started)*1000
                     if on_step:on_step()
                     if self.heartbeat:self.heartbeat(self.completed,len(self.pending)+1)
-            for sid,cols in packed.items():
-                hist.setdefault(sid,[]).extend({'t':cols.t[i],'symbol':cols.symbol,
-                    'side':codes[cols.side[i]],'pnl':cols.pnl[i],'pnl_pct':cols.pct[i],
-                    'hold_s':cols.hold[i],'reason':codes[cols.reason[i]],'set_id':cols.set_id}
-                    for i in range(len(cols)))
+            if getattr(self.view, "_scan_packed", False):
+                # Translate the worker's byte codes once per shared column.
+                # The native consumer accepts columns directly.
+                code_map = bytes(se._code(word) for word in codes)
+                translation = code_map + bytes(range(len(code_map), 256))
+                translated = {}
+                for cols in packed.values():
+                    key = id(cols.side), id(cols.reason)
+                    if key not in translated:
+                        translated[key] = cols.side.translate(translation), cols.reason.translate(translation)
+                    cols.side, cols.reason = translated[key]
+                inputs["packed"] = packed
+            else:
+                for sid,cols in packed.items():
+                    hist.setdefault(sid,[]).extend({'t':cols.t[i],'symbol':cols.symbol,
+                        'side':codes[cols.side[i]],'pnl':cols.pnl[i],'pnl_pct':cols.pct[i],
+                        'hold_s':cols.hold[i],'reason':codes[cols.reason[i]],'set_id':cols.set_id}
+                        for i in range(len(cols)))
             self.book.pause_now.update(pauses)
             self.completed+=1
             return inputs

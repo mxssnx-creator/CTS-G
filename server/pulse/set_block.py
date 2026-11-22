@@ -109,7 +109,7 @@ class SetBlockBook:
     # ---- keys --------------------------------------------------------------------------------------------------------------------------------------
     @staticmethod
     def key(pos) -> str:
-        return "|".join((pos.set_id, pos.lane or "pos", pos.symbol, pos.side))
+        return "|".join((getattr(pos, "exec_lane_id", "") or pos.set_id, pos.lane or "pos", pos.symbol, pos.side))
 
     @staticmethod
     def parent_id(pos) -> str:
@@ -117,7 +117,7 @@ class SetBlockBook:
 
     def rel_keys(self, cfg: br.BlockCfg, pos) -> List[str]:
         pack, step = _pack_step(pos.set_id)
-        return br.relation_keys(cfg, pos.set_id, pos.lane or "pos", pos.side, pos.symbol, pack, step)
+        return br.relation_keys(cfg, getattr(pos, "exec_lane_id", "") or pos.set_id, pos.lane or "pos", pos.side, pos.symbol, pack, step)
 
     def ledger(self, rkey: str, create: bool = False) -> Optional[Dict[str, Any]]:
         got = self.ledgers.get(rkey)
