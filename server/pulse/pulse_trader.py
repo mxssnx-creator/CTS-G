@@ -1046,6 +1046,29 @@ class Closed:
     filled_orders: int = 0
 
 
+def parent_unit_return(pos: Any, base_net: Optional[float], accounted: Optional[dict]) -> Optional[float]:
+    """Return only a verified parent result for Block rounds and Relate learning.
+
+    An aggregate result is interchangeable with the parent only when the
+    original entry and quantity still describe the whole position. In
+    particular, a missing parent fee after an add cannot turn the combined
+    position result into evidence for the parent.
+    """
+    base = number(base_net)
+    if base is not None:
+        return base
+    if not isinstance(accounted, dict) or getattr(pos, "block_fills", None) or getattr(pos, "dca_fills", None):
+        return None
+    entry, qty = number(getattr(pos, "entry", None)), number(getattr(pos, "qty", None))
+    base_entry, base_qty = number(getattr(pos, "base_entry", None)), number(getattr(pos, "base_qty", None))
+    if (entry is None or qty is None or base_entry is None or base_qty is None or
+            min(entry, qty, base_entry, base_qty) <= 0 or
+            not math.isclose(entry, base_entry, rel_tol=1e-10, abs_tol=1e-12) or
+            not math.isclose(qty, base_qty, rel_tol=1e-10, abs_tol=1e-12)):
+        return None
+    return number(accounted.get("net_pct"))
+
+
 def new_lift() -> Dict[str, float]:
     """The with / without record of the settled Set parents (lift_note, lift_report)."""
     return {"parents": 0, "unknown": 0, "addParents": 0, "adds": 0, "raised": 0,
@@ -5047,7 +5070,7 @@ class Pulse:
         if pos.set_id and pos.client_id and getattr(self, "rounds", None) is not None:
             try:
                 # one result per position at volume 1 (the base position's own net; adds are Block's, not a round's); an unscored close teaches nothing
-                r_net = base_net if base_net is not None else (accounted["net_pct"] if accounted else None)
+                r_net = parent_unit_return(pos, base_net, accounted)
                 self.rounds.closed(pos.client_id, None if skip_eval else r_net, scored=not skip_eval)
                 self.rounds.save()
             except Exception:
@@ -5056,7 +5079,7 @@ class Pulse:
             try:
                 # Exactly one settled parent; partial closes and Block/DCA legs do not
                 # multiply Last-N observations. Unknown exits consume unknown evidence.
-                unit_return = base_net if base_net is not None else (accounted["net_pct"] if accounted else None)
+                unit_return = parent_unit_return(pos, base_net, accounted)
                 self.relate.close(pos.relate_receipt, pos.client_id or pos.order_id, rec.t,
                     None if skip_eval or pos.relate_receipt.get("fillUnknown") else unit_return, accepted=pos.ours, final=True)
             except Exception:

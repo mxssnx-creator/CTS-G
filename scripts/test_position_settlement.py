@@ -23,6 +23,27 @@ def sample():
 
 
 class Settlement(unittest.TestCase):
+    def test_mixed_position_cannot_supply_unknown_parent_result_to_block_or_relate(self):
+        from block_rounds import RoundsBook,config_of,keys_of
+        pos=pt.Position('A-USDT','LONG',1,100,1000,99,103,100,
+                        base_entry=100,base_qty=1)
+        aggregate={'net_pct':.02}
+        self.assertEqual(pt.parent_unit_return(pos,None,aggregate),.02)
+        for field in ('block_fills','dca_fills'):
+            mixed=deepcopy(pos);setattr(mixed,field,[{'qty':1}])
+            self.assertIsNone(pt.parent_unit_return(mixed,None,aggregate))
+            self.assertEqual(pt.parent_unit_return(mixed,-.01,aggregate),-.01)
+        mixed=deepcopy(pos);mixed.qty=2
+        self.assertIsNone(pt.parent_unit_return(mixed,None,aggregate))
+        cfg=config_of({'enabled':True,'relations':['set'],'auto':True,'autoN':2,'autoMin':1,
+                       'counts':{'1':{'on':True,'ratio':1}}})
+        book=RoundsBook(cfg=cfg);keys=keys_of('A-USDT',1,'trend','base',1,'pos','own')
+        book.opened('loss',keys);book.closed('loss',-.01)
+        book.opened('unknown-mixed',keys,book.ask(keys)[0])
+        book.closed('unknown-mixed',pt.parent_unit_return(mixed,None,aggregate))
+        self.assertEqual(book.auto_verdict('set',keys['set'],1)['source'],'unknown')
+        self.assertEqual(book.ask(keys)[0],1)
+
     def test_position_snapshot_cannot_round_an_owned_fill_entry(self):
         sys.path.insert(0,str(Path(__file__).resolve().parent/'regression'))
         from trader import _isolated,_StubExchange,_enter
