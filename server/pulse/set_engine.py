@@ -2435,6 +2435,7 @@ class SetBook:
         self.pf_range_floor: Dict[str, float] = {}      # minPfByRange: a flat minimum PF for every Set of a TP range (absent: the per-step floor)
         self.pf_auto_defaults: Dict[str, float] = {}
         self._grid_auto_key = None
+        self._grid_auto_models: dict[str, auto_set_pf.RollingFloors] = {}
         self.lane_order: Tuple[str, ...] = ("pos", "neg")
         self.trail_pick: str = KIND_ORDER_DEFAULT
         self.kind_order: Tuple[Tuple[str, ...], ...] = KIND_ORDERS[KIND_ORDER_DEFAULT]
@@ -2621,6 +2622,7 @@ class SetBook:
                 self.last_run = 0.0
                 self._exec_candidates.clear()
                 self._grid_auto_key = None
+                self._grid_auto_models = {}
                 self.set_floor_auto.clear()
                 self.relation_state, self.relation_at = {}, 0.0      # lanes of the previous rules raise nothing
                 for st in self.by_idx:
@@ -3935,6 +3937,7 @@ class SetBook:
                                 self._learn_step_floors(tape_order, cutoff)
                         except Exception as exc:                              # never stops the scoring: the manual floors stand
                             self.step_floor_auto, self.step_floor_report, self.set_floor_auto = {}, [], {}
+                            self._grid_auto_key, self._grid_auto_models = None, {}
                             errors.append(f"step floors: {type(exc).__name__}: {exc}"[:160])
                         if self._topo_gen != gen0 or self._evaluation_config != evaluation_config:
                             stale = aborted = True
@@ -3957,6 +3960,8 @@ class SetBook:
                             full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
                             grid_result = None
                             if self.stage_grid:
+                                if self.grid_auto_enabled() and self.auto_holds(st):
+                                    self._learn_held_grid_floor(st, full, now)
                                 grid_history = self.grid_history(st, full)
                                 held_paths = dict(self._held_exec_paths.get(st.id, {}))
                                 # This replay runs in the history worker. Keep its CPU work
@@ -4431,17 +4436,18 @@ class SetBook:
 
     def _learn_grid_floors(self, tape_order: Sequence[str], now: float) -> None:
         """Fit independent Set floors from the two causal folds ending at the last full hour."""
-        lower, upper = auto_set_pf.training_window(now)
+        _, upper = auto_set_pf.training_window(now)
         key = (upper, tuple(tape_order), self._evaluation_config)
         if key == self._grid_auto_key:
             return
         sources = tuple(self._hist_rows[symbol] for symbol in tape_order)
-        sets = [(st.id, self.grid_auto_fallback(st)[0]) for st in self.by_idx]
+        sets = [(st.id, self.grid_auto_fallback(st)[0]) for st in self.by_idx if not self.auto_holds(st)]
         previous, minimum = self.pf_step_auto_n, self.pf_set_auto_min
         tolerance, orders_factor, candidates = self.pf_step_auto_tol, self.pf_auto_factor, self.step_auto_candidates()
         cost = cost_as_frac(self.cost_pct)
-        earliest = now - self.history_bars() * BAR_S
+        earliest = upper - self.history_bars() * BAR_S
         own = {}
+        models = {}
         # Per-symbol replay outputs are replaced as units. Reading these references
         # outside the lock keeps the order manager running during an hourly refit.
         self._lock.release()
@@ -4453,15 +4459,34 @@ class SetBook:
                 close = [row[0] for row in rows]
                 entry = [row[0] - row[5] for row in rows]
                 nets = [row[4] - cost for row in rows]
-                pairs = auto_set_pf.observations(close, entry, nets, previous, lower, upper)
-                floor = auto_set_pf.fit(pairs, minimum, fallback, candidates, tolerance, orders_factor)
+                model = auto_set_pf.RollingFloors(close, entry, nets, previous, minimum, fallback,
+                                                 candidates, tolerance, orders_factor)
+                models[sid] = model
+                floor = model.learned(upper)
                 if floor is not None:
                     own[sid] = floor
         finally:
             self._lock.acquire()
         if self._evaluation_config == key[2]:
             self.set_floor_auto, self.step_floor_auto, self.step_floor_report = own, {}, []
+            self._grid_auto_models = models
             self._grid_auto_key = key
+
+    def _learn_held_grid_floor(self, st: SetState, rows: Sequence[tuple], now: float) -> None:
+        """Train on the Set's causal Auto Hold replay, matching the actual stage input."""
+        if st.id in self._grid_auto_models:
+            return
+        _, upper = auto_set_pf.training_window(now)
+        cost = cost_as_frac(self.cost_pct)
+        closed = [row for row in rows if row[0] < upper]
+        model = auto_set_pf.RollingFloors([r[0] for r in closed], [r[0] - r[5] for r in closed],
+                                         [r[4] - cost for r in closed], self.pf_step_auto_n,
+                                         self.pf_set_auto_min, self.grid_auto_fallback(st)[0],
+                                         self.step_auto_candidates(), self.pf_step_auto_tol, self.pf_auto_factor)
+        self._grid_auto_models[st.id] = model
+        learned = model.learned(upper)
+        if learned is not None:
+            self.set_floor_auto[st.id] = learned
 
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
         return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
@@ -4719,7 +4744,7 @@ class SetBook:
             entries = [t - finite(row[5]) for t, row in zip(closes, rows)]
             nets = [finite(row[4]) - cf for row in rows]
         risk = None
-        if self.stop_cap_exceeded(st) or not self.sl_auto_allows(st):
+        if self.stop_cap_exceeded(st):
             def risk(*_args):
                 return False
         elif params.consistency > 0 or params.max_dd_s <= params.lookback_s:
@@ -4728,8 +4753,9 @@ class SetBook:
                                      params.max_dd_s, params.consistency)
         main_filter = (lambda values: negative_filter_ok(values, params.negative_filter)) if params.negative_filter else None
         need = max(params.negative_filter["windows"]) if params.negative_filter else 0
+        model = self._grid_auto_models.get(st.id) if self.grid_auto_enabled() else None
         return stage_grid.StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
-                                       params.floor_for, risk, main_filter, need)
+                                       params.floor_for, risk, main_filter, need, model.at if model else None)
 
     def exec_lane_id(self, st: SetState) -> str:
         result = st.exec_grid
@@ -6031,12 +6057,16 @@ class SetBook:
         if not self.stage_grid:
             return None
         totals = [stage_grid.StageCount() for _ in stage_grid.STAGES]
+        post = [stage_grid.Evidence() for _ in stage_grid.STAGES]
         for st in self.by_idx:
             if st.exec_grid is None or st.last_error:
                 continue
             for total, counts in zip(totals, st.exec_grid.counts):
                 total.add(counts)
+            for i, evidence in enumerate(st.exec_grid.post_evidence):
+                post[i] += evidence
         return {"config": self.stage_grid.settings(), "baseSets": len(self.by_idx),
+                "postStages": {name: evidence.report() for name, evidence in zip(stage_grid.STAGES, post)},
                 "stages": {name: total.report(capacity * len(self.by_idx))
                            for name, total, capacity in zip(stage_grid.STAGES, totals, self.stage_grid.capacities())}}
 
@@ -6077,7 +6107,7 @@ class SetBook:
                     # (opened while Base and Main passed)
                     "mainId": st.id + MAIN_SUFFIX,
                 **({"execId": self.exec_lane_id(st),
-                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.ready else {}),
+                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.path else {}),
                     "mainN": int(st.proc_total),
                     "mainPf": round(st.main_pf, 4),
                     "mainLastN": st.main_n,
@@ -6168,7 +6198,7 @@ class SetBook:
                 "sd": st.side,
                 "mainId": st.id + MAIN_SUFFIX,
                 **({"execId": self.exec_lane_id(st),
-                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.ready else {}),
+                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.path else {}),
                 "mainN": int(st.proc_total),
                 "mainWindowN": int(st.main_n),
                 "mainPf": round(st.main_pf, 4),

@@ -2,6 +2,7 @@
 
 from bisect import bisect_left, bisect_right
 import math
+from array import array
 from typing import Sequence
 
 TRAINING_HOURS = 48
@@ -18,6 +19,11 @@ def training_window(now: float) -> tuple[float, float]:
 def observations(closes: Sequence[float], entries: Sequence[float], nets: Sequence[float],
                  previous: int, lower: float, upper: float) -> list[tuple[float, float]]:
     """A trade has a label only after it closes. Its signal uses only earlier closes."""
+    return [(entry_pf, net) for _, entry_pf, net in dated_observations(closes, entries, nets, previous, lower, upper)]
+
+
+def dated_observations(closes: Sequence[float], entries: Sequence[float], nets: Sequence[float],
+                       previous: int, lower: float, upper: float):
     end = bisect_left(closes, upper)
     start = bisect_left(closes, lower, 0, end)
     gains, losses = [0.0], [0.0]
@@ -31,9 +37,38 @@ def observations(closes: Sequence[float], entries: Sequence[float], nets: Sequen
             continue
         gain = gains[before] - gains[before - previous]
         loss = losses[before] - losses[before - previous]
+        if losses[before] > 0 and loss <= 1e-10 * losses[before]:
+            loss = math.fsum(-x for x in nets[before - previous:before] if x < 0)
+        if gains[before] > 0 and gain <= 1e-10 * gains[before]:
+            gain = math.fsum(x for x in nets[before - previous:before] if x > 0)
         if gain > 0:
-            output.append((gain / loss if loss > 0 else math.inf, nets[i]))
+            output.append((closes[i], gain / loss if loss > 0 else math.inf, nets[i]))
     return output
+
+
+class RollingFloors:
+    """One Set's floor at any entry clock, using only outcomes closed before that hour."""
+
+    def __init__(self, closes: Sequence[float], entries: Sequence[float], nets: Sequence[float],
+                 previous: int, min_admitted: int, fallback: float, candidates: Sequence[float],
+                 tolerance: float, orders_factor: float) -> None:
+        seen = dated_observations(closes, entries, nets, previous, -math.inf, math.inf)
+        self.closes = array("d", (close for close, _, _ in seen))
+        self.pairs = [(entry_pf, net) for _, entry_pf, net in seen]
+        self.fallback = fallback
+        self.options = min_admitted, fallback, tuple(candidates), tolerance, orders_factor
+        self._fit: dict[float, float | None] = {}
+
+    def learned(self, when: float) -> float | None:
+        lower, upper = training_window(when)
+        if upper not in self._fit:
+            start, end = bisect_left(self.closes, lower), bisect_left(self.closes, upper)
+            self._fit[upper] = fit(self.pairs[start:end], *self.options)
+        return self._fit[upper]
+
+    def at(self, when: float) -> float:
+        learned = self.learned(when)
+        return self.fallback if learned is None else learned
 
 
 def _outcomes(pairs: Sequence[tuple[float, float]], floors: tuple[float, ...]) -> list[tuple[int, float, float]]:

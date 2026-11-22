@@ -286,7 +286,8 @@ def grid_at(book, tapes: Tapes, st, now: float):
     source = tape_source(tapes, st.idx, now, params.lookback_s)
     close, entry, gross = source.by_set[st.idx]
     cache = tapes.__dict__.setdefault("_exec_grid_query", {})
-    key = (now, id(close), book.stage_grid, params, tapes.cf)
+    model = book._grid_auto_models.get(st.id)
+    key = (now, id(close), book.stage_grid, params, tapes.cf, model, book.sl_auto_allows(st))
     item = cache.get(st.idx)
     if item and item[0] == key:
         return item[1]
@@ -842,26 +843,29 @@ class AutoFloors:
         if not self.on:
             return False
         if self.grid:
-            lower, upper = auto_set_pf.training_window(now)
+            _, upper = auto_set_pf.training_window(now)
             key = (upper, book.lookback)
             if key == self.last:
                 return False
             self.last = key
             own = {}
-            earliest = now - book.history_bars() * se.BAR_S
+            models = {}
+            earliest = upper - book.history_bars() * se.BAR_S
             for st in book.by_idx:
                 tx, te, pp = self.tapes.by_set[st.idx]
                 start = bisect.bisect_left(tx, earliest)
                 end = bisect.bisect_left(tx, upper)
                 if end - start <= book.pf_step_auto_n:
                     continue
-                pairs = auto_set_pf.observations(tx[start:end], te[start:end], [p - self.tapes.cf for p in pp[start:end]],
-                                                book.pf_step_auto_n, lower, upper)
-                floor = auto_set_pf.fit(pairs, book.pf_set_auto_min, book.grid_auto_fallback(st)[0],
-                                        book.step_auto_candidates(), book.pf_step_auto_tol, book.pf_auto_factor)
+                model = auto_set_pf.RollingFloors(tx[start:end], te[start:end], [p - self.tapes.cf for p in pp[start:end]],
+                                               book.pf_step_auto_n, book.pf_set_auto_min, book.grid_auto_fallback(st)[0],
+                                               book.step_auto_candidates(), book.pf_step_auto_tol, book.pf_auto_factor)
+                models[st.id] = model
+                floor = model.learned(upper)
                 if floor is not None:
                     own[st.id] = floor
             book.set_floor_auto, book.step_floor_auto = own, {}
+            book._grid_auto_models = models
             return True
         hour = int(now // 3600) * 3600.0
         boundary = hour - book.lookback * se.BAR_S
@@ -907,7 +911,8 @@ class AutoFloors:
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
-            refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None) -> List[Dict[str, Any]]:
+            refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None,
+            candidate_filter=None) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
     this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
@@ -1050,6 +1055,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                                                        key=lambda r: r[0], reverse=True)]
                         if gg is not None or cg:
                             pool = [st_ for st_ in pool if group_ok(st_, lane_, entry_t)]
+                        if candidate_filter:
+                            pool = [st_ for st_ in pool if candidate_filter(st_, s, d, entry_t, ranked_t)]
                         if pool:
                             lane_pick = lane_
                             break

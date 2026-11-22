@@ -34,7 +34,8 @@ def plain(grid, rows, now, lookback, floor):
         def positive(block):
             gain = math.fsum(x for x in block if x > 0)
             loss = math.fsum(-x for x in block if x < 0)
-            return gain > 0 and gain >= floor * loss
+            threshold = floor(decision) if callable(floor) else floor
+            return gain > 0 and gain >= threshold * loss
 
         if long and not positive(long):
             return True, None
@@ -103,6 +104,32 @@ class StageGridTest(unittest.TestCase):
         AutoFloors(book, SimpleNamespace(by_set=by_set, cf=cost)).apply(book, now)
         self.assertEqual(book.set_floor_auto, native)
         self.assertNotIn(empty.id, book.set_floor_auto)
+        model = book._grid_auto_models[base.id]
+        self.assertEqual(model.at(early), 1.24)
+        updated = auto_set_pf.RollingFloors(close, entry, [*net[:80], *([500] * (len(net) - 80))],
+                                           book.pf_step_auto_n, book.pf_set_auto_min, 1.24,
+                                           book.step_auto_candidates(), book.pf_step_auto_tol, book.pf_auto_factor)
+        self.assertEqual(model.at(early + 3600), updated.at(early + 3600))
+
+    def test_auto_hold_set_learns_only_from_processed_hold_tape(self):
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "minPfByStep": True, "minPfStepAuto": True,
+                   "holdAuto": True, "setMinStep": 4, "setStepMax": 4, "stratIndications": False})
+        st = next(st for st in book.by_idx if st.kind == "base")
+        self.assertTrue(book.auto_holds(st))
+        symbol = "TEST-USDT"
+        cost = se.cost_as_frac(book.cost_pct)
+        rows = [(100 + i * 60, symbol, "LONG", .01, .01 + cost, 30, "time", st.id) for i in range(200)]
+        book._hist_rows[symbol] = {st.id: [row[:4] + (-.01,) + row[5:] for row in rows]}
+        now = 4 * 3600
+        with book._lock:
+            book._learn_grid_floors((symbol,), now)
+            self.assertNotIn(st.id, book._grid_auto_models)
+            book._learn_held_grid_floor(st, rows, now)
+        entry_pf, result = book._grid_auto_models[st.id].pairs[-1]
+        self.assertEqual(entry_pf, math.inf)
+        self.assertAlmostEqual(result, .01)
+        self.assertTrue(book.grid_history(st, rows).evaluate(now, streams=True).counts[0].qualified)
 
     def test_cts_c_technical_packs(self):
         bars = [[100 + i * .02, 100.05 + i * .02, 99.95 + i * .02, 100 + i * .02, 100] for i in range(160)]
@@ -154,17 +181,24 @@ class StageGridTest(unittest.TestCase):
 
     def test_default_paths_and_signed_windows(self):
         grid = sg.StageGrid.from_settings({})
-        self.assertEqual(grid.capacities(), (350, 49000, 6860000, 960400000))
+        self.assertEqual(grid.capacities(), (350, 49000, 6860000, 1509200000))
         for depth in range(4):
             choices = grid.windows(depth, 30)
             self.assertEqual({w.last_mode for w in choices}, {"positive", "negative"})
             self.assertEqual({w.short for w in choices if w.short_mode == "negative"}, {4, 8, 12})
+            self.assertEqual({w.short for w in choices if w.short_mode == "positive"},
+                             set(sg.EXEC_SHORT if depth == 3 else sg.SHORT))
             if depth:
                 self.assertEqual({w.long for w in choices}, {0, 30})
         grid_setting = grid.settings()
         self.assertEqual(sg.StageGrid.from_settings(grid_setting), grid)
         with self.assertRaises(ValueError):
             sg.StageGrid.from_settings({"exec": {"short": [16], "shortModes": ["negative"]}})
+        extended = sg.StageGrid.from_settings({"exec": {"short": [12, 20, 24, 28, 30]}})
+        self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "negative"}, {12})
+        self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "positive"}, {12, 20, 24, 28, 30})
+        with self.assertRaises(ValueError):
+            sg.StageGrid.from_settings({"real": {"short": [30]}})
 
     def test_each_parent_and_sign_matches_plain_walk(self):
         downstream = {"short": [4], "last": [1], "longModes": ["none", "inherit"]}
@@ -185,6 +219,17 @@ class StageGridTest(unittest.TestCase):
             self.assertEqual(got.ready, any(len(k) == 4 for k in paths))
             if got.path:
                 self.assertEqual(got.streams, tuple(paths[got.path[:i]] for i in range(1, len(got.path) + 1)))
+                for w, total, blocks in zip(got.path, got.selected_evidence, got.selected_blocks):
+                    self.assertEqual(tuple(e.count for e in blocks), (w.long, w.short, w.last))
+                    self.assertEqual(total, sum(blocks, sg.Evidence()))
+                    for ev, sign in zip(blocks[1:], (w.short_mode, w.last_mode)):
+                        self.assertEqual(ev.gain < ev.loss, sign == "negative")
+                for i, (evidence, stream) in enumerate(zip(got.post_evidence, got.streams), 1):
+                    self.assertEqual(evidence.count, len(stream))
+                    self.assertAlmostEqual(evidence.gain, math.fsum(max(0, r.net) for r in stream))
+                    self.assertAlmostEqual(evidence.loss, math.fsum(max(0, -r.net) for r in stream))
+                    if i > 1:
+                        self.assertLessEqual(set(got.row_ids[i - 1]), set(got.row_ids[i - 2]))
             if got.ready:
                 examples.append(got.path)
             for key in paths:
@@ -201,6 +246,30 @@ class StageGridTest(unittest.TestCase):
         this_real = tuple((row.close, row.net) for row in paths[other[:3]])
         self.assertEqual(history.active_real(other, 111, 200), this_real)
         self.assertIsNone(history.active_real(other, 1, 200))
+        short_output = history.evaluate(111, streams=True, limit=2)
+        self.assertEqual(short_output.post_evidence, history.evaluate(111, streams=True).post_evidence)
+        report = short_output.report(grid, "set1")
+        self.assertEqual(report["parentIds"]["base"], "set1")
+        self.assertEqual(report["parentIds"]["exec"], report["setIds"]["real"])
+        self.assertTrue(all(report["selectedBlocks"][stage]["last"]["orders"] for stage in sg.STAGES))
+
+    def test_rolling_thresholds_do_not_change_older_memberships(self):
+        downstream = {"short": [4], "last": [1], "longModes": ["none"]}
+        grid = sg.StageGrid.from_settings({"base": {"long": [10], "short": [4], "last": [1]},
+                                         "main": downstream, "real": downstream, "exec": {**downstream, "short": [20, 30]}})
+        rng = random.Random(32)
+        rows = [sg.StageOrder(i, i - (i % 4), rng.choice((.01, .02, .04, -.017))) for i in range(760)]
+        at = lambda decision: 1.10 if decision < 420 else 1.65
+        history = sg.StageHistory(grid, *zip(*rows), 350, lambda _: 1.65, entry_floor=at)
+        full = history.evaluate(550, streams=True)
+        _, paths = plain(grid, rows, 550, 350, at)
+        self.assertTrue(full.ready)
+        self.assertEqual(full.streams, tuple(paths[full.path[:i]] for i in range(1, 5)))
+        self.assertNotEqual(full.streams[0], sg.StageHistory(grid, *zip(*rows), 350, lambda _: 1.65).stream(
+            full.path, 550 - 350, 550)[0])
+        shortened = [r for r in rows if r.close < 550]
+        older = sg.StageHistory(grid, *zip(*shortened), 350, lambda _: 1.65, entry_floor=at)
+        self.assertEqual(full, older.evaluate(550, streams=True))
 
     def test_equal_clock_and_insufficient_lanes(self):
         grid = sg.StageGrid.from_settings({})
@@ -212,6 +281,8 @@ class StageGridTest(unittest.TestCase):
         self.assertEqual(result.counts[0].qualified, 1)
         self.assertEqual(result.counts[1].sample_full, 0)
         self.assertFalse(result.ready)
+        self.assertEqual(sg.Evidence(2, 0, 0).report()["pf"], 1.0)
+        self.assertIsNone(sg.Evidence().report()["pf"])
 
     @unittest.skipIf(sg.np is None, "optional vector operations unavailable")
     def test_vector_mask_matches_scalar(self):

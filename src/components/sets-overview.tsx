@@ -232,13 +232,30 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                   <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} / ${r.realWindowN ?? "—"} · ${formatPfWithCount(r.realPf, r.realWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} / ${r.realNegWindowN ?? "—"} · ${formatPfWithCount(r.realNegPf, r.realNegWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.mainShortN ?? "—"}`}</td>
-                  <td className="py-1.5">{r.execId ? (
+                  <td className="py-1.5">{r.stageGrid ? (
                     <details>
-                      <summary className="cursor-pointer text-primary">Exec</summary>
+                      <summary className={r.execId ? "cursor-pointer text-primary" : "cursor-pointer text-muted"}>
+                        {r.execId ? "Exec" : r.why || "Related Sets"}
+                      </summary>
                       {STAGE_ORDER.map((name) => {
-                        const w = r.stageGrid?.windows[name];
-                        return w ? <div key={name} title={r.stageGrid?.parentIds[name]} className="whitespace-nowrap">
+                        const grid = r.stageGrid;
+                        const w = grid?.windows[name];
+                        const post = grid?.postStages?.[name];
+                        const blocks = grid?.selectedBlocks?.[name];
+                        const related = [grid?.parentIds[name], grid?.setIds?.[name]].filter(Boolean).join(" → ");
+                        return w ? <div key={name} title={related} className="whitespace-nowrap">
                           {STAGE_LABEL[name]} {w.long || "—"} / {w.short}{w.shortMode === "negative" ? "−" : "+"} / {w.last}{w.lastMode === "negative" ? "−" : "+"}
+                          {blocks && <div className="text-muted">
+                            {(["long", "short", "last"] as const).flatMap((k) => {
+                              const evidence = blocks[k];
+                              if (!evidence) return [];
+                              const pf = evidence.pf?.toFixed(2) ?? (evidence.gain > 0 && evidence.loss === 0 ? "no losses" : "—");
+                              return [`${k} PF ${pf}`];
+                            }).join(" · ")}
+                          </div>}
+                          {post && <div className="text-muted">
+                            {post.orders} paper closes · PF {post.pf?.toFixed(2) ?? (post.gain > 0 && post.loss === 0 ? "No losses" : "—")}
+                          </div>}
                         </div> : null;
                       })}
                     </details>

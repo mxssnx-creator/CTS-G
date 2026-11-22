@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import type { LiveStats } from "@/lib/live-stats";
 import {
-  type StageGridConfig, type StageName, LONG_COUNTS, SHORT_COUNTS, LAST_COUNTS,
+  type StageGridConfig, type StageName, LONG_COUNTS, SHORT_COUNTS, EXEC_SHORT_COUNTS, LAST_COUNTS,
   SIGN_MODES, LONG_MODES, STAGE_ORDER, STAGE_LABEL, stageGridOf,
 } from "@/lib/stage-grid";
 
@@ -51,7 +51,8 @@ export function StageGridSettings({ value, onChange }: {
         <>
           <p className="text-xs text-muted">
             Every enabled combination gets its own Set at each stage. The Long, Short and Last blocks use distinct earlier closes.
-            Negative Short is available for 4, 8 and 12 samples. Last requires the selected net sign.
+            Long and positive Short use the Set's PF floor. Negative Short and signed Last compare PF against 1.
+            Negative Short is available for 4, 8 and 12 samples.
           </p>
           <div className="grid gap-3 md:grid-cols-2">
             {STAGE_ORDER.map((stage) => {
@@ -62,7 +63,7 @@ export function StageGridSettings({ value, onChange }: {
                   {stage === "base"
                     ? <Choices<number> label="Long" choices={LONG_COUNTS} values={value.base.long} onChange={(long) => changeStage(stage, { long })} />
                     : <Choices label="Long" choices={LONG_MODES} values={value[stage].longModes} onChange={(longModes) => changeStage(stage, { longModes })} display={(mode) => mode === "inherit" ? "Inherit Base Long" : "Without Long"} />}
-                  <Choices<number> label="Short" choices={SHORT_COUNTS} values={options.short} onChange={(short) => changeStage(stage, { short })} />
+                  <Choices<number> label="Short" choices={stage === "exec" ? EXEC_SHORT_COUNTS : SHORT_COUNTS} values={options.short} onChange={(short) => changeStage(stage, { short })} />
                   <Choices label="Short sign" choices={options.short.some((n) => n <= 12) ? SIGN_MODES : ["positive"] as const} values={options.shortModes} onChange={(shortModes) => changeStage(stage, { shortModes })} display={signLabel} />
                   <Choices<number> label="Last" choices={LAST_COUNTS} values={options.last} onChange={(last) => changeStage(stage, { last })} />
                   <Choices label="Last sign" choices={SIGN_MODES} values={options.lastModes} onChange={(lastModes) => changeStage(stage, { lastModes })} display={signLabel} />
@@ -90,13 +91,13 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
     <section className="space-y-3 rounded-md border border-border bg-surface p-4" aria-label="Independent Last-N stages">
       <div>
         <h2 className="text-sm font-semibold">Base → Main → Real → Exec → Live</h2>
-        <p className="text-xs text-muted">{count.format(grid.baseSets)} Base Sets · sample coverage among lanes reached at each stage</p>
+        <p className="text-xs text-muted">{count.format(grid.baseSets)} Base Sets · sample coverage among reached lanes</p>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[37rem] text-left text-xs">
           <thead className="text-muted">
             <tr>
-              {["Stage", "Configured lanes", "Reached", "Full samples", "Qualified", "Window orders", "Window PF"].map((label, i) => (
+              {["Stage", "Configured lanes", "Reached", "Full samples", "Qualified", "Window orders", "Window PF", "Post-stage closes", "Post-stage paper PF"].map((label, i) => (
                 <th key={label} scope="col" className={i ? "px-2 pb-2 text-right font-medium" : "pb-2 font-medium"}>{label}</th>
               ))}
             </tr>
@@ -104,6 +105,7 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
           <tbody className="font-mono">
             {STAGE_ORDER.map((stage) => {
               const row = grid.stages[stage];
+              const post = grid.postStages?.[stage];
               return (
                 <tr key={stage} className="border-t border-border">
                   <th scope="row" className="py-2 font-medium">{STAGE_LABEL[stage]}</th>
@@ -120,12 +122,15 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
                   </td>
                   <td className="px-2 text-right">{count.format(row.orders)}</td>
                   <td className="px-2 text-right">{row.pf?.toFixed(2) ?? (row.gain > 0 && row.loss === 0 ? "No losses" : "—")}</td>
+                  <td className="px-2 text-right">{post ? count.format(post.orders) : "—"}</td>
+                  <td className="px-2 text-right">{post?.pf?.toFixed(2) ?? (post && post.gain > 0 && post.loss === 0 ? "No losses" : "—")}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+      {grid.postStages && <p className="text-xs text-muted">Post-stage PF uses the closed paper positions in the selected path of each Base Set.</p>}
       {executed && (
         <p className="text-xs text-muted">
           Live mirrors Exec · {count.format(executed.activePositions)} active positions · {count.format(executed.activeFilledOrders)} filled orders on active positions

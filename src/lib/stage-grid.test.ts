@@ -19,3 +19,15 @@ test("stage settings preserve independent sign and inherited Long selections", (
   assert.deepEqual(stageGridOf(settings), settings);
   assert.equal(stageGridOf(false).enabled, false);
 });
+
+test("all Exec Short counts are enabled by default, with custom choices preserved", () => {
+  const settings = stageGridOf({
+    real: { short: [8, 28] },
+    exec: { short: [4, 20, 24, 28, 30, 32], shortModes: ["positive", "negative"] },
+  });
+  assert.deepEqual(settings.real.short, [8]);
+  assert.deepEqual(settings.exec.short, [4, 20, 24, 28, 30]);
+  assert.deepEqual(settings.exec.shortModes, ["positive", "negative"]);
+  assert.deepEqual(stageGridOf({ exec: { short: [] } }).exec.short, [4, 8, 12, 16, 20, 24, 28, 30]);
+  assert.deepEqual(stageGridOf({ exec: { short: [4, 8, 12, 16] } }).exec.short, [4, 8, 12, 16]);
+});

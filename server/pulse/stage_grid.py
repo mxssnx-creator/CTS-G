@@ -19,10 +19,12 @@ except ImportError:
 STAGES = ("base", "main", "real", "exec")
 BASE_LONG = (10, 20, 30, 40, 50)
 SHORT = (4, 8, 12, 16)
+EXEC_SHORT = (*SHORT, 20, 24, 28, 30)
 LAST = (1, 2, 3, 4, 5)
 SIGN_MODES = ("positive", "negative")
 NEGATIVE_SHORT_MAX = 12
 NEG_EPS = 1e-12
+BLOCK_NAMES = ("long", "short", "last")
 
 
 class Window(NamedTuple):
@@ -67,10 +69,10 @@ class StageGrid:
         if set(raw) - {"enabled", *STAGES}:
             raise ValueError("Unknown stageLastN field")
 
-        def counts(config, key, defaults):
-            values = config.get(key, defaults)
+        def counts(config, key, choices):
+            values = config.get(key, choices)
             if not isinstance(values, (tuple, list)) or not values or any(
-                type(n) is not int or n not in defaults for n in values
+                type(n) is not int or n not in choices for n in values
             ) or len(set(values)) != len(values):
                 raise ValueError(f"Invalid {key} choices in stageLastN")
             return tuple(sorted(values))
@@ -92,7 +94,7 @@ class StageGrid:
             if is_base:
                 longs = counts(config, "long", BASE_LONG)
             long_modes = () if is_base else modes(config, "longModes", ("none", "inherit"), stage)
-            shorts = counts(config, "short", SHORT)
+            shorts = counts(config, "short", EXEC_SHORT if stage == "exec" else SHORT)
             short_modes = modes(config, "shortModes", SIGN_MODES, stage)
             if short_modes == ("negative",) and min(shorts) > NEGATIVE_SHORT_MAX:
                 raise ValueError(f"Negative Short requires 4, 8 or 12 in stageLastN.{stage}")
@@ -169,7 +171,7 @@ class Evidence(NamedTuple):
 
     def report(self) -> dict:
         return {"orders": self.count, "gain": self.gain, "loss": self.loss,
-                "pf": round(self.gain / self.loss, 4) if self.loss else None}
+                "pf": round(self.gain / self.loss, 4) if self.loss else 1.0 if self.count and not self.gain else None}
 
 
 @dataclass(slots=True)
@@ -214,6 +216,8 @@ class GridResult:
     streams: tuple[tuple[StageOrder, ...], ...] = ()
     row_ids: tuple[tuple[int, ...], ...] = ()
     selected_evidence: tuple[Evidence, ...] = ()
+    post_evidence: tuple[Evidence, ...] = ()
+    selected_blocks: tuple[tuple[Evidence, ...], ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -226,13 +230,17 @@ class GridResult:
         return round((min(5.0, pf(gain, loss)) - 1) * count / (20 + count), 12), count
 
     def report(self, grid: StageGrid, set_id: str) -> dict:
+        ids = [lane_id(set_id, self.path[:depth]) for depth in range(len(self.path) + 1)]
         return {"stages": {s: n.report(total) for s, n, total in zip(STAGES, self.counts, grid.capacities())},
-                "id": lane_id(set_id, self.path) if self.path else None,
-                "parentIds": {stage: lane_id(set_id, self.path[:d])
-                              for d, stage in enumerate(STAGES[:len(self.path)], 1)},
+                "id": ids[-1] if self.path else None,
+                "parentIds": dict(zip(STAGES, ids[:-1])),
+                "setIds": dict(zip(STAGES, ids[1:])),
                 "windows": path_settings(self.path),
                 "selectedOrders": dict(zip(STAGES, map(len, self.streams))),
-                "selectedWindows": {s: ev.report() for s, ev in zip(STAGES, self.selected_evidence)}}
+                "selectedWindows": {s: ev.report() for s, ev in zip(STAGES, self.selected_evidence)},
+                "selectedBlocks": {s: {name: ev.report() for name, ev in zip(BLOCK_NAMES, blocks) if ev.count}
+                                   for s, blocks in zip(STAGES, self.selected_blocks)},
+                "postStages": {s: ev.report() for s, ev in zip(STAGES, self.post_evidence)}}
 
 
 BYTE_BITS = tuple(tuple(bit for bit in range(8) if byte & (1 << bit)) for byte in range(256))
@@ -276,11 +284,12 @@ class _Tape:
         evidence = self.evidence(size, end)
         gain, loss = evidence.gain, evidence.loss
         if kind in SIGN_MODES:
+            # PF above/below neutral, compared in return units to handle loss-free windows.
             net = gain - loss
             if abs(abs(net) - NEG_EPS) <= 1e-8 * max(gain, loss):
                 net = math.fsum(self.values[end - size:end])
             return evidence if (net > NEG_EPS if kind == "positive" else net < -NEG_EPS) else None
-        floor = self.owner.floors[size]
+        floor = self.owner.floor_at(size, entry)
         if loss > 0:
             if math.isclose(gain, loss * floor, rel_tol=1e-8):
                 # A borderline result must be independent of any older prefix.
@@ -331,9 +340,12 @@ class _Tape:
         if self.numeric is None:
             times = np.asarray(self.times)
             entries = np.fromiter((self.owner.entries[i] for i in self.ids), dtype=np.float64, count=len(self.ids))
+            floors = self.owner.entry_floors
+            local_floors = (np.fromiter((floors[i] for i in self.ids), dtype=np.float64, count=len(self.ids))
+                            if floors is not None else None)
             self.numeric = (np.searchsorted(times, entries - self.owner.lookback),
-                            np.searchsorted(times, entries), np.asarray(self.gains), np.asarray(self.losses))
-        first, ends, gains, losses = self.numeric
+                            np.searchsorted(times, entries), np.asarray(self.gains), np.asarray(self.losses), local_floors)
+        first, ends, gains, losses, local_floors = self.numeric
         valid = ends - first >= offset + size
         rows = np.flatnonzero(valid)
         right = ends[rows] - offset
@@ -344,7 +356,7 @@ class _Tape:
             good = margin > NEG_EPS if kind == "positive" else margin < -NEG_EPS
             borderline = np.abs(np.abs(margin) - NEG_EPS) <= 1e-8 * np.maximum(gain, loss)
         else:
-            threshold = loss * self.owner.floors[size]
+            threshold = loss * (local_floors[rows] if local_floors is not None else self.owner.floors[size])
             margin = gain - threshold
             good = (gain > 0) & (margin >= 0)
             borderline = np.abs(margin) <= 1e-8 * np.maximum(gain, threshold)
@@ -387,16 +399,29 @@ class StageHistory:
     """Build only reachable paths at a decision. Equal parent memberships share calculations, while keeping their counts and identities."""
     def __init__(self, grid: StageGrid, closes: Sequence[float], entries: Sequence[float], nets: Sequence[float],
                  lookback: float, floor: Callable[[int], float], base_risk: BaseRisk | None = None,
-                 main_filter: Callable[[Sequence[float]], bool] | None = None, filter_need: int = 0) -> None:
+                 main_filter: Callable[[Sequence[float]], bool] | None = None, filter_need: int = 0,
+                 entry_floor: Callable[[float], float] | None = None) -> None:
         self.grid, self.closes, self.entries, self.nets = grid, closes, entries, nets
         self.lookback, self.base_risk = lookback, base_risk
-        self.floors = {n: floor(n) for n in (*BASE_LONG, *SHORT, *LAST)}
+        sizes = {n for options in grid.options for n in options.shorts}
+        self.floors = {n: floor(n) for n in {*grid.longs, *sizes}}
+        self.entry_floor = entry_floor
+        self._entry_floors = None
         self.main_filter, self.filter_need = main_filter, filter_need
         self.root = _Tape(self, range(len(closes)))
         self._views: OrderedDict[Sequence[int], _Tape] = OrderedDict({self.root.ids: self.root})
         self._children: OrderedDict[tuple[_Tape, int], _Tape] = OrderedDict()
         self._filter_masks: OrderedDict[_Tape, int] = OrderedDict()
         self._rules = {(i, n): grid.windows(i, n) for i in range(len(STAGES)) for n in ((0,) if i == 0 else grid.longs)}
+
+    def floor_at(self, n: int, at: float) -> float:
+        return self.entry_floor(at) if self.entry_floor else self.floors[n]
+
+    @property
+    def entry_floors(self):
+        if self.entry_floor and self._entry_floors is None:
+            self._entry_floors = tuple(self.entry_floor(t) for t in self.entries)
+        return self._entry_floors
 
     def filter_mask(self, tape: _Tape) -> int:
         if tape in self._filter_masks:
@@ -454,23 +479,28 @@ class StageHistory:
             bits ^= 1 << current
         return tuple(reversed(latest))
 
-    def stream_ids(self, path: Path, cutoff: float, now: float, limit: int | None = None) -> tuple[tuple[int, ...], ...]:
-        out = []
+    def related_tapes(self, path: Path):
         tape = self.root
         for depth, w in enumerate(path):
             tape = self.child(tape, tape.child_mask(w, depth))
+            yield tape
+
+    def stream_ids(self, path: Path, cutoff: float, now: float, limit: int | None = None) -> tuple[tuple[int, ...], ...]:
+        out = []
+        for tape in self.related_tapes(path):
             start, end = bisect_left(tape.times, cutoff), bisect_left(tape.times, now)
             if limit is not None:
                 start = max(start, end - limit)
             out.append(tuple(tape.ids[start:end]))
         return tuple(out)
 
-    def selected_evidence(self, path: Path, now: float) -> tuple[Evidence, ...]:
+    def selected_blocks(self, path: Path, now: float) -> tuple[tuple[Evidence, ...], ...]:
         tape = self.root
         out = []
         for depth, w in enumerate(path):
             _, end = tape.indices(now)
-            out.append(tape.evidence(w.need, end))
+            out.append(tuple(tape.evidence(n, end - offset) if n else Evidence()
+                             for n, offset, _ in reversed(window_blocks(w, depth))))
             if depth + 1 < len(path):
                 tape = self.child(tape, tape.child_mask(w, depth))
         return tuple(out)
@@ -569,7 +599,15 @@ class StageHistory:
             walk.cache_clear()
             last_stage.cache_clear()
         if streams and result.path:
-            row_ids = self.stream_ids(result.path, now - self.lookback, now, limit)
+            row_ids, post = [], []
+            for tape in self.related_tapes(result.path):
+                start, end = tape.indices(now)
+                post.append(tape.evidence(end - start, end))
+                shown = start if limit is None else max(start, end - limit)
+                row_ids.append(tuple(tape.ids[shown:end]))
+            row_ids = tuple(row_ids)
+            blocks = self.selected_blocks(result.path, now)
+            selected = tuple(sum(group, Evidence()) for group in blocks)
             return GridResult(result.counts, result.path, result.evidence, self.read_streams(row_ids), row_ids,
-                              self.selected_evidence(result.path, now))
+                              selected, tuple(post), blocks)
         return result

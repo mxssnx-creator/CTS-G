@@ -326,10 +326,11 @@ def main() -> int:
             for k in keys:
                 groups[k]["set_evals"] += 1
             if a.stage_details and book.stage_grid:
-                counts = sg.grid_at(book, tapes, st, now).counts
+                result = sg.grid_at(book, tapes, st, now)
+                counts = result.counts
                 for key in keys:
                     groups[key]["full_base_evals"] += bool(counts[0].sample_full)
-                for stage, lane in zip(sg.STAGES, counts):
+                for depth, (stage, lane) in enumerate(zip(sg.STAGES, counts)):
                     if not lane.evaluated:
                         continue
                     for dimension, group in keys:
@@ -343,6 +344,11 @@ def main() -> int:
                         sr["gp"] += lane.gain
                         sr["gl"] += lane.loss
                         sr["orders"] += lane.orders
+                        if depth < len(result.post_evidence):
+                            post = result.post_evidence[depth]
+                            sr["post_gp"] += post.gain
+                            sr["post_gl"] += post.loss
+                            sr["post_orders"] += post.count
             elif a.stage_details:
                 readiness = {}
                 figures = sg.window_figures(book, tapes, st, now, samples=readiness)
@@ -419,6 +425,9 @@ def main() -> int:
                                 "enough_samples_pct": round(100 * sr["samples_full"] / sr["evaluated"], 3),
                                 "requested_orders": int(sr["requested_orders"]),
                                 "available_orders": int(sr["available_orders"]),
+                                **({"post_paper": sg.se.stage_grid.Evidence(
+                                    int(sr["post_orders"]), sr["post_gp"], sr["post_gl"]).report()}
+                                   if book.stage_grid else {}),
                                 "gain": sr["gp"], "loss": sr["gl"]})
         print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} {'Exec' if book.stage_grid else 'Real'}={int(hv['executable'])}", flush=True)
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
