@@ -1,9 +1,10 @@
 """Causal minimum-PF training for one independent Exec Set."""
 
 from bisect import bisect_left, bisect_right
+from itertools import islice
 import math
 from array import array
-from typing import Sequence
+from typing import Iterable, Iterator, Sequence
 
 TRAINING_HOURS = 48
 REFIT_SECONDS = 3600
@@ -23,14 +24,13 @@ def observations(closes: Sequence[float], entries: Sequence[float], nets: Sequen
 
 
 def dated_observations(closes: Sequence[float], entries: Sequence[float], nets: Sequence[float],
-                       previous: int, lower: float, upper: float):
+                       previous: int, lower: float, upper: float) -> Iterator[tuple[float, float, float]]:
     end = bisect_left(closes, upper)
     start = bisect_left(closes, lower, 0, end)
     gains, losses = [0.0], [0.0]
     for i in range(end):
         gains.append(gains[-1] + max(0.0, nets[i]))
         losses.append(losses[-1] + max(0.0, -nets[i]))
-    output = []
     for i in range(start, end):
         before = bisect_left(closes, entries[i], 0, i)
         if before < previous:
@@ -42,8 +42,7 @@ def dated_observations(closes: Sequence[float], entries: Sequence[float], nets: 
         if gains[before] > 0 and gain <= 1e-10 * gains[before]:
             gain = math.fsum(x for x in nets[before - previous:before] if x > 0)
         if gain > 0:
-            output.append((closes[i], gain / loss if loss > 0 else math.inf, nets[i]))
-    return output
+            yield closes[i], gain / loss if loss > 0 else math.inf, nets[i]
 
 
 class RollingFloors:
@@ -52,9 +51,13 @@ class RollingFloors:
     def __init__(self, closes: Sequence[float], entries: Sequence[float], nets: Sequence[float],
                  previous: int, min_admitted: int, fallback: float, candidates: Sequence[float],
                  tolerance: float, orders_factor: float) -> None:
-        seen = dated_observations(closes, entries, nets, previous, -math.inf, math.inf)
-        self.closes = array("d", (close for close, _, _ in seen))
-        self.pairs = [(entry_pf, net) for _, entry_pf, net in seen]
+        self.closes = array("d")
+        self._entry_pfs = array("d")
+        self._net_returns = array("d")
+        for close, entry_pf, net in dated_observations(closes, entries, nets, previous, -math.inf, math.inf):
+            self.closes.append(close)
+            self._entry_pfs.append(entry_pf)
+            self._net_returns.append(net)
         self.fallback = fallback
         self.options = min_admitted, fallback, tuple(candidates), tolerance, orders_factor
         self._fit: dict[float, float | None] = {}
@@ -63,7 +66,8 @@ class RollingFloors:
         lower, upper = training_window(when)
         if upper not in self._fit:
             start, end = bisect_left(self.closes, lower), bisect_left(self.closes, upper)
-            self._fit[upper] = fit(self.pairs[start:end], *self.options)
+            pairs = zip(memoryview(self._entry_pfs)[start:end], memoryview(self._net_returns)[start:end])
+            self._fit[upper] = _fit(pairs, end - start, *self.options)
         return self._fit[upper]
 
     def at(self, when: float) -> float:
@@ -71,7 +75,7 @@ class RollingFloors:
         return self.fallback if learned is None else learned
 
 
-def _outcomes(pairs: Sequence[tuple[float, float]], floors: tuple[float, ...]) -> list[tuple[int, float, float]]:
+def _outcomes(pairs: Iterable[tuple[float, float]], floors: tuple[float, ...]) -> list[tuple[int, float, float]]:
     """Bin each observation once, then accumulate the results at every floor."""
     buckets = [[0, 0.0, 0.0] for _ in floors]
     for entry_pf, net in pairs:
@@ -99,13 +103,17 @@ def fit(pairs: Sequence[tuple[float, float]], min_admitted: int, fallback: float
     Give both folds enough admitted trades. Require positive net expectancy in
     both. Shrink short and loss-free samples before comparing PF and coverage.
     """
+    return _fit(iter(pairs), len(pairs), min_admitted, fallback, candidates, tolerance, orders_factor)
+
+
+def _fit(pairs: Iterator[tuple[float, float]], length: int, min_admitted: int, fallback: float,
+         candidates: Sequence[float], tolerance: float, orders_factor: float) -> float | None:
     minimum = max(3, (min_admitted + 1) // 2)
-    if len(pairs) < 2 * minimum:
+    if length < 2 * minimum:
         return None
-    middle = len(pairs) // 2
     floors = tuple(sorted({fallback, *candidates}))
-    recent = _outcomes(pairs[middle:], floors)
-    earlier = _outcomes(pairs[:middle], floors)
+    earlier = _outcomes(islice(pairs, length // 2), floors)
+    recent = _outcomes(pairs, floors)
     best = None
     fallback_score = 0.0
     for floor, first, second in zip(floors, earlier, recent):
@@ -120,7 +128,7 @@ def fit(pairs: Sequence[tuple[float, float]], min_admitted: int, fallback: float
             continue
         count = first[0] + second[0]
         if orders_factor > 0:
-            score *= (count / len(pairs)) ** orders_factor
+            score *= (count / length) ** orders_factor
         if floor == fallback:
             fallback_score = score
         candidate = (score, count, -floor)

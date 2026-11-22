@@ -111,6 +111,31 @@ class StageGridTest(unittest.TestCase):
                                            book.step_auto_candidates(), book.pf_step_auto_tol, book.pf_auto_factor)
         self.assertEqual(model.at(early + 3600), updated.at(early + 3600))
 
+    def test_packed_auto_pf_matches_training_window_observations(self):
+        rng = random.Random(53)
+        closes = [60 * i for i in range(64 * 60)]
+        entries = [close - rng.randrange(1, 350) for close in closes]
+        nets = []
+        for i in range(len(closes)):
+            if i % 90 >= 35:
+                nets.append(.012 if rng.random() < .75 else -.005)
+            else:
+                nets.append(.006 if rng.random() < .31 else -.011)
+        previous = 12
+        options = (20, 1.04, (1.08, 1.15, 1.35, 1.70, 2.5, 3.5), .05, .3)
+        model = auto_set_pf.RollingFloors(closes, entries, nets, previous, *options)
+        results = []
+        for hour in (0, 1, 14, 27, 48, 49, 52, 64, 71):
+            now = hour * 3600
+            lower, upper = auto_set_pf.training_window(now)
+            values = auto_set_pf.observations(closes, entries, nets, previous, lower, upper)
+            expected = auto_set_pf.fit(values, *options)
+            self.assertEqual(model.learned(now), expected)
+            self.assertEqual(model.at(now), 1.04 if expected is None else expected)
+            results.append(expected)
+        self.assertIsNone(results[0])
+        self.assertTrue(any(floor is not None for floor in results))
+
     def test_auto_hold_set_learns_only_from_processed_hold_tape(self):
         book = se.SetBook()
         book.load({"stageLastN": {}, "minPfByStep": True, "minPfStepAuto": True,
@@ -126,9 +151,9 @@ class StageGridTest(unittest.TestCase):
             book._learn_grid_floors((symbol,), now)
             self.assertNotIn(st.id, book._grid_auto_models)
             book._learn_held_grid_floor(st, rows, now)
-        entry_pf, result = book._grid_auto_models[st.id].pairs[-1]
-        self.assertEqual(entry_pf, math.inf)
-        self.assertAlmostEqual(result, .01)
+        model = book._grid_auto_models[st.id]
+        self.assertEqual(model._entry_pfs[-1], math.inf)
+        self.assertAlmostEqual(model._net_returns[-1], .01)
         self.assertTrue(book.grid_history(st, rows).evaluate(now, streams=True).counts[0].qualified)
 
     def test_cts_c_technical_packs(self):
