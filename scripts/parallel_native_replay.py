@@ -48,11 +48,6 @@ def _calculate(payload):
         for key,value in row.items():setattr(st,key,value)
     book.bars,book.bar_t=market,clocks
     histories={};inputs=book._replay_symbol(symbol,histories,now)
-    # Closures are evaluated over exactly the immutable replay frame, including
-    # its final pause decision. No future candle or qualification is supplied.
-    count=len(inputs['bars'])
-    inputs['pause']={key:(fixed,PauseLookup(array('i',(fn(i) for i in range(count+1)))) if fn else None)
-                     for key,(fixed,fn) in inputs['pause'].items()}
     aliases=inputs.get('tape_alias',{})
     packed={sid:se.RowCols(rows)for sid,rows in histories.items()if rows and sid not in aliases}
     for sid,first in aliases.items():
@@ -62,6 +57,14 @@ def _calculate(payload):
     # and exit reason codes can never be decoded using another worker's table.
     codes=list(se._CODES)
     pauses={key:value for key,value in book.pause_now.items()if key[1]==symbol}
+    if book.hold_auto:
+        # Auto Hold reconstructs entries on this exact replay frame, so preserve
+        # the pauses and convert closures to transferable lookups.
+        count = len(inputs['bars'])
+        inputs['pause'] = {key: (fixed, PauseLookup(array('i', (fn(i) for i in range(count + 1)))) if fn else None)
+                           for key, (fixed, fn) in inputs['pause'].items()}
+    else:
+        inputs = {}
     while len(book._sig_cache)>4:book._sig_cache.pop(next(iter(book._sig_cache)))
     return packed,inputs,codes,pauses
 

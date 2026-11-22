@@ -3863,7 +3863,9 @@ class SetBook:
                         aborted = True
                         break                       # never restore an old-rules chunk after load invalidated it
                     self._hist_rows[symbol] = packed
-                    self._hist_inputs[symbol] = inputs
+                    if self.hold_auto:
+                        # Only Auto Hold reconstructs entries from these inputs.
+                        self._hist_inputs[symbol] = inputs
                     self._hist_replay_key[symbol] = (lookback0, gen0)
                     prev_at = self._hist_replay_at.get(symbol)
                     self._hist_replay_at[symbol] = time.time()

@@ -432,8 +432,9 @@ def replay_uses_each_symbols_last_completed_bar():
 
 def replay_freezes_market_before_ingestion_advances_its_clock():
     """A live refresh between symbols cannot advance this pass's candle clock."""
-    reference = _book(n_syms=2, bars=300, **SMALL)
-    actual = _book(n_syms=2, bars=300, **SMALL)
+    settings = {**SMALL, "holdAuto": True}
+    reference = _book(n_syms=2, bars=300, **settings)
+    actual = _book(n_syms=2, bars=300, **settings)
     for book in (reference, actual):
         book.bar_t = {s: T0 - BAR_S for s in book.bars}
     reference.replay_all(now=T0)
