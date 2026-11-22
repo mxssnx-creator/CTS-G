@@ -10,7 +10,7 @@ import math
 from collections import deque
 
 SOURCES = ("ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian",
-           "bb-bounce", "cci-reversal", "obv-trend")
+           "bb-bounce", "cci-reversal", "obv-trend", "volume-momentum")
 RANGES = ("short", "medium")
 TIMEFRAMES = (1, 5, 15, 30)
 
@@ -22,7 +22,8 @@ def warmup_bars(source, range_name):
     return {"ema-cross": (21, 55), "ema-trend": (26, 50),
             "macd-cross": (26, 35), "rsi-reversal": (8, 15),
             "rsi-momentum": (15, 22), "donchian": (11, 21), "bb-bounce": (20, 50),
-            "cci-reversal": (14, 20), "obv-trend": (20, 50)}[source][range_name == "medium"]
+            "cci-reversal": (14, 20), "obv-trend": (20, 50),
+            "volume-momentum": (21, 51)}[source][range_name == "medium"]
 
 
 def validate_bars(rows):
@@ -100,6 +101,38 @@ def held(events, keep=6):
 def states(closes, source, range_name, highs=None, lows=None, volumes=None):
     if source not in SOURCES or range_name not in RANGES:
         raise ValueError("unsupported Signal source/range")
+    if source == "volume-momentum":
+        # Exploratory within-asset momentum: volume-weighted completed-bar
+        # returns, admitted only when the latest bar's volume is at least its
+        # rolling average. This is not a forecast or a proven trading edge.
+        if (volumes is None or len(volumes) != len(closes) or
+                any(not math.isfinite(v) or v < 0 for v in volumes) or
+                any(not math.isfinite(c) or c <= 0 for c in closes)):
+            raise ValueError("volume-momentum needs positive finite closes and nonnegative volume")
+        period = 20 if range_name == "short" else 50
+        out = [0] * len(closes)
+        window = deque()
+        total_volume = weighted = magnitude = 0.0
+        for i in range(1, len(closes)):
+            v = volumes[i]
+            change = (closes[i] / closes[i-1] - 1) * v
+            if not math.isfinite(change):
+                raise ValueError("invalid volume-momentum input magnitude")
+            window.append((v, change))
+            total_volume += v; weighted += change; magnitude += abs(change)
+            if len(window) > period:
+                old_volume, old_change = window.popleft()
+                total_volume -= old_volume; weighted -= old_change; magnitude -= abs(old_change)
+            # Periodic rebasing prevents old large values from contaminating
+            # the sign of a later, much smaller window.
+            if i % 256 == 0:
+                total_volume = math.fsum(item[0] for item in window)
+                weighted = math.fsum(item[1] for item in window)
+                magnitude = math.fsum(abs(item[1]) for item in window)
+            if len(window) == period and total_volume > 0 and v * period >= total_volume:
+                epsilon = 1e-12 * max(magnitude, 0.0)
+                out[i] = 1 if weighted > epsilon else -1 if weighted < -epsilon else 0
+        return out
     if source == "bb-bounce":
         period = 20 if range_name == "short" else 50
         out = [0] * len(closes)

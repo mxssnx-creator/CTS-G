@@ -61,7 +61,7 @@
     },
     "maxContextDrawdown": 0.04,
     "minPf": 2.2,
-    "realLastN": "coordinated"
+    "realLastN": "lane-minimal"
   },
   "protections": [
     {

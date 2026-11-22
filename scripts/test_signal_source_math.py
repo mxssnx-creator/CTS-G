@@ -10,6 +10,21 @@ from signal_sources import states
 
 
 class SourceMath(unittest.TestCase):
+    def test_volume_momentum_matches_independent_rolling_calculation(self):
+        values=[100+4*math.sin(i/11)+math.sin(i/3) for i in range(700)]
+        volume=[1+(i*7)%13 for i in range(len(values))]
+        for label,period in (('short',20),('medium',50)):
+            expected=[0]*len(values)
+            for i in range(period,len(values)):
+                changes=[(values[j]/values[j-1]-1)*volume[j] for j in range(i-period+1,i+1)]
+                v=sum(volume[i-period+1:i+1]);weighted=math.fsum(changes)
+                epsilon=1e-12*math.fsum(abs(x) for x in changes)
+                if v and volume[i]*period>=v:
+                    expected[i]=1 if weighted>epsilon else -1 if weighted < -epsilon else 0
+            self.assertEqual(states(values,'volume-momentum',label,volumes=volume),expected)
+        self.assertEqual(states([100.]*100,'volume-momentum','short',volumes=[0]*100),[0]*100)
+        with self.assertRaises(ValueError):states(values,'volume-momentum','short')
+
     def test_bollinger_matches_decimal_population_variance(self):
         fixtures=[[100+scale*(1+math.sin(i/11)) for i in range(500)] for scale in (1e-10,1,1e5)]
         fixtures.append([100+(i//20)%6 for i in range(1200)])

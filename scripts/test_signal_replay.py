@@ -48,7 +48,7 @@ class SignalContracts(unittest.TestCase):
 
     def test_strict_schema_and_effective_switches(self):
         model.validate_config(config())
-        for key, value in (("sources", ["not-a-signal"]), ("timeframes", [2]), ("mode", "live"), ("minPf", 2.199), ("normalEnabled", "false")):
+        for key, value in (("sources", ["not-a-signal"]), ("timeframes", [2]), ("mode", "live"), ("minPf", 1.0), ("normalEnabled", "false")):
             raw = config(); raw[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError): model.validate_config(raw)
         raw = config(); raw["unusedMagicProfit"] = True

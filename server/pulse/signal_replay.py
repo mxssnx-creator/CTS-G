@@ -21,7 +21,6 @@ from position_cost import sl_floor_frac
 MINUTE = 60000
 HOUR = 3600000
 STAGES = ("base", "main", "real")
-SIGNAL_MIN_PF = 2.2  # User's Signals-only floor; ordinary strategy thresholds are separate.
 
 
 def evidence(values):
@@ -61,8 +60,6 @@ def validate_config(raw):
     for key in ("minPf", "maxContextDrawdown"):
         if not isinstance(cfg[key], (int, float)) or not math.isfinite(cfg[key]) or cfg[key] <= (1 if key == "minPf" else 0):
             raise ValueError(f"invalid {key}")
-    if cfg["minPf"] < SIGNAL_MIN_PF:
-        raise ValueError(f"Signals PF floor must remain at least {SIGNAL_MIN_PF}")
     if type(cfg["historyMinutes"]) is not int or not 1 <= cfg["historyMinutes"] <= 4320:
         raise ValueError("invalid historyMinutes")
     if not cfg["lastNLanes"] or len({canonical(x) for x in cfg["lastNLanes"]}) != len(cfg["lastNLanes"]):
@@ -417,7 +414,7 @@ def replay(data, raw_config, start, trade_start, end, *, freeze_prehistory=False
             "openPositions": [{"context": key, "symbol": item["context"]["symbol"], "entryT": item["position"].entry_t,
                                "entry": item["position"].entry, "qty": item["position"].qty, "side": item["position"].side,
                                "entryFee": item["position"].entry_fee, "entrySequence": item["entrySequence"]} for key, item in open_book.items()],
-            "limitations": ["nine supported source families, no full CTS-A-O catalogue", "fixed native-distance protection grid, not CTS-A-O lane scaling or MFE fitting",
+            "limitations": ["experimental source families, no full CTS-A-O catalogue", "fixed native-distance protection grid, not CTS-A-O lane scaling or MFE fitting",
                             "no DCA, Active, coordination or venue adapter", "OHLC stop-first and modeled liquidity, not fill proof",
                             "no funding, liquidation, margin reservation or venue netting model", "minute close/open drawdown marks do not bound intraminute drawdown",
                             "drawdown limits pause new admissions, not guarantee a loss bound"]}
