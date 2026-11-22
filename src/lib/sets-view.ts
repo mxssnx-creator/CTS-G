@@ -1,3 +1,4 @@
+import type { StageGridSelection } from "./stage-grid.ts";
 /**
  * The Sets overview: which Sets a view shows for a chosen step range and strategy type, and the post-Base figures of
  * exactly those Sets.
@@ -12,6 +13,8 @@ import type { PfBase, WindowFigure, WindowKey } from "./live-stats.ts";
 
 /** One Set of `sets.index`. The gate-window fields are what the pooled PF needs; the others fill the table. */
 export type SetIndexRow = {
+  execId?: string;
+  stageGrid?: StageGridSelection;
   i: number;
   id: string;
   kind: "base" | "exit" | "trail";

@@ -1,3 +1,4 @@
+import { StageGridPanel } from "@/components/stage-grid";
 import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
@@ -46,7 +47,7 @@ export function StatsOverview({
           s={`Net gains ÷ net losses · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.count < 8 ? "insufficient evidence" : cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
-        {live?.sets?.pfBase ? (
+        {!live?.sets?.stageGrid && live?.sets?.pfBase ? (
           <Hero
             k="Base-window PF · all-stage validated"
             v={evidencePfText(live.sets.pfBase.base, live.sets.pfBase.base.n)}
@@ -54,7 +55,7 @@ export function StatsOverview({
             tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}
           />
         ) : null}
-        {live?.execution?.sets.stages ? (
+        {!live?.sets?.stageGrid && live?.execution?.sets.stages ? (
           <Hero
             k="Stages · Base → Main → Real"
             v={`${live.execution.sets.stages.real + live.execution.sets.stages.realNeg} Sets on Real`}
@@ -62,7 +63,7 @@ export function StatsOverview({
             tone="ok"
           />
         ) : null}
-        {live?.execution?.overall && Object.keys(live.execution.overall.scopes).length ? (
+        {!live?.sets?.stageGrid && live?.execution?.overall && Object.keys(live.execution.overall.scopes).length ? (
           <Hero
             k="Real · overall strategies by scope"
             v={`${Object.values(live.execution.overall.scopes).filter((s) => s.allow === true).length}/${Object.values(live.execution.overall.scopes).filter((s) => typeof s.allow === "boolean").length} evaluated scopes open`}
@@ -72,7 +73,7 @@ export function StatsOverview({
             tone={Object.values(live.execution.overall.scopes).some((s) => s.allow === false) ? "bad" : "ok"}
           />
         ) : null}
-        {live?.execution ? (
+        {!live?.sets?.stageGrid && live?.execution ? (
           <Hero
             k="Executed · after all gates"
             v={`${live.execution.open.positions} open`}
@@ -99,12 +100,12 @@ export function StatsOverview({
         />
       </div>
   );
-  if (compact) return heroes;
+  if (compact) return <div className="grid gap-3">{heroes}<StageGridPanel live={live} /></div>;
   return (
     <section className="grid gap-3">
       {heroes}
 
-      <StagesCard live={live} />
+      {live?.sets?.stageGrid ? <StageGridPanel live={live} /> : <StagesCard live={live} />}
       <LiftCard live={live} />
       <SimDiffCard live={live} />
 

@@ -41,7 +41,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PULSE = os.path.join(HERE, "..", "server", "pulse")
 sys.path.insert(0, PULSE)
 import set_engine as se  # noqa: E402
-from position_cost import cost_as_frac, signed_result_r  # noqa: E402
+import auto_set_pf  # noqa: E402
+from position_cost import cost_as_frac, signed_result_r
+from stage_grid import lane_id, STAGES  # noqa: E402
 
 OVERLAY = os.path.join(PULSE, "overlay-bingx-x01.json")
 
@@ -277,9 +279,34 @@ def tape_source(tapes, idx: int, now: float, lookback_s: float):
     return resolve(idx, now, lookback_s) if resolve else tapes
 
 
+
+def grid_at(book, tapes: Tapes, st, now: float):
+    """The same stage query as the live scorer, on the snapshot's closed prefix."""
+    params = book.stage_params(st.pack, st)
+    source = tape_source(tapes, st.idx, now, params.lookback_s)
+    close, entry, gross = source.by_set[st.idx]
+    cache = tapes.__dict__.setdefault("_exec_grid_query", {})
+    model = book._grid_auto_models.get(st.id)
+    key = (now, id(close), book.stage_grid, params, tapes.cf, model, book.sl_auto_allows(st))
+    item = cache.get(st.idx)
+    if item and item[0] == key:
+        return item[1]
+    cutoff = bisect.bisect_left(close, now - book.history_bars() * 60.0)
+    end = bisect.bisect_left(close, now)
+    result = book.grid_history(st, closes=close[cutoff:end], entries=entry[cutoff:end],
+                               nets=[v - tapes.cf for v in gross[cutoff:end]]).evaluate(
+                                   now, streams=True, limit=se.PROC_KEEP)
+    cache[st.idx] = (key, result)
+    return result
+
 def gate_metrics(book, tapes: Tapes, st, now: float):
     """(valid, rank, gate_n, gate_pf): the gate and the ranking key exactly as SetBook._score_one / gate_reason /
     rank_key compute them (self_check compares both with the engine). The Base windows first (gate_base), then the stages after Base."""
+    if getattr(book, "stage_grid", None):
+        result = grid_at(book, tapes, st, now)
+        base = result.counts[0]
+        allowed = book.sl_auto_allows(st) and not book.stop_cap_exceeded(st)
+        return ("pos" if allowed and result.ready else "", result.rank, base.orders, se.pf_of(base.gain, base.loss))
     valid, rank, n, pf = gate_base(book, tapes, st, now)
     if valid and (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
         valid, lane_stats = stage_lane_stats(book, tapes, st, now)          # "pos" / "neg": the lane the Set passes Real on; "" when none
@@ -362,6 +389,11 @@ def _min_ok(book, e: Dict[str, Any]) -> bool:
 
 def gate_base(book, tapes: Tapes, st, now: float, coordinate: bool = True):
     """The Base part of gate_metrics: the long, short and minimal windows, the drawdown time and the rank (no stage after Base)."""
+    if getattr(book, "stage_grid", None):
+        result = grid_at(book, tapes, st, now)
+        base = result.counts[0]
+        ok = bool(base.qualified) and book.sl_auto_allows(st) and not book.stop_cap_exceeded(st)
+        return ok, result.rank, base.orders, se.pf_of(base.gain, base.loss)
     e = base_eval(book, tapes, st, now)
     valid = _long_ok(book, e)
     if valid and e.get("base_short", book.base_short):       # Base: the short window too (both must pass)
@@ -379,6 +411,8 @@ def gate_base(book, tapes: Tapes, st, now: float, coordinate: bool = True):
 
 def validation_lane(book, tapes: Tapes, st, now: float) -> str:
     """PF-validated lane, independent of the minimal entry coordination."""
+    if getattr(book, "stage_grid", None):
+        return gate_metrics(book, tapes, st, now)[0]
     if not gate_base(book, tapes, st, now, coordinate=False)[0]:
         return ""
     if not (book.main_on or book.neg_on or book.realst_on):
@@ -486,7 +520,7 @@ def other_lanes(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[str
     """The lanes of the book's order, other than `lane`, this valid Set also passes its stages on, each with the rank key of that lane's own Set:
     [(lane, rank)]. A Set open on both lanes stays a candidate of the second lane when a per-candidate rule (the Axis) closes the first to it
     (SetBook.pick_any(allowed_lanes=(lane,)) lists it under every lane it is open on)."""
-    if not (book.main_on or book.neg_on or book.realst_on):
+    if getattr(book, "stage_grid", None) or not (book.main_on or book.neg_on or book.realst_on):
         return []
     ch, nets = chain_at(book, tapes, st, now)
     v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack, st))
@@ -509,6 +543,8 @@ def other_lanes(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[str
 def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float]]:
     """(exit t, net) of the Set's Real Set ("pos") or Real Negative Set ("neg") orders closed before now inside the lookback: the stream the engine's
     Axis judges for one Set and lane (Pulse._scope_choice reads st.exe / st.neg in [score_at - lookback, score_at])."""
+    if getattr(book, "stage_grid", None):
+        return [(t, net) for t, _entry, net in lane_stream_entries(book, tapes, st, now, lane)]
     lb = evidence_s(book)
     tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
     e = bisect.bisect_left(tx, now)
@@ -522,6 +558,9 @@ def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[flo
 
 def lane_stream_entries(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float, float]]:
     """lane_stream with each order's entry time: (exit t, entry t, net), oldest exit first."""
+    if getattr(book, "stage_grid", None):
+        streams = grid_at(book, tapes, st, now).streams
+        return list(streams[2]) if lane == "pos" and len(streams) > 2 else []
     lb = evidence_s(book)
     tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
     e = bisect.bisect_left(tx, now)
@@ -553,14 +592,18 @@ def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Opti
 
 
 def relation_rows(book, tapes: Tapes, st, now: float) -> List[Tuple[float, float, str, float]]:
-    """(exit t, entry t, symbol, net) of the Set's Main-Set orders inside the lookback at now: what SetBook.set_processed hands the relation lanes
-    (set_engine._chain_of(..., relation_rows=True)), from the same chain every other stage figure here reads."""
+    """The same causal post-Base input that SetBook.set_processed provides to relations."""
     lb = evidence_s(book)
     src = tape_source(tapes, st.idx, now, lb)
     tx, te, pp = src.by_set[st.idx]
     symbols = getattr(src, "symbols_by_set", {}).get(st.idx) or tapes.symbols_by_set[st.idx]
-    e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
+    if getattr(book, "stage_grid", None):
+        if not book.sl_auto_allows(st):
+            return []
+        ids = grid_at(book, tapes, st, now).validated_base_ids
+        return [(tx[j], te[j], symbols[j], pp[j] - tapes.cf) for j in (lo + i for i in ids)]
+    e = bisect.bisect_left(tx, now)
     ts, ents = list(tx[lo:e]), list(te[lo:e])
     nets = [x - tapes.cf for x in pp[lo:e]]
     ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st), window_start=now - lb)
@@ -679,16 +722,28 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
             if len(pp) < book.gate_min or (g_ / l_ if l_ > 0 else 99.0) < book.min_pf:
                 continue
         picks.append((st, now))
-    for st, now in picks:
+    grid_auto = AutoFloors(book, tapes) if book.grid_auto_enabled() else None
+    for st, now in sorted(picks, key=lambda row: row[1]) if grid_auto else picks:
+        if grid_auto:
+            grid_auto.apply(book, now)
         tx, te, pp = tapes.window(st.idx, now, book.history_bars() * 60.0, 10 ** 9)
         st.hist = [{"t": float(a), "pnl": float(x) - tapes.cf, "pnl_pct": float(x), "hold_s": float(a - b), "reason": "x"}
                    for a, b, x in zip(tx, te, pp)]
         st.live = []
+        st.proc_replayed = False
+        if getattr(book, "stage_grid", None):
+            rows = [tuple(row.get(k) for k in se._ROW_KEYS) for row in st.hist]
+            book.set_processed(st, rows, now=now)
         book._score_one(st, now=now)
         st.n = sum(1 for t in tx if t >= now - evidence_s(book))
         eng_valid = book.gate_reason(st) == ""
         eng_lane = book.lane_of(st)
         valid, key, n, pf = gate_metrics(book, tapes, st, now)
+        if getattr(book, "stage_grid", None):
+            checked = grid_at(book, tapes, st, now)
+            bad += int(bool(valid) != eng_valid or checked.path != st.exec_grid.path or checked.counts != st.exec_grid.counts)
+            st.hist = []
+            continue
         if (valid or "") not in ("", True) and str(valid) != eng_lane:
             bad += 1
         valid = bool(valid)
@@ -711,10 +766,11 @@ class AutoFloors:
     def __init__(self, book, tapes: "Tapes"):
         self.tapes = tapes
         self.on = bool(getattr(book, "pf_by_step", False) and getattr(book, "pf_step_auto", False))
+        self.grid = bool(getattr(book, "stage_grid", None))
         # per Set, in the engine's order: (bucket key, exit times, running signature of its first k orders, its pairs (exit t, PF at entry, net))
         self.sets: List[Tuple[Tuple[int, int], List[float], List[int], List[Tuple[float, float, float]]]] = []
         self.last = None
-        if not self.on:
+        if not self.on or self.grid:
             return
         n_win, cf = int(book.pf_step_auto_n), tapes.cf
         for st in book.by_idx:
@@ -790,6 +846,31 @@ class AutoFloors:
             self._apply_sl(book, now)
         if not self.on:
             return False
+        if self.grid:
+            _, upper = auto_set_pf.training_window(now)
+            key = (upper, book.lookback)
+            if key == self.last:
+                return False
+            self.last = key
+            own = {}
+            models = {}
+            earliest = upper - book.history_bars() * se.BAR_S
+            for st in book.by_idx:
+                tx, te, pp = self.tapes.by_set[st.idx]
+                start = bisect.bisect_left(tx, earliest)
+                end = bisect.bisect_left(tx, upper)
+                if end - start <= book.pf_step_auto_n:
+                    continue
+                model = auto_set_pf.RollingFloors(tx[start:end], te[start:end], [p - self.tapes.cf for p in pp[start:end]],
+                                               book.pf_step_auto_n, book.pf_set_auto_min, book.grid_auto_fallback(st)[0],
+                                               book.step_auto_candidates(), book.pf_step_auto_tol, book.pf_auto_factor)
+                models[st.id] = model
+                floor = model.learned(upper)
+                if floor is not None:
+                    own[st.id] = floor
+            book.set_floor_auto, book.step_floor_auto = own, {}
+            book._grid_auto_models = models
+            return True
         hour = int(now // 3600) * 3600.0
         boundary = hour - book.lookback * se.BAR_S
         refresh_key = (hour, book.lookback)
@@ -834,7 +915,8 @@ class AutoFloors:
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
-            refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None) -> List[Dict[str, Any]]:
+            refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None,
+            candidate_filter=None) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
     this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
@@ -842,7 +924,11 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
     end_of = {s: bisect.bisect_left(times[s], float(hours[-1]) + 3600) for s in names}
-    busy = {s: -1 for s in names}
+    grid_enabled = bool(getattr(book, "stage_grid", None))
+    axis_sizing = None
+    if grid_enabled:
+        axis_sizing, axis_pick, axis_coord = axis_pick, None, None
+    busy = {} if grid_enabled else {s: -1 for s in names}
     executed: List[Dict[str, Any]] = []
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
     cf = cost_as_frac(book.cost_pct)
@@ -854,11 +940,11 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     opened: List[Tuple[float, str, str]] = []           # (exit t, Set id, lane) of executed positions: the Axis continuation cap counts the open ones
     # the profit group gate (SetBook.group_gate, owner 2026-11-06): a group (pack x kind x TP range x lane) opens only while the newest groupGateN net results it executed inside
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
-    gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if getattr(book, "group_gate", False) else None
+    gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if not grid_enabled and getattr(book, "group_gate", False) else None
     ghist: Dict[str, List[Tuple[float, float]]] = {}
     gside = getattr(book, "group_gate_side", False)
 
-    cg = bool(getattr(book, "config_gate", False))      # the config gate: one configuration Set's own executed results (se.config_key), the same rule
+    cg = not grid_enabled and bool(getattr(book, "config_gate", False))      # the config gate: one configuration Set's own executed results (se.config_key), the same rule
 
     def group_ok(st_, lane_: str, now_: float) -> bool:
         if gg is None and not cg:
@@ -875,7 +961,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             if c is None or now >= c[0]:
                 ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
                 extra_ = other_lanes(book, tapes, st, now, ok_) if both_lanes and isinstance(ok_, str) and ok_ else []
-                c = cache[st.idx] = (gate_until(book, tapes, st, now), ok_, key_, extra_)
+                c = cache[st.idx] = (now + 60.0 if grid_enabled else gate_until(book, tapes, st, now), ok_, key_, extra_)
             return c[1], c[2], c[3]
         ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
         return ok_, key_, (other_lanes(book, tapes, st, now, ok_) if both_lanes and isinstance(ok_, str) and ok_ else [])
@@ -910,15 +996,19 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             entry_t = float(t + 60)
             if refresh_s and minute and minute % every == 0:
                 ranked, _ = rank_at(entry_t)
-            for s in names:
+                ranked_t = entry_t
+            slots = ((s, d) for s in names for d in (1, -1)) if grid_enabled else ((s, 0) for s in names)
+            for s, desired in slots:
+                slot = (s, desired) if desired else s
                 i = idx_of[s].get(t)
-                if i is None or i <= busy[s]:
+                if i is None or i <= busy.get(slot, -1):
                     continue
                 w, dirs, confs, _ = shadow[s]
                 if i < w:
                     continue
                 signals = sorted(((p, confs[p][i], dirs[p][i]) for p in book.packs
-                                  if book.symbol_allows(p, s) and dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
+                                  if book.symbol_allows(p, s) and dirs[p][i] != 0 and (not desired or dirs[p][i] == desired)
+                                  and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
                 if not signals:
                     continue
                 if not refresh_s and ranked_t != entry_t:
@@ -969,6 +1059,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                                                        key=lambda r: r[0], reverse=True)]
                         if gg is not None or cg:
                             pool = [st_ for st_ in pool if group_ok(st_, lane_, entry_t)]
+                        if candidate_filter:
+                            pool = [st_ for st_ in pool if candidate_filter(st_, s, d, entry_t, ranked_t)]
                         if pool:
                             lane_pick = lane_
                             break
@@ -987,9 +1079,14 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     if axis and not axis_allows(closes if axis_evidence is None else axis_evidence, entry_t, axis, cf):
                         continue
                     st = pick(pool, (s, t)) if pick else pool[0]
+                    if axis_sizing is not None:
+                        allowed, adjustment = axis_sizing(st, lane_pick, ranked_t)
+                        if allowed:
+                            vol_pick = adjustment
                     break
                 else:
                     continue
+                path_id = lane_id(st.id, grid_at(book, tapes, st, ranked_t).path) if grid_enabled else ""
                 lane = se.SetLane(st, s)
                 end = end_of[s]
                 # The explicit candidate admits only this bar. Later signals on the same tape cannot reopen it.
@@ -998,7 +1095,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     if lane.open is not None:
                         # An unfinished position still occupies its symbol.  Do not
                         # retrospectively try later signals as though it were flat.
-                        busy[s] = end - 1
+                        busy[slot] = end - 1
                         # The position also occupies its Axis continuation slot.
                         # Its exit is unknown beyond this replay window; omitting
                         # it here lets other symbols exceed the live per-Set cap.
@@ -1009,7 +1106,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                             executed.append({"open_at_end": True, "t_in": float(t + 60),
                                              "t_mark": float(times[s][end - 1] + 60),
                                              "symbol": s, "set": st.id, "pack": pack,
-                                             "kind": st.kind, "lane": lane_pick,
+                                             "kind": st.kind, "lane": lane_pick, "execLaneId": path_id,
                                              "side": "LONG" if pos["side"] > 0 else "SHORT",
                                              "entry": pos["entry"], "mark": mark,
                                              "mark_net": (mark / pos["entry"] - 1) * pos["side"] - cf})
@@ -1021,13 +1118,13 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     pz = (shadow[s][3].get(-1) or {}).get((pack, st.side))
                     if pz is not None:
                         rest = max(rest, int(pz[tr["exit_i"]]))
-                busy[s] = tr["exit_i"] + rest
+                busy[slot] = tr["exit_i"] + rest
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
                 from relational_volume import set_factor, strategy_weight
                 weights = getattr(book, "processing_overlay", {}).get("relationalVolumeRatios")
                 axis_weight = strategy_weight(weights, "axis") if axis_coord is not None and any(a.enabled for a in axis_coord.axes.values()) else 1.0
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
-                       "pack": pack, "kind": st.kind, "lane": lane_pick, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
+                       "pack": pack, "kind": st.kind, "lane": lane_pick, "execLaneId": path_id, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
                        "tr": tr, "fracs": book.lane_fracs(st), "vol": vol_pick * set_factor(weights, st, s) * axis_weight}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))

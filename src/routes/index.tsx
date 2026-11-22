@@ -206,6 +206,7 @@ function DeskPage() {
                   <dd className="text-right text-fg">{fmtPx(p.px)}</dd>
                   <dt>Age</dt>
                   <dd className="text-right text-fg">{ago(p.ageS)}</dd>
+                  {p.execLaneId && <><dt>Stage</dt><dd title={p.execLaneId} className="text-right text-fg">Exec · {p.filledOrders ?? "—"} fills</dd></>}
                   <dt>Controls</dt>
                   <dd className={`text-right ${hasControlCoverage(p) ? "text-primary" : "text-warn"}`}>
                     {controlCoverage(p)}
@@ -664,7 +665,7 @@ function EngineStrip({ stats }: { stats: LiveStats | null }) {
         <span>ws {api?.wsOk ? "ok" : "gap"} {fmt(api?.wsAgeMs, 0)}ms</span>
         <span>id {e?.trackPrefix ?? "G"}</span>
         <span>foreign {e?.ignoredForeign ?? 0}</span>
-        <span>vol ×{fmt(stats?.volumeFactor ?? (stats as LiveStats & { pulse?: { volumeFactor?: number } })?.pulse?.volumeFactor, 2)}</span>
+        <span>vol ×{fmt(stats?.sizingVolumeFactor ?? stats?.volumeFactor ?? (stats as LiveStats & { pulse?: { volumeFactor?: number } })?.pulse?.volumeFactor, 3)}</span>
         <span>notional {fmt(stats?.targetNotional, 2)}</span>
         <span>1m {fmt(e?.tfReady?.["1m"], 0)}</span>
         <span>5m {fmt(e?.tfReady?.["5m"], 0)}</span>

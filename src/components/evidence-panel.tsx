@@ -24,6 +24,7 @@ export function CostEvidencePanel({ stats }: { stats: LiveStats | null }) {
 }
 
 export function StageEvidencePanel({ stats }: { stats: LiveStats | null }) {
+  if (stats?.sets?.stageGrid) return null;
   const stages = stats?.sets?.pfBase?.stages;
   const windows = stats?.sets?.pfBase?.windows;
   return <section className="rounded-xl border border-border bg-surface p-4" data-testid="stage-evidence">

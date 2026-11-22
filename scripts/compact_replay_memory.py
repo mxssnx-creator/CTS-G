@@ -21,6 +21,10 @@ class CompactMemory:
         sg=self.sg;native=self.original_floors
         class PackedFloors(native):
             def __init__(self,book,tapes):
+                self.grid=bool(getattr(book,'stage_grid',None))
+                if self.grid:
+                    super().__init__(book,tapes)
+                    return
                 self.on=bool(getattr(book,'pf_by_step',False)and getattr(book,'pf_step_auto',False))
                 self.sets=[];self.last=None;self.tapes=tapes
                 if not self.on:return

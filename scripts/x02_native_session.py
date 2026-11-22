@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 ROOT = Path(__file__).resolve().parents[1]
 HOST = "https://open-api-vst.bingx.com"
 CONN = "bingx-x02"
+MAX_SESSION_SYMBOLS = 200
 TERMINAL = {"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 
 
@@ -43,22 +44,32 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
-def frozen_overlay(raw, symbols, history_hours=12, symbol_count=50):
-    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= 50 or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
+def frozen_overlay(raw, symbols, history_hours=None, symbol_count=50, max_active=None):
+    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= MAX_SESSION_SYMBOLS or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
         not isinstance(s, str) or not s.endswith("-USDT") or not s.replace("-", "").isalnum() for s in symbols
     ):
         raise ValueError(f"exactly {symbol_count} distinct explicit USDT symbols required")
+    full_grid = isinstance(raw.get("stageLastN"), dict) and raw["stageLastN"].get("enabled", True)
+    if history_hours is None:
+        history_hours = 11 if full_grid else 12
     if not 1 <= history_hours <= 72:
         raise ValueError("history hours must be between 1 and 72")
     ov = json.loads(json.dumps(raw))
     ranges = {"micro": True, "minimal": True, "short": True, "normal": False, "long": False, "wide": False}
-    ov.update(symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=symbol_count,
+    geometry = {} if full_grid else dict(setMinStep=2, setStepMax=7, shortRangeStepMin=2, shortRangeStepMax=7,
+                                        tpRanges=ranges, trailRanges=ranges)
+    ov.update(**geometry, symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=symbol_count,
               volumeFactor=.05, sizePctOfBalance=0, targetNotional=2.15, sizeMaxNotional=25,
-              maxOpen=symbol_count, setMinStep=2, setStepMax=7, setStepAdapt=False,
-              shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges,
+              maxOpen=symbol_count, setStepAdapt=False,
               minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
               indExtraSources=False, ownedQuantityControls=True)
+    if full_grid:
+        ov.update(scanS=.25, maxOpen=2 * symbol_count)
+    if max_active is not None:
+        if type(max_active) is not int or not 1 <= max_active <= ov["maxOpen"]:
+            raise ValueError("max active must be between 1 and the selected position capacity")
+        ov["maxOpen"] = max_active
     for name, default in (('microMinSlDistancePct', .1), ('microMinTrailDistancePct', .05)):
         value = ov.setdefault(name, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 10:
@@ -92,13 +103,15 @@ def is_entry(body):
 
 
 class Journal:
-    def __init__(self, api, out, tag, symbols=None):
+    def __init__(self, api, out, tag, symbols=None, *, max_entry_orders=None):
         self.api, self.out, self.tag = api, Path(out), tag
         self.symbols=None if symbols is None else frozenset(symbols)
         # Use native place-then-cancel with exact owned IDs. The atomic
         # replacement path embeds an aggregate-closing control payload.
         api.cancel_replace_ok = False
         self.phase, self.deadline = "warming", None
+        self.max_entry_orders = max_entry_orders
+        self.entry_orders = 0
         self.intents = []
         self.owned_clients = set()
         self.owned_orders = set()
@@ -234,9 +247,14 @@ class Journal:
                     self.append({'at': time.time(), 'phase': self.phase, 'method': method,
                                  'path': path, 'body': body, 'result': 'locally-rejected', 'response': reply})
                     return reply
-            if is_entry(order) and (self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline):
-                return {"code": 101209, "error": True, "cooled": True, "msg": "session admission paused or deadline reached"}
         with self.lock:
+            requested_entries = sum(is_entry(order) for order in bodies)
+            if requested_entries:
+                if self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline:
+                    return {"code": 101209, "error": True, "cooled": True, "msg": "session admission paused or deadline reached"}
+                if self.max_entry_orders is not None and self.entry_orders + requested_entries > self.max_entry_orders:
+                    return {"code": 101209, "error": True, "cooled": True, "localPolicyRejection": True,
+                            "msg": "session entry submission budget exhausted"}
             identities = [(str(order['symbol']), str(order.get('clientOrderID') or order.get('clientOrderId')).lower()) for order in bodies]
             if len(set(identities)) != len(identities) or any(identity in self.owned_clients for identity in identities):
                 raise RuntimeError('client order ID was already journaled; reconcile it without resubmission')
@@ -247,6 +265,9 @@ class Journal:
             self.append(row)
             self.owned_clients.update(identities)
             self.submitted.update((identity, dict(order)) for identity, order in zip(identities, bodies))
+            # Uncertain writes may still fill. Each reserved entry spends a
+            # session slot even when the transport result cannot be resolved.
+            self.entry_orders += requested_entries
             try:
                 reply = self.original(method, path, body)
             except BaseException as exc:
@@ -303,6 +324,12 @@ def save_fee_cache(path, credentials, rates):
     if path:atomic_json(path,dict(accountIdentity=fee_cache_identity(credentials),rates=rates))
 
 
+def valid_history_bar(bar):
+    return (len(bar) == 5 and all(isinstance(v, (int, float)) and math.isfinite(v) for v in bar)
+            and min(bar[:4]) > 0 and bar[4] >= 0 and bar[1] >= max(bar[0], bar[3], bar[2])
+            and bar[2] <= min(bar[0], bar[3]))
+
+
 def seed_history(book, path, symbols, now):
     """Resume raw VST candles only; never reuse qualification scores or trades."""
     if not path:return 0
@@ -318,10 +345,8 @@ def seed_history(book, path, symbols, now):
         if not bars or last is None:continue
         if (len(bars)>4320 or not isinstance(last,(int,float)) or not math.isfinite(last)
                 or last+60>data['capturedAt']+1):raise ValueError('invalid captured history clock')
-        for bar in bars:
-            if (len(bar)!=5 or any(not isinstance(v,(int,float)) or not math.isfinite(v) for v in bar)
-                    or min(bar[:4])<=0 or bar[4]<0 or bar[1]<max(bar[0],bar[3],bar[2])
-                    or bar[2]>min(bar[0],bar[3])):raise ValueError('invalid captured OHLCV')
+        if not all(map(valid_history_bar, bars)):
+            raise ValueError('invalid captured OHLCV')
         book.ingest_bars(symbol,bars,last_t=last)
         loaded+=1
     return loaded
@@ -407,6 +432,20 @@ def freeze_account_settings(pulse):
     pulse.ensure_max_leverage = lambda _symbol, force=False: 1
     pulse.leverage_for = lambda _contract=None: 1
     if getattr(pulse,'api',None) is not None:pulse.api.cancel_replace_ok=False
+
+
+def probe_demo_position_bound(pulse, native, maximum):
+    """Report the safety bound of this isolated demo instead of unlimited capacity."""
+    original = pulse.record_test
+
+    def report(name, ok, detail):
+        if name == "qa-unlimited":
+            amount = len(pulse.open)
+            return original("qa-demo-position-bound", native.MAX_OPEN == maximum and amount <= maximum,
+                            f"cap={native.MAX_OPEN} required={maximum} open={amount}")
+        return original(name, ok, detail)
+
+    pulse.record_test = report
 
 
 
@@ -625,9 +664,11 @@ def main(argv=None):
     ap.add_argument("--warmup-minutes", type=float, default=30)
     ap.add_argument("--cleanup-seconds", type=float, default=180)
     ap.add_argument("--heartbeat-seconds", type=float, default=60)
-    ap.add_argument("--history-hours", type=int, default=12,
+    ap.add_argument("--history-hours", type=int,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--max-active", type=int, help="lower the native position cap for this demo session")
+    ap.add_argument("--max-entry-orders", type=int, help="maximum entry orders dispatched over the entire session")
     ap.add_argument('--admission',choices=('native','full-universe'),default='native')
     ap.add_argument('--allow-foreign-symbols',action='store_true',
                     help='allow other positions/orders outside a deliberately disjoint selected universe')
@@ -636,10 +677,12 @@ def main(argv=None):
         ap.error("observation<=30min, warmup<=60min and cleanup<=600s must be positive")
     if not 15 <= args.heartbeat_seconds <= 300:
         ap.error('heartbeat must be between15 and300 seconds')
+    if args.max_entry_orders is not None and args.max_entry_orders < 1:
+        ap.error("max entry orders must be positive")
     if args.out.exists():
         ap.error("choose a new private output directory; sessions cannot overwrite prior evidence")
     symbols = json.loads(args.symbols.read_text())
-    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours, args.symbol_count)
+    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours, args.symbol_count, args.max_active)
     required_history = context_requirement(overlay)
     os.umask(0o077)
     args.out.mkdir(parents=True, mode=0o700)
@@ -650,12 +693,12 @@ def main(argv=None):
               "createdAt": time.time(), "requestedObservationSeconds": args.minutes * 60, "symbols": symbols,
               "complete": False, "executed": False, "overlay": overlay,
               "requiredHistoryBars": required_history, "admissionPolicy": args.admission,
+              "entryOrderBudget": args.max_entry_orders,
               'accountScope':'selected symbols' if args.allow_foreign_symbols else 'exclusive account',
               "limitations": ["minute OHLC captures cannot establish tick-identical simulation fills",
                               "external Binance/Bybit indication sources disabled; BingX VST data only",
                               "cleanup closes are reported separately from natural strategy closes",
                               "leverage and margin settings remain unchanged; margin estimates use 1x",
-                              "native shared one-position-per-symbol constraint remains active",
                               "minimum venue lots may exceed nominal volume-factor sizing"],
               "sourceSha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in (Path(__file__), ROOT / "server/pulse/pulse_trader.py", ROOT / "server/pulse/set_engine.py")}}
@@ -694,7 +737,7 @@ def main(argv=None):
     account_scope=symbols if args.allow_foreign_symbols else None
     preflight=require_empty_account(api,account_scope)
     report["preflight"] = {"at": time.time(), "virtualCurrency": "VST", **preflight}
-    journal = Journal(api, args.out, tag,account_scope)
+    journal = Journal(api, args.out, tag,account_scope, max_entry_orders=args.max_entry_orders)
     Path(pt.PAUSE_PATH).touch()
     contracts = pt.load_contracts(set(symbols))
     if set(contracts) != set(symbols):
@@ -706,6 +749,8 @@ def main(argv=None):
         try:pulse.fee_schedule.account.update(load_fee_cache(args.fee_cache,credentials,time.time()))
         except (OSError,ValueError,TypeError):report['feeCacheIgnored']=True
     freeze_account_settings(pulse)
+    if args.max_active is not None:
+        probe_demo_position_bound(pulse, pt, args.max_active)
     install_history_cancellation(pulse)
     original_cycle = pulse._one_cycle
     warming_since = time.monotonic()
@@ -725,6 +770,8 @@ def main(argv=None):
             raise SessionEnd('foreign account position detected during session')
         if journal.phase == "warming":
             if (native_admission_ready(pulse) if args.admission=='native' else ready(pulse, symbols, required_history, time.time())):
+                if args.max_active is not None and pt.MAX_OPEN != args.max_active:
+                    raise SessionEnd("native position cap differs from the frozen demo plan")
                 require_empty_account(api,account_scope)
                 capture(pulse, args.out, "ready")
                 report["activeStartedAt"] = time.time()
@@ -748,6 +795,7 @@ def main(argv=None):
             raise SessionEnd(reason)
         last_cycle[0] = finished
         report['lastCycleCompletedAt'] = time.time()
+        report['entryOrdersDispatched'] = journal.entry_orders
         if time.monotonic() >= next_capture[0]:
             elapsed = int(time.time() - report.get("activeStartedAt", report["createdAt"]))
             capture(pulse, args.out, f"{journal.phase}-{elapsed:05d}", include_candles=False)
@@ -813,6 +861,7 @@ def main(argv=None):
     finally:
         watchdog_stop.set()
         report["activeEndedAt"] = time.time()
+        report["entryOrdersDispatched"] = journal.entry_orders
         report['watchdogReason'] = watchdog_reason[0]
         pulse._hist_stop = pulse._warm_stop = True
         Path(pt.STOP_PATH).touch()

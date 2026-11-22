@@ -269,7 +269,7 @@ def main() -> int:
     tapes = sg.Tapes(book, names, times, shadow)
     print('Replay tapes ready', flush=True)
     stage_index = None
-    if a.indexed_stage:
+    if a.indexed_stage and not book.stage_grid:
         from indexed_stage_query import IndexedStages
         stage_index = IndexedStages(sg).install()
     cf = cost_as_frac(book.cost_pct)
@@ -325,7 +325,36 @@ def main() -> int:
             keys = by_set_group[st.idx]
             for k in keys:
                 groups[k]["set_evals"] += 1
-            if a.stage_details:
+            if a.stage_details and book.stage_grid:
+                result = sg.grid_at(book, tapes, st, now)
+                counts = result.counts
+                for key in keys:
+                    groups[key]["full_base_evals"] += bool(counts[0].sample_full)
+                for depth, (stage, lane) in enumerate(zip(sg.STAGES, counts)):
+                    if not lane.evaluated:
+                        continue
+                    for dimension, group in keys:
+                        if dimension not in ("all", "indication", "type", "tprange", "side"):
+                            continue
+                        sr = stage_rows[(dimension, group, stage)]
+                        sr["evaluated"] += lane.evaluated
+                        sr["passed"] += lane.qualified
+                        sr["samples_full"] += lane.sample_full
+                        sr["samples_insufficient"] += lane.evaluated - lane.sample_full
+                        sr["gp"] += lane.gain
+                        sr["gl"] += lane.loss
+                        sr["orders"] += lane.orders
+                        if depth < len(result.post_evidence):
+                            post = result.post_evidence[depth]
+                            sr["post_gp"] += post.gain
+                            sr["post_gl"] += post.loss
+                            sr["post_orders"] += post.count
+                        if depth == 0 and ok:
+                            base = result.validated_base
+                            sr["validated_base_gp"] += base.gain
+                            sr["validated_base_gl"] += base.loss
+                            sr["validated_base_orders"] += base.count
+            elif a.stage_details:
                 readiness = {}
                 figures = sg.window_figures(book, tapes, st, now, samples=readiness)
                 for key in keys:
@@ -354,9 +383,14 @@ def main() -> int:
                 continue
             executable = bool(sg.gate_metrics(book, tapes, st, now)[0])
             hv["executable"] += executable
-            tx, te, pp = tapes.window(st.idx, now, sg.evidence_s(book), book.win(st).base_long)
-            gp = sum(x - cf for x in pp if x - cf > 0)
-            gl = -sum(x - cf for x in pp if x - cf < 0)
+            if book.stage_grid:
+                base = sg.grid_at(book, tapes, st, now).counts[0]
+                gp, gl, evidence_n = base.gain, base.loss, base.orders
+            else:
+                _tx, _te, pp = tapes.window(st.idx, now, sg.evidence_s(book), book.win(st).base_long)
+                gp = sum(x - cf for x in pp if x - cf > 0)
+                gl = -sum(x - cf for x in pp if x - cf < 0)
+                evidence_n = len(pp)
             # A trade already open at validation was not admitted by that
             # decision. Select the earliest later entries rather than the
             # first closes, with stable symbol order when entries share a minute.
@@ -368,7 +402,7 @@ def main() -> int:
                 g["executable_evals"] += executable
                 g["in_gp"] += gp
                 g["in_gl"] += gl
-                g["in_n"] += len(pp)
+                g["in_n"] += evidence_n
                 for m, v in nxt.items():
                     g[f"n{m}_gp"] += sum(x for x in v if x > 0)
                     g[f"n{m}_gl"] += -sum(x for x in v if x < 0)
@@ -382,6 +416,7 @@ def main() -> int:
             hv["in_gl"] += gl
             hv["min_n"] = n if not hv.get("min_n") else min(hv["min_n"], n)
         evals.append({"t": now, "valid": int(hv["valid"]), "valid_pct": round(100.0 * hv["valid"] / len(book.by_idx), 2),
+                      "learned_set_floors": len(book.set_floor_auto),
                       "executable": int(hv["executable"]), "executable_pct": round(100.0 * hv["executable"] / len(book.by_idx), 2),
                       "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0),
                       "next": {str(m): pf(hv[f"n{m}_gp"], hv[f"n{m}_gl"]) for m in nxt_ns}})
@@ -395,8 +430,14 @@ def main() -> int:
                                 "enough_samples_pct": round(100 * sr["samples_full"] / sr["evaluated"], 3),
                                 "requested_orders": int(sr["requested_orders"]),
                                 "available_orders": int(sr["available_orders"]),
+                                **({"post_paper": sg.se.stage_grid.Evidence(
+                                    int(sr["post_orders"]), sr["post_gp"], sr["post_gl"]).report()}
+                                   if book.stage_grid else {}),
+                                **({"validated_base_paper": sg.se.stage_grid.Evidence(
+                                    int(sr["validated_base_orders"]), sr["validated_base_gp"], sr["validated_base_gl"]).report()}
+                                   if book.stage_grid and stage == "base" else {}),
                                 "gain": sr["gp"], "loss": sr["gl"]})
-        print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} Real={int(hv['executable'])}", flush=True)
+        print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} {'Exec' if book.stage_grid else 'Real'}={int(hv['executable'])}", flush=True)
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
     del auto  # release the completed reporting learner before execution creates its own
 
@@ -479,13 +520,15 @@ def main() -> int:
         return out_h
 
     out = {"window": f"last {a.last_hours} h" if a.last_hours else "sealed" if a.sealed else "development", "symbols": names, "sets": len(book.by_idx),
-           "validation_scope": "Base only; executable_pct is the separate full Base/Main/Real gate",
+           "validation_scope": "Base only; executable_pct is the full Base/Main/Real/Exec grid" if book.stage_grid else "Base only; executable_pct is the separate full Base/Main/Real gate",
+           "stage_last_n": book.stage_grid.settings() if book.stage_grid else None,
            "forward_cohort_scope": "earliest entries at or after each validation, ties by symbol; completed shadow trades only; overlapping and potentially incomplete cohorts",
            "execution_axis": "overlay settings" if a.axis_current else "off (parent control)",
            "stage_query": stage_index.provenance() if stage_index else {"implementation": "native"},
            "start_utc": lo, "end_utc": hi, "replay_fingerprint": manifest,
            'memory_storage':memory_accelerator.provenance() if memory_accelerator else {'implementation':'native unpacked reference'},
-           "data_coverage": {"common_last_open": end, "common_last_close": end+60,
+           "data_coverage": {"prehistory_hours": (lo - max(times[s][0] for s in names)) / 3600,
+                             "common_last_open": end, "common_last_close": end+60,
                              "complete_hour_end": hours[-1]+3600,
                              "partial_tail_seconds": end+60-(hours[-1]+3600)},
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
@@ -493,6 +536,8 @@ def main() -> int:
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
                       "scratch_bars": book.scratch_bars, "scratch_min_pct": round(book.scratch_min * 100, 3),
                       "cost_pct": book.cost_pct, "extra_indicators": list(book.ind_settings.get("extraIndicators") or [])},
+           "auto_pf": {"enabled": book.grid_auto_enabled(), "fallback_by_range": book.pf_auto_defaults,
+                       "sets_using_learned_last_hour": len(book.set_floor_auto), "sets_using_learned_by_hour": [e["learned_set_floors"] for e in evals]},
            "all": summary(("all", "all")),
            "types": [summary(k) for k in sorted(groups) if k[0] == "type"],
            "indications": [summary(k) for k in sorted(groups) if k[0] == "indication"],
@@ -506,7 +551,8 @@ def main() -> int:
            "tpranges_all": [summary(k) for k in sorted(groups) if k[0] == "tprange_all"],
            "sides": [summary(k) for k in sorted(groups) if k[0] == "side"],
            "evaluations": evals,
-           "sample_scope": "Full configured N on each Set's own earlier closes; independent of PF. Main population passes current Base PF; Real population passes Main PF. Partial-window admission can pass without a full N.",
+           "sample_scope": ("Full disjoint blocks of earlier closes per lane and parent. Stages report only lanes reached through a qualifying parent." if book.stage_grid else
+                            "Full configured N on each Set's own earlier closes; independent of PF. Main population passes current Base PF; Real population passes Main PF. Partial-window admission can pass without a full N."),
            "stage_evaluations": stage_evals,
            "hourly_scope": "entry cohorts: eventual returns grouped by entry hour; not realized hourly results",
            "hourly": hourly(),
@@ -518,11 +564,13 @@ def main() -> int:
                                "net_pct": 100 * sum(r["net"] * r.get("vol", 1.0) for r in trades),
                                "scope": "same executed parents weighted by entry volume; percent of one base notional, not account return"},
            "open_at_end": [{**{k: r[k] for k in ("t_in", "t_mark", "symbol", "set", "pack", "kind", "lane", "side", "entry", "mark")},
+                            "exec_lane_id": r.get("execLaneId") or None,
                             "mark_net_pct": round(100 * r["mark_net"], 4)} for r in open_at_end],
            "closed_and_marked_pf": acc_pf([r["net"] for r in trades] + [r["mark_net"] for r in open_at_end]),
            "exits": dict(collections.Counter(r["reason"] for r in trades)),
            "trades": [{"t_in": r["t_in"], "t_out": r["t"], "symbol": r["symbol"], "set": r["set"], "pack": r["pack"],
                        "kind": r["kind"], "reason": r["reason"], "net_pct": round(100 * r["net"], 4), "lane": r.get("lane", ""),
+                       "exec_lane_id": r.get("execLaneId") or None,
                        "step": by_id[r["set"]].step, "sl_ratio": by_id[r["set"]].sl_ratio, "trail": by_id[r["set"]].trail_key,
                        "volume_multiple": r.get("vol", 1.0),
                        "weighted_net_pct": round(100 * r["net"] * r.get("vol", 1.0), 6),

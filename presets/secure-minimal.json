@@ -59,7 +59,7 @@
   "timeStopS": 21600,
   "scratchS": 600,
   "scratchMinPct": 0.16,
-  "scanS": 0.2,
+  "scanS": 0.25,
   "cooldownS": 3,
   "staggerS": 0.12,
   "controlOrders": true,
@@ -375,6 +375,7 @@
   "setMaxDdtHours": 24,
   "setGateWindow": 50,
   "setGateMinTrades": 12,
+  "stageLastN": {"enabled": true, "base": {"short": [4, 8, 12, 16], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "long": [10, 20, 30, 40, 50]}, "main": {"short": [4, 8, 12, 16], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}, "real": {"short": [4, 8, 12, 16], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}, "exec": {"short": [4, 8, 12, 16, 20, 24, 28, 30], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}},
   "stagesEnabled": true,
   "lastNDisjoint": false,
   "setGateShortMode": "positive",
@@ -431,6 +432,7 @@
   "minPfByRange": {
     "micro": 1.01
   },
+  "autoPfDefaultByRange": { "minimal": 1.24, "short": 1.42 },
   "rankByLane": true,
   "setScratchEnabled": false,
   "tpRanges": {
@@ -482,7 +484,7 @@
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
   "minPfStepAutoScope": "set",
-  "minPfSetAutoMin": 10,
+  "minPfSetAutoMin": 20,
   "minPfStepAutoTol": 5,
   "minPfStepAutoLow": 1.02,
   "minPfStepAutoHigh": 2,

@@ -107,13 +107,14 @@ def cors_is_not_a_wildcard():
 
 
 def config_save_is_atomic_and_leaves_no_temp_file():
+    overlay = {"slToTpRatio": 0.9, "stageLastN": {"enabled": True, "exec": {"short": [4, 8, 12], "shortModes": ["negative"], "lastModes": ["positive", "negative"]}}}
     with tempfile.TemporaryDirectory() as td:
         with _Server(config_dir=td) as s:
-            status, body, _ = s.post("/config.json?conn=vst", {"overlay": {"slToTpRatio": 0.9}}, {"X-Pulse-Token": TOKEN})
+            status, body, _ = s.post("/config.json?conn=vst", {"overlay": overlay}, {"X-Pulse-Token": TOKEN})
         written = [n for n in os.listdir(td) if n.startswith("overlay-") and n.endswith(".json")]
         saved = json.load(open(os.path.join(td, written[0]))) if len(written) == 1 else None
         leftovers = [n for n in os.listdir(td) if n.endswith(".tmp")]
-    ok = status == 200 and saved == {"slToTpRatio": 0.9} and not leftovers
+    ok = status == 200 and saved == body.get("overlay") == overlay and not leftovers
     return ok, f"status={status} written={written} saved={saved} temp_leftovers={leftovers}"
 
 
@@ -157,14 +158,21 @@ def overall_view_has_no_fake_zeros():
     def pos(sym):
         return {"symbol": sym, "side": "long", "connection": "x"}
 
+    def stage_grid(reached, full):
+        return {"stageGrid": {"baseSets": 1, "stages": {"exec": {"evaluated": reached, "sampleFull": full}}}}
+
     try:
         with tempfile.TemporaryDirectory() as td:
             h.DIR = td
             both = overall({
                 "bingx-x01": {"running": True, "equity": 100.0, "sessionPnl": 2.0, "usedMargin": 10.0,
-                              "open": [pos("BTC-USDT")], "closed": []},
+                              "open": [pos("BTC-USDT")], "closed": [], "sets": stage_grid(5, 2),
+                              "execution": {"exec": {"returnGain": 0.03, "returnLoss": 0.0, "returnOrders": 1, "orders": 1,
+                                                     "activePositions": 1, "activeFilledOrders": 2}}},
                 "bingx-x02": {"running": True, "equity": 300.0, "sessionPnl": -1.0, "usedMargin": 5.0,
-                              "open": [pos("ETH-USDT"), pos("BTC-USDT")], "closed": []},
+                              "open": [pos("ETH-USDT"), pos("BTC-USDT")], "closed": [], "sets": stage_grid(15, 3),
+                              "execution": {"exec": {"returnGain": 0.0, "returnLoss": 0.02, "returnOrders": 1, "orders": 1,
+                                                     "activePositions": 2, "activeFilledOrders": 3}}},
             })
             one = overall({
                 "bingx-x01": {"running": True, "equity": 100.0, "sessionPnl": 2.0, "usedMargin": 10.0,
@@ -179,8 +187,12 @@ def overall_view_has_no_fake_zeros():
           and both["pnlPct"] == 0.25
           and both["drawdownPct"] is None and both["maxOpen"] is None
           and both["symbols"] == ["BTC-USDT", "ETH-USDT"]
+          and both["sets"]["stageGrid"]["baseSets"] == 2
+          and both["sets"]["stageGrid"]["stages"]["exec"]["samplePct"] == 25.0
+          and both["execStage"]["pf"] == 1.5 and both["execStage"]["orders"] == 2
+          and both["execStage"]["activePositions"] == 3 and both["execStage"]["activeFilledOrders"] == 5
           and one["usedMargin"] is None and one["pnlPct"] == 0.25
-          and empty["usedMargin"] is None and empty["pnlPct"] is None)
+          and empty["usedMargin"] is None and empty["pnlPct"] is None and "execStage" not in empty)
     return ok, (f"both: usedMargin={both['usedMargin']} pnlPct={both['pnlPct']} symbols={both['symbols']}; "
                 f"one-lane: usedMargin={one['usedMargin']}; empty: pnlPct={empty['pnlPct']}")
 

@@ -39,6 +39,9 @@ class NativeWorkers(unittest.TestCase):
                 self.assertLessEqual(len(workers.pending),2)
                 self.assertEqual(self.signature(actual),self.signature(reference),mode)
                 self.assertEqual(actual.pause_now,reference.pause_now)
+                names = set(actual.bars) if mode == 'hold' else set()
+                self.assertEqual(set(reference._hist_inputs), names)
+                self.assertEqual(set(actual._hist_inputs), names)
                 # A later pass has its own immutable frame and still runs its
                 # own scoring; no qualification result is reused from workers.
                 actual.replay_all(now=T0+60,symbols=['S0-USDT'])
