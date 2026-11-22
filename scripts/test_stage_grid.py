@@ -201,6 +201,35 @@ class StageGridTest(unittest.TestCase):
         disabled = execute(book, [symbol], {symbol: bars}, {symbol: dates}, shadow, tapes, [hour])
         self.assertFalse([r for r in disabled if "set" in r])
 
+    def test_replay_position_cap_counts_open_slots_and_releases_closed_ones(self):
+        block = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        book = se.SetBook()
+        book.load({"stageLastN": {"base": {**block, "long": [10]},
+                                  **{s: {**block, "longModes": ["none"]} for s in sg.STAGES[1:]}},
+                   "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 4, "minSlDistancePct": .1,
+                   "stratIndications": False, "stratTrailing": False, "exitSets": False,
+                   "setSlRatios": [1.0], "directionMode": "both", "timeStopS": 3600})
+        st = book.by_idx[0]
+        now, names = 200 * 3600, ["AAA-USDT", "BBB-USDT"]
+        history = [now - 60*i for i in range(90, 0, -1)]
+        tapes = SimpleNamespace(by_set={st.idx: (history, [t-30 for t in history], [.02]*len(history))},
+                                cf=se.cost_as_frac(book.cost_pct))
+        bars = {s: [[100, 100.1, 99.9, 100]]*8 for s in names}
+        times = {s: [now + 60*i for i in range(8)] for s in names}
+        shadow = {s: (0, {st.pack: [1,0,0,0,1,0,0,0]}, {st.pack: [.9]*8}, {}) for s in names}
+
+        def replay(cap):
+            return [r for r in execute(book, names, bars, times, shadow, tapes, [now],
+                                       include_open=True, max_open=cap) if 'symbol' in r]
+
+        self.assertEqual({r['symbol'] for r in replay(0)}, set(names))
+        self.assertEqual([(r['symbol'],r['open_at_end']) for r in replay(1)], [(names[0],True)])
+        bars[names[0]][2] = [100, 102, 99.9, 101]
+        shadow[names[0]][1][st.pack][4]=0
+        final = replay(1)
+        self.assertEqual([r['symbol'] for r in final], names)
+        self.assertLess(final[0]['t'], final[1]['t_in'])
+
     def test_auto_pf_independence_and_strict_boundaries(self):
         early = 72 * 3600
         rows = [(early + i * 60, early + i * 60 - 30, net)

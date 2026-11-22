@@ -45,6 +45,10 @@ funding where the venue reported it. The stored fees and funding remain
 separate. Active positions, filled orders and live control orders have
 separate counts.
 
+An isolated venue comparison can give the replay the session's open-position
+cap. An unsettled replay position holds its slot until it closes or the replay
+ends. Research portfolios can still run with unlimited slots.
+
 ## Regression coverage
 
 - `python3 scripts/test_stage_grid.py` compares the indexed grid with a causal

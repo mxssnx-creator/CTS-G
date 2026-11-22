@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+from heapq import heappop, heappush
 import json
 import math
 import os
@@ -918,10 +919,10 @@ class AutoFloors:
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
             refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None,
-            candidate_filter=None) -> List[Dict[str, Any]]:
+            candidate_filter=None, max_open: int = 0) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
-    this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
+    this often inside the hour (the live engine refreshes every histRefreshS, 120 s). max_open mirrors a venue session's position cap."""
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -949,6 +950,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it
     axis_cache: Dict[Tuple[int, str], Any] = {}
     opened: List[Tuple[float, str, str]] = []           # (exit t, Set id, lane) of executed positions: the Axis continuation cap counts the open ones
+    active_ends: List[float] = []
     # the profit group gate (SetBook.group_gate, owner 2026-11-06): a group (pack x kind x TP range x lane) opens only while the newest groupGateN net results it executed inside
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
     gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if not grid_enabled and getattr(book, "group_gate", False) else None
@@ -1005,11 +1007,15 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         for minute in range(60):
             t = int(h) + minute * 60
             entry_t = float(t + 60)
+            while active_ends and active_ends[0] <= entry_t:
+                heappop(active_ends)
             if refresh_s and minute and minute % every == 0:
                 ranked, _ = rank_at(entry_t)
                 ranked_t = entry_t
             slots = ((s, d) for s in names for d in (1, -1)) if grid_enabled else ((s, 0) for s in names)
             for s, desired in slots:
+                if max_open > 0 and len(active_ends) >= max_open:
+                    break
                 slot = (s, desired) if desired else s
                 i = idx_of[s].get(t)
                 if i is None or i <= busy.get(slot, -1):
@@ -1111,6 +1117,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # Its exit is unknown beyond this replay window; omitting
                         # it here lets other symbols exceed the live per-Set cap.
                         opened.append((float("inf"), st.id, lane_pick))
+                        if max_open > 0:
+                            heappush(active_ends, float("inf"))
                         if include_open:
                             pos = lane.open
                             mark = float(bars[s][end - 1][3])
@@ -1140,6 +1148,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))
+                if max_open > 0:
+                    heappush(active_ends, rec["t"])
                 if gg is not None:
                     ghist.setdefault(se.set_group(st.id, lane_pick, gside), []).append((rec["t"], rec["net"]))
                 if cg:
