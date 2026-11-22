@@ -281,12 +281,13 @@ class Journal:
                 raise
             row["response"] = reply
             self.append({"index": index, "at": time.time(), "result": "response", "response": reply})
-            if (method == 'POST' and isinstance(reply, dict) and reply.get('cooled') is not True
-                    and (reply.get('error') is True or str(reply.get('code')) == '-1')):
+            if (method == 'POST' and (not isinstance(reply, dict) or
+                    (reply.get('cooled') is not True and
+                     (reply.get('error') is True or reply.get('code') is None or str(reply.get('code')) == '-1')))):
                 # A transport failure is not a rejection. Stop new entries;
                 # allow the current cycle to finish recording its position
                 # and protective-order state before cleanup begins.
-                self.unknown_write = {"at": time.time(), "code": reply.get('code')}
+                self.unknown_write = {"at": time.time(), "code": reply.get('code') if isinstance(reply, dict) else None}
             if method == 'POST' and len(bodies) == 1:
                 self.observe_orders('/openApi/swap/v2/trade/order', bodies[0], reply)
             elif method == 'POST' and isinstance(reply, dict) and str(reply.get('code')) == '0':

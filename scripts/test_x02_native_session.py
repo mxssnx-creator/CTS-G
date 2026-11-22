@@ -73,6 +73,19 @@ class NativeSessionTests(unittest.TestCase):
             self.assertEqual(api._req('POST',order_path,{**body,'side':'SELL','clientOrderID':'Gtest-c'})['code'],0)
             self.assertEqual(len(calls),2)
 
+    def test_missing_write_response_also_quarantines_entries(self):
+        for missing in (None,{}):
+            with self.subTest(response=missing),tempfile.TemporaryDirectory() as tmp:
+                api=SimpleNamespace(base=session.HOST,_req=lambda *_:missing)
+                journal=session.Journal(api,tmp,'Gtest',{'BTC-USDT'})
+                journal.phase='active';journal.deadline=session.time.monotonic()+60
+                body={'symbol':'BTC-USDT','type':'MARKET','side':'BUY','positionSide':'LONG',
+                      'quantity':1,'clientOrderID':'Gtest-a'}
+                api._req('POST','/openApi/swap/v2/trade/order',body)
+                self.assertIsNotNone(journal.unknown_write)
+                self.assertTrue(api._req('POST','/openApi/swap/v2/trade/order',
+                    {**body,'clientOrderID':'Gtest-b'})['localPolicyRejection'])
+
     def test_lower_position_cap_keeps_all_explicit_symbols(self):
         raw = {"stageLastN": {}}
         overlay = session.frozen_overlay(raw, SYMBOLS, symbol_count=len(SYMBOLS), max_active=6)
