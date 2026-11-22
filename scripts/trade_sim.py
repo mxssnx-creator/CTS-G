@@ -349,6 +349,11 @@ def main() -> int:
                             sr["post_gp"] += post.gain
                             sr["post_gl"] += post.loss
                             sr["post_orders"] += post.count
+                        if depth == 0 and ok:
+                            base = result.validated_base
+                            sr["validated_base_gp"] += base.gain
+                            sr["validated_base_gl"] += base.loss
+                            sr["validated_base_orders"] += base.count
             elif a.stage_details:
                 readiness = {}
                 figures = sg.window_figures(book, tapes, st, now, samples=readiness)
@@ -428,6 +433,9 @@ def main() -> int:
                                 **({"post_paper": sg.se.stage_grid.Evidence(
                                     int(sr["post_orders"]), sr["post_gp"], sr["post_gl"]).report()}
                                    if book.stage_grid else {}),
+                                **({"validated_base_paper": sg.se.stage_grid.Evidence(
+                                    int(sr["validated_base_orders"]), sr["validated_base_gp"], sr["validated_base_gl"]).report()}
+                                   if book.stage_grid and stage == "base" else {}),
                                 "gain": sr["gp"], "loss": sr["gl"]})
         print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} {'Exec' if book.stage_grid else 'Real'}={int(hv['executable'])}", flush=True)
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)

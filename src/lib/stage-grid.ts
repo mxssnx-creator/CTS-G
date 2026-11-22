@@ -73,6 +73,7 @@ export type StageGridReport = {
   baseSets: number;
   stages: Record<StageName, StageGridFigures>;
   postStages?: Record<StageName, StageEvidence>;
+  validatedBase?: StageEvidence;
 };
 export type StageGridSelection = {
   windows: Partial<Record<StageName, { long: number; short: number; last: number; shortMode: SignMode; lastMode: SignMode }>>;
@@ -80,5 +81,6 @@ export type StageGridSelection = {
   parentIds: Partial<Record<StageName, string>>;
   setIds?: Partial<Record<StageName, string>>;
   selectedBlocks?: Partial<Record<StageName, Partial<Record<"long" | "short" | "last", StageEvidence>>>>;
+  validatedBase?: StageEvidence;
   postStages?: Partial<Record<StageName, StageEvidence>>;
 };

@@ -592,14 +592,18 @@ def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Opti
 
 
 def relation_rows(book, tapes: Tapes, st, now: float) -> List[Tuple[float, float, str, float]]:
-    """(exit t, entry t, symbol, net) of the Set's Main-Set orders inside the lookback at now: what SetBook.set_processed hands the relation lanes
-    (set_engine._chain_of(..., relation_rows=True)), from the same chain every other stage figure here reads."""
+    """The same causal post-Base input that SetBook.set_processed provides to relations."""
     lb = evidence_s(book)
     src = tape_source(tapes, st.idx, now, lb)
     tx, te, pp = src.by_set[st.idx]
     symbols = getattr(src, "symbols_by_set", {}).get(st.idx) or tapes.symbols_by_set[st.idx]
-    e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
+    if getattr(book, "stage_grid", None):
+        if not book.sl_auto_allows(st):
+            return []
+        ids = grid_at(book, tapes, st, now).validated_base_ids
+        return [(tx[j], te[j], symbols[j], pp[j] - tapes.cf) for j in (lo + i for i in ids)]
+    e = bisect.bisect_left(tx, now)
     ts, ents = list(tx[lo:e]), list(te[lo:e])
     nets = [x - tapes.cf for x in pp[lo:e]]
     ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st), window_start=now - lb)

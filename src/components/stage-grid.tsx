@@ -93,6 +93,12 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
         <h2 className="text-sm font-semibold">Base → Main → Real → Exec → Live</h2>
         <p className="text-xs text-muted">{count.format(grid.baseSets)} Base Sets · sample coverage among reached lanes</p>
       </div>
+      {grid.validatedBase && (
+        <p className="text-xs">
+          Validated Base lanes · {count.format(grid.validatedBase.orders)} paper closes · PF{" "}
+          {grid.validatedBase.pf?.toFixed(2) ?? (grid.validatedBase.gain > 0 ? "No losses" : "—")}
+        </p>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[37rem] text-left text-xs">
           <thead className="text-muted">

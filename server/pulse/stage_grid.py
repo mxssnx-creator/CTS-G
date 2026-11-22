@@ -218,6 +218,8 @@ class GridResult:
     selected_evidence: tuple[Evidence, ...] = ()
     post_evidence: tuple[Evidence, ...] = ()
     selected_blocks: tuple[tuple[Evidence, ...], ...] = ()
+    validated_base: Evidence = field(default_factory=Evidence)
+    validated_base_ids: tuple[int, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -240,6 +242,7 @@ class GridResult:
                 "selectedWindows": {s: ev.report() for s, ev in zip(STAGES, self.selected_evidence)},
                 "selectedBlocks": {s: {name: ev.report() for name, ev in zip(BLOCK_NAMES, blocks) if ev.count}
                                    for s, blocks in zip(STAGES, self.selected_blocks)},
+                "validatedBase": self.validated_base.report(),
                 "postStages": {s: ev.report() for s, ev in zip(STAGES, self.post_evidence)}}
 
 
@@ -527,12 +530,15 @@ class StageHistory:
         return None
 
     def evaluate(self, now: float, *, streams: bool = False, limit: int | None = None) -> GridResult:
+        validated_base_mask = 0
+
         @lru_cache(maxsize=2048)
         def last_stage(ids: tuple[int, ...], base_long: int) -> GridResult:
             return walk(len(STAGES) - 1, _Tape(self, ids), base_long)
 
         @lru_cache(maxsize=128)
         def walk(depth: int, tape: _Tape, base_long: int) -> GridResult:
+            nonlocal validated_base_mask
             counts = tuple(StageCount() for _ in STAGES[depth:])
             tally = counts[0]
             choices = self._rules[depth, base_long]
@@ -580,6 +586,8 @@ class StageHistory:
                     paths[key] = (first, copies + 1)
 
             for (long, mask), (first, copies) in paths.items():
+                if streams and depth == 0:
+                    validated_base_mask |= mask
                 if depth == len(STAGES) - 2:
                     max_window = max(w.need for w in self._rules[depth + 1, long])
                     ids = self.latest_members(tape, mask, start, end, max_window)
@@ -608,6 +616,14 @@ class StageHistory:
             row_ids = tuple(row_ids)
             blocks = self.selected_blocks(result.path, now)
             selected = tuple(sum(group, Evidence()) for group in blocks)
+            low, high = self.root.indices(now)
+            # A Base position can belong to several qualifying First Stage Sets.
+            # Preserve its exact membership in each path, but contribute it once
+            # to the Base Set's aggregate and let relations deduplicate signals.
+            base_ids = self.latest_members(self.root, validated_base_mask, low, high, high - low)
+            base_net = [self.nets[i] for i in base_ids]
+            base = Evidence(len(base_ids), math.fsum(x for x in base_net if x > 0),
+                            math.fsum(-x for x in base_net if x < 0))
             return GridResult(result.counts, result.path, result.evidence, self.read_streams(row_ids), row_ids,
-                              selected, tuple(post), blocks)
+                              selected, tuple(post), blocks, base, base_ids)
         return result

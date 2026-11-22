@@ -21,7 +21,7 @@ import math
 from array import array
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from itertools import accumulate, islice, repeat
 from operator import le, neg
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -4792,24 +4792,28 @@ class SetBook:
             if grid_result is None:
                 decision = now if now is not None else math.nextafter(full[-1][0], math.inf) if full else 0.0
                 grid_result = self.grid_history(st, full).evaluate(decision, streams=True, limit=PROC_KEEP)
-            st.exec_grid = grid_result
+            # The Base indices address this replay's transient source rows.
+            # Keep the summary in the published Set, so a long lookback does
+            # not retain another position-by-position listing for every Set.
+            st.exec_grid = replace(grid_result, validated_base_ids=()) if grid_result.validated_base_ids else grid_result
             candidates = self._exec_candidates.setdefault((st.pack, st.kind), {})
             if grid_result.ready:
                 candidates[st.id] = st
             else:
                 candidates.pop(st.id, None)
             streams = grid_result.streams
-            base, main, real = (streams + ((), (), ()))[:3]
+            _, main, real = (streams + ((), (), ()))[:3]
             st.proc = [(row.close, row.net) for row in main]
             st.exe = [(row.close, row.net) for row in real]
             st.neg, st.neg_total, st.neg_ent = [], 0, None
             st.proc_total, st.exe_total = len(st.proc), len(st.exe)
             st.exe_ent = array("d", (row.entry for row in real)) if self.axis_sets.enabled else None
             st.main_evidence, st.main_short_win, st.proc_replayed = None, 0, True
-            if relations is not None:
-                indices = grid_result.row_ids[0] if grid_result.row_ids else ()
-                relations.add(self.relation_cell(st), [(r.close, r.entry, full[i][1], r.net)
-                                                      for i, r in zip(indices, base)])
+            if relations is not None and self.sl_auto_allows(st):
+                cf = cost_as_frac(self.cost_pct)
+                validated = (full[i] for i in grid_result.validated_base_ids)
+                relations.add(self.relation_cell(st), [(finite(r[0]), finite(r[0]) - finite(r[5]), r[1], finite(r[4]) - cf)
+                                                      for r in validated])
             return
         st.exec_grid = None
         ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on, now=now, relation_rows=relations is not None)
@@ -6058,6 +6062,7 @@ class SetBook:
             return None
         totals = [stage_grid.StageCount() for _ in stage_grid.STAGES]
         post = [stage_grid.Evidence() for _ in stage_grid.STAGES]
+        validated_base = stage_grid.Evidence()
         for st in self.by_idx:
             if st.exec_grid is None or st.last_error:
                 continue
@@ -6065,7 +6070,10 @@ class SetBook:
                 total.add(counts)
             for i, evidence in enumerate(st.exec_grid.post_evidence):
                 post[i] += evidence
+            if self.sl_auto_allows(st):
+                validated_base += st.exec_grid.validated_base
         return {"config": self.stage_grid.settings(), "baseSets": len(self.by_idx),
+                "validatedBase": validated_base.report(),
                 "postStages": {name: evidence.report() for name, evidence in zip(stage_grid.STAGES, post)},
                 "stages": {name: total.report(capacity * len(self.by_idx))
                            for name, total, capacity in zip(stage_grid.STAGES, totals, self.stage_grid.capacities())}}

@@ -16,7 +16,7 @@ import set_engine as se
 import stage_grid as sg
 import auto_set_pf
 from indication_extra import CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, resolve, sar_state, sar_signal
-from stage_eval import AutoFloors
+from stage_eval import AutoFloors, relation_rows
 
 
 def plain(grid, rows, now, lookback, floor):
@@ -184,7 +184,8 @@ class StageGridTest(unittest.TestCase):
         self.assertEqual(grid.capacities(), (350, 49000, 6860000, 1509200000))
         for depth in range(4):
             choices = grid.windows(depth, 30)
-            self.assertEqual({w.last_mode for w in choices}, {"positive", "negative"})
+            self.assertEqual({(w.last, w.last_mode) for w in choices},
+                             {(size, sign) for size in (1, 2, 3, 4, 5) for sign in ("positive", "negative")})
             self.assertEqual({w.short for w in choices if w.short_mode == "negative"}, {4, 8, 12})
             self.assertEqual({w.short for w in choices if w.short_mode == "positive"},
                              set(sg.EXEC_SHORT if depth == 3 else sg.SHORT))
@@ -212,6 +213,10 @@ class StageGridTest(unittest.TestCase):
         for now in (27, 58, 96, 106, 111):
             expected, paths = plain(grid, rows, now, 80, 1.05)
             got = history.evaluate(now, streams=True)
+            base_positions = {row for path, stream in paths.items() if len(path) == 1 for row in stream}
+            expected_base = tuple(i for i, row in enumerate(rows) if row in base_positions)
+            self.assertEqual(got.validated_base_ids, expected_base)
+            self.assertEqual(got.validated_base.count, len(expected_base))
             for tally, (n, full, qualified, gain, loss, orders) in zip(got.counts, expected):
                 self.assertEqual((tally.evaluated, tally.sample_full, tally.qualified, tally.orders), (n, full, qualified, orders))
                 self.assertAlmostEqual(tally.gain, gain)
@@ -252,6 +257,35 @@ class StageGridTest(unittest.TestCase):
         self.assertEqual(report["parentIds"]["base"], "set1")
         self.assertEqual(report["parentIds"]["exec"], report["setIds"]["real"])
         self.assertTrue(all(report["selectedBlocks"][stage]["last"]["orders"] for stage in sg.STAGES))
+        self.assertGreater(short_output.validated_base.count, len(short_output.row_ids[0]))
+
+    def test_native_and_replay_relations_read_every_qualified_base_lane_once(self):
+        book = se.SetBook()
+        book.load({"stageLastN": {"base":{"long":[10,20],"short":[4],"last":[1,2]}},
+                   "setMinStep": 4, "setStepMax": 4, "stratIndications": False,
+                   "minPfStepAuto":False})
+        st = next(st for st in book.by_idx if st.kind == "base")
+        cost = se.cost_as_frac(book.cost_pct)
+        rng = random.Random(8)
+        tape = [(60*i, "ADA-USDT" if i%2 else "BTC-USDT", "LONG", 0.0,
+                 cost+rng.choice((.014,.02,.028,-.003,-.016)), 30, "tp", st.id)
+                for i in range(1,160)]
+        now = 160*60
+        got = book.grid_history(st,tape).evaluate(now,streams=True,limit=2)
+        self.assertTrue(got.validated_base_ids)
+        self.assertGreater(len(got.validated_base_ids),len(got.row_ids[0]))
+        seen = []
+        book.set_processed(st,tape,now,relations=SimpleNamespace(add=lambda cell,rows: seen.extend(rows)),
+                           grid_result=got)
+        self.assertEqual(st.exec_grid.validated_base, got.validated_base)
+        self.assertEqual(st.exec_grid.validated_base_ids, ())
+        tx = [row[0] for row in tape]
+        te = [row[0]-row[5] for row in tape]
+        tapes = SimpleNamespace(by_set={st.idx:(tx,te,[row[4] for row in tape])},cf=cost,
+                                symbols_by_set={st.idx:tuple(row[1] for row in tape)})
+        self.assertEqual(seen, relation_rows(book,tapes,st,now))
+        self.assertEqual(len(seen),got.validated_base.count)
+        self.assertEqual(len({(r[0],r[1],r[2]) for r in seen}),len(seen))
 
     def test_rolling_thresholds_do_not_change_older_memberships(self):
         downstream = {"short": [4], "last": [1], "longModes": ["none"]}
