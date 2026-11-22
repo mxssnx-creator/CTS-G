@@ -15,7 +15,7 @@ import pulse_trader as pt
 import set_engine as se
 import stage_grid as sg
 import auto_set_pf
-from indication_extra import CTS_C_TECHNICAL, resolve
+from indication_extra import CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, resolve, sar_state, sar_signal
 from stage_eval import AutoFloors
 
 
@@ -124,6 +124,33 @@ class StageGridTest(unittest.TestCase):
         self.assertEqual({st.side for st in book.by_idx}, {-1, 1})
         self.assertEqual({st.kind for st in book.by_idx}, {"base", "exit", "trail"})
         self.assertEqual(len({st.id for st in book.by_idx}), len(book.by_idx))
+
+    def test_rsi_and_sar_thin_variants_are_causal_and_directional(self):
+        warm = [[100 + i * 0.2, 100.1 + i * 0.2, 99.9 + i * 0.2, 100 + i * 0.2, 20] for i in range(18)]
+        side, stop, flip = sar_state(warm, .02, .02, .2)
+        self.assertEqual((side, flip), (1, False))
+        self.assertLessEqual(stop, warm[-2][2])
+        bearish = [103.4, 103.5, 101.0, 101.1, 20]
+        side, stop, flip = sar_state(warm + [bearish], .02, .02, .2)
+        self.assertEqual((side, flip), (-1, True))
+        self.assertGreaterEqual(stop, max(bearish[1], warm[-1][1]))
+        self.assertEqual(sar_signal(warm + [bearish], .02, .02, .2, True), (-1, .72))
+        self.assertIsNone(sar_signal([[10, 10, 10, 10, 0]] * 18, .02, .02, .2, False))
+        prices = [100 - i * 0.2 for i in range(80)] + [90]
+        bars = [[c, c + .03, c - .03, c, 20] for c in prices]
+        self.assertIsNone(resolve("rsi_reclaim_n5_b25_t1")(bars[:-1]))
+        self.assertEqual(resolve("rsi_reclaim_n5_b25_t1")(bars), (1, .72))
+        mirror = [[200 - c, 200 - l, 200 - h, 200 - c, v] for _, h, l, c, v in bars]
+        self.assertEqual(resolve("rsi_reclaim_n5_b25_t1")(mirror), (-1, .72))
+        self.assertEqual(len(THIN_INDICATOR_SETTINGS), 30)
+
+        path = Path(__file__).resolve().parents[1] / "presets" / "exec-indication-profiles.json"
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "stratGeneral": False, "stratIndications": False, "directionMode": "split",
+                   "indicationConfigs": json.loads(path.read_text())["rsiSar"]})
+        self.assertEqual(len(book.packs), 30)
+        self.assertEqual(book.config_report["dropped"], [])
+        self.assertTrue(all({st.side for st in book.by_idx if st.pack == pack} == {-1, 1} for pack in book.packs))
 
     def test_default_paths_and_signed_windows(self):
         grid = sg.StageGrid.from_settings({})

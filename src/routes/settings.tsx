@@ -2876,6 +2876,7 @@ function IndicationConfigEditor({
   const set = (i: number, part: Partial<IndicationConfig>) => onChange(indicationConfigList(value.map((e, k) => (k === i ? { ...e, ...part } : e))));
   const list = (t: string) => t.split(/[,;]/).map((x) => x.trim());
   const profileGroups = [
+    { label: "Add RSI and Parabolic SAR profiles", profiles: execIndicationProfiles.rsiSar },
     { label: "Add CTS-C technical profiles", profiles: execIndicationProfiles.ctsC },
     { label: "Add standard indicators with short windows", profiles: execIndicationProfiles.common },
   ];

@@ -4,6 +4,14 @@
     { "label": "CTS-C volume breakout", "names": ["ctsc_volume_break_n10_t1"], "stepMin": 4, "stepMax": 5, "types": ["base", "exit"] },
     { "label": "CTS-C ATR breakout", "names": ["ctsc_atr_break_n6_t5"], "stepMin": 7, "stepMax": 8, "types": ["base"] }
   ],
+  "rsiSar": [
+    { "label": "Wilder RSI reclaim · 1m", "names": ["rsi_reclaim_n5_b25_t1", "rsi_reclaim_n5_b30_t1", "rsi_reclaim_n7_b25_t1", "rsi_reclaim_n7_b30_t1", "rsi_reclaim_n9_b25_t1", "rsi_reclaim_n9_b30_t1"], "stepMin": 5, "stepMax": 6, "types": ["base"], "slRatios": [1] },
+    { "label": "Wilder RSI reclaim · 3m", "names": ["rsi_reclaim_n5_b25_t3", "rsi_reclaim_n5_b30_t3", "rsi_reclaim_n7_b25_t3", "rsi_reclaim_n7_b30_t3", "rsi_reclaim_n9_b25_t3", "rsi_reclaim_n9_b30_t3"], "stepMin": 7, "stepMax": 8, "types": ["base"], "slRatios": [0.75] },
+    { "label": "Wilder RSI reclaim · 5m", "names": ["rsi_reclaim_n5_b25_t5", "rsi_reclaim_n5_b30_t5", "rsi_reclaim_n7_b25_t5", "rsi_reclaim_n7_b30_t5", "rsi_reclaim_n9_b25_t5", "rsi_reclaim_n9_b30_t5"], "stepMin": 7, "stepMax": 8, "types": ["base"], "slRatios": [0.75] },
+    { "label": "Parabolic SAR · 1m", "names": ["psar_slow_t1", "psar_classic_t1", "psar_fast_t1", "psar_trend_t1"], "stepMin": 6, "stepMax": 7, "types": ["base"], "slRatios": [1] },
+    { "label": "Parabolic SAR · 3m", "names": ["psar_slow_t3", "psar_classic_t3", "psar_fast_t3", "psar_trend_t3"], "stepMin": 8, "stepMax": 8, "trailStepMin": 8, "trailStepMax": 8, "types": ["base", "trail"], "slRatios": [0.75] },
+    { "label": "Parabolic SAR · 5m", "names": ["psar_slow_t5", "psar_classic_t5", "psar_fast_t5", "psar_trend_t5"], "stepMin": 9, "stepMax": 10, "types": ["base"], "slRatios": [0.75] }
+  ],
   "common": [
     { "label": "EMA crossover · short", "families": ["emax"], "ranges": [5, 8], "timeframes": [1], "stepMin": 4, "stepMax": 5, "trailStepMin": 6, "trailStepMax": 6, "types": ["base", "trail"], "slRatios": [0.75, 1] },
     { "label": "MACD histogram · short", "families": ["macdh"], "ranges": [5, 8], "timeframes": [1], "stepMin": 4, "stepMax": 5, "types": ["base"], "slRatios": [0.75, 1] },

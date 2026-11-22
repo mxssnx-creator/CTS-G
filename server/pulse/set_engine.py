@@ -4427,7 +4427,7 @@ class SetBook:
         self.step_floor_auto, self.step_floor_report = learned, report
 
     def grid_auto_enabled(self) -> bool:
-        return bool(self.stage_grid and self.pf_by_step and self.pf_step_auto)
+        return bool(getattr(self, "stage_grid", None) and self.pf_by_step and self.pf_step_auto)
 
     def _learn_grid_floors(self, tape_order: Sequence[str], now: float) -> None:
         """Fit independent Set floors from the two causal folds ending at the last full hour."""

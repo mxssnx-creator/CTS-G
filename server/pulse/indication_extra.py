@@ -981,6 +981,94 @@ def cts_c_technical(rows: Sequence[Row], n: int, tf: int, kind: str) -> Signal:
     return (side, 0.75) if atr > 0 and side * (closes[-2] - bound) <= 0 < side * (c - bound) else None
 
 
+def rsi_band_reclaim(bars: Sequence[Row], period: int, band: float) -> Signal:
+    """A completed-bar cross back inside a symmetric Wilder RSI band."""
+    from indication_lib import _rsi
+
+    if len(bars) < 2 * period + 2:
+        return None
+    closes = _closes(bars)
+    previous, current = _rsi(closes, period)[-2:]
+    if previous < band <= current and closes[-1] > closes[-2]:
+        return 1, 0.72
+    upper = 100 - band
+    if previous > upper >= current and closes[-1] < closes[-2]:
+        return -1, 0.72
+    return None
+
+
+def sar_state(bars: Sequence[Row], start: float, step: float, maximum: float) -> tuple[int, float, bool]:
+    """Wilder SAR at the last completed bar, including whether it reversed."""
+    if len(bars) < 2:
+        return 0, 0.0, False
+    first, second = bars[:2]
+    up, down = second[1] - first[1], first[2] - second[2]
+    side = -1 if down > max(0, up) else 1
+    sar = min(first[2], second[2]) if side > 0 else max(first[1], second[1])
+    extreme = max(first[1], second[1]) if side > 0 else min(first[2], second[2])
+    acceleration, flipped = start, False
+    penultimate, previous = first, second
+    for current in bars[2:]:
+        high, low = current[1], current[2]
+        candidate = sar + acceleration * (extreme - sar)
+        if side > 0:
+            candidate = min(candidate, previous[2], penultimate[2])
+            flipped = low <= candidate
+            if flipped:
+                side, sar, extreme, acceleration = -1, max(extreme, high, previous[1]), low, start
+            else:
+                sar = candidate
+                if high > extreme:
+                    extreme, acceleration = high, min(maximum, acceleration + step)
+        else:
+            candidate = max(candidate, previous[1], penultimate[1])
+            flipped = high >= candidate
+            if flipped:
+                side, sar, extreme, acceleration = 1, min(extreme, low, previous[2]), high, start
+            else:
+                sar = candidate
+                if low < extreme:
+                    extreme, acceleration = low, min(maximum, acceleration + step)
+        penultimate, previous = previous, current
+    return side, sar, flipped
+
+
+def sar_signal(bars: Sequence[Row], start: float, step: float, maximum: float, confirmed: bool) -> Signal:
+    if len(bars) < 18 or max(row[1] for row in bars[-18:]) <= min(row[2] for row in bars[-18:]):
+        return None
+    side, stop, flipped = sar_state(bars, start, step, maximum)
+    if not flipped or side * (bars[-1][3] - stop) <= 0:
+        return None
+    if confirmed:
+        closes = _closes(bars[-17:])
+        ema = _ema_list(closes, 8)
+        if side * (closes[-1] - ema[-1]) <= 0 or side * (ema[-1] - ema[-2]) <= 0:
+            return None
+    return side, 0.72
+
+
+def _thin_settings() -> Dict[str, Tuple[int, Callable[[Sequence[Row]], Signal]]]:
+    def on_frame(fn, tf, bars):
+        width = tf * bars
+        def at_bar(rows):
+            tail = rows[-width:]
+            return fn(tail if tf == 1 else _agg(tail, tf))
+        return width, at_bar
+
+    out = {}
+    psar = {"slow": (.01, .01, .10, False), "classic": (.02, .02, .20, False),
+            "fast": (.03, .03, .18, False), "trend": (.02, .02, .20, True)}
+    for tf in (1, 3, 5):
+        for period in (5, 7, 9):
+            for band in (25, 30):
+                out[f"rsi_reclaim_n{period}_b{band}_t{tf}"] = on_frame(
+                    lambda b, p=period, edge=band: rsi_band_reclaim(b, p, edge), tf, 8 * period
+                )
+        for name, factors in psar.items():
+            out[f"psar_{name}_t{tf}"] = on_frame(lambda b, af=factors: sar_signal(b, *af), tf, 120)
+    return out
+
+
 def _combine(sigs: List[Signal], need: int = 2) -> Signal:
     """Timeframes (or families) agreeing: at least `need` fire the same way and none fires the other way."""
     fired = [s for s in sigs if s]
@@ -1102,6 +1190,9 @@ def _highest_tf(name: str) -> int:
 
 # a name on a higher timeframe reads TF_BARS of its bars (indication_lib.rows_for); the others keep their own window
 WINDOWS.update({name: max(WINDOWS.get(name, LOOKBACK), _rows_for(_highest_tf(name))) for name in INDICATORS if _highest_tf(name) > 1})
+THIN_INDICATOR_SETTINGS = _thin_settings()
+INDICATORS.update({name: fn for name, (_, fn) in THIN_INDICATOR_SETTINGS.items()})
+WINDOWS.update({name: width for name, (width, _) in THIN_INDICATOR_SETTINGS.items()})
 HISTORY = max(WINDOWS.values())         # the most 1m rows any indicator reads
 
 
