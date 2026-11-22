@@ -1,17 +1,24 @@
 # Signals and independent strategy evidence — 22 November 2026
 
 This is offline research and a scoped accounting repair. It does not establish
-profitable live execution. The experimental Signals progression and source
-export are not connected to the Pulse live entry loop. Its fixed PF settings
-are not the ordinary engine's per-Set Auto PF implementation.
+profitable live execution. The experimental independent-window progression
+and source export are not connected to the Pulse live entry loop. Its fixed PF
+settings are not the ordinary engine's per-Set Auto PF implementation. The
+new volume-momentum source is available as an explicit experimental Signal
+pack; it is absent from the shipped defaults and was not used in the x02 run.
 
 ## Changes and accounting contract
 
 - A Signals window can identify Short as positive or negative independently of
   the positive/negative Last window. Negative windows compare loss to gain at
-  the configured PF floor; returns themselves are not inverted or removed.
+  the configured PF floor; returns themselves are not inverted or removed. At
+  Base and Main the full long-plus-Last window must also pass a positive floor.
 - Optional Real positive/negative rules use the exact Real stream's own closes
-  and have distinct candidate IDs. The older coordinated mode remains available
+  and have distinct candidate IDs. Negative Real rules additionally require a
+  disjoint positive Real history and a positive aggregate Real window, each at
+  the configured floor. When `realLongN` is set, the positive mode uses the
+  same context and aggregate checks; the candidate uses eight prior closes.
+  The older coordinated mode remains available
   and identifies its evidence as Main. The offline research presets now use
   their own Real history. The low-distance candidate enables both Short and Real
   signs. Its existing PF floor of 2.2 is unchanged.
@@ -33,29 +40,28 @@ for trading. These tapes were used in earlier work: neither period is an
 untouched holdout. All numbers are simulated, with OHLC stop-first assumptions,
 not venue fills. Funding, margin liquidation and queue fills are not modeled.
 
-The independent-window experiment used twelve source families, 1/5/15-minute
+The earlier independent-window experiment used twelve source families, 1/5/15-minute
 events, both source ranges and directions, four normal/trailing Signals/Exit
 profiles, independent positive and negative Short and Last conditions, and
 positive and negative Real gates. The exploratory PF floor was 1.3; the fee
 scenario used 0.05% taker per leg plus 0.01% slippage per leg. Each source ran
 in its own $1,000 model book with $10 nominal per order and an eight-position
-cap. Source portfolios must not be added as though they shared capital.
+cap. Source portfolios must not be added as though they shared capital. It was
+run before the subsequent Base/Main aggregate-window correction, so it does
+not characterize the final evaluator; corrected tests are reported separately.
 
-| First trading period | Settled | Open at end | Closed return PF | Marked book change |
-| --- | ---: | ---: | ---: | ---: |
-| VWAP | 16 | 0 | 0.568 | -0.2371 |
-| SAR | 3 | 0 | 0.402 | -0.0730 |
-| MACD cross | 1 | 1 | 0.000 | -0.0620 |
-| Other nine sources | 0 | 0 | unavailable | 0 |
-
-All twelve source books had zero closes in the later comparison. The VWAP,
-SAR and MACD trades included 5, 2 and 1 negative-Real admissions respectively;
-the rest of the VWAP/SAR closes used positive Real. No source qualifies as a
-proven high-PF live default.
+With eight prior Real closes plus the independent recent window required, all
+twelve source books had zero opened positions in both trading periods; Exec PF
+is therefore unavailable, not zero. Across the complete first 72+72 hour tape,
+122 Real streams were allocated and the longest accumulated five closes; the
+later tape allocated 38 Real streams, the longest with three closes. None had
+the minimum nine closes. This is a sample scarcity finding, not evidence of
+profitable execution. An earlier version that omitted the extra Real context
+generated trades and is superseded by this test.
 
 The updated low-distance candidate was also replayed with 100 hours of
-prehistory and 44 hours of trading for VWAP, SAR and `r-clv-thrust`: VWAP had
-one losing close; the other two had none. The candidate kept its PF 2.2 floor.
+prehistory and 44 hours of trading for VWAP, SAR and `r-clv-thrust`: none
+opened a position. The candidate kept its PF 2.2 floor.
 
 In a separate fixed-N research model, the exploratory volume-momentum source
 used 4/4/4 and 12/8/4 Base/Main/Real close windows and a 1.3 floor. The fee
@@ -70,8 +76,8 @@ includes open positions at the final mark, with modeled exit slippage and fees.
 | OBV, low | 51 / 0 | 0.533 / 0.533 | 27 / 5 | 5.154 / 2.762 |
 
 The high later closed-only OBV PF drops after the five open positions are
-marked, and its earlier period lost. The full signed-window volume-momentum
-replay produced two losing closes in the first period and no close later.
+marked, and its earlier period lost. The signed-window volume-momentum
+replay with the corrected Real context opened no positions in either period.
 
 An additional comparison used checksum-verified public BingX candles for the
 same three symbols: 17–19 November as prehistory and 19–21 November for trading.
@@ -122,9 +128,10 @@ manual fallback predominated. No profitability claim or default change follows.
 The volume Signals archive was checked against an independent scalar replay on
 151 Base/Main paths across four roots; a second catalogue audit checked 360 paths
 across four roots. These checks cover the sampled data, not all possible paths.
-The signed 12-source experiments observed worst per-minute processing steps of
-185 ms and 370 ms under concurrent load (largest per-source p95 2.44/7.19 ms;
-worker peak RSS 69/68 MiB). This is not a live-loop latency guarantee.
+The earlier signed 12-source experiments observed worst per-minute processing
+steps of 427 ms and 323 ms under concurrent load (largest per-source p95
+42.30/42.19 ms; worker peak RSS 70.6/68.0 MiB). This is not a live-loop
+latency guarantee.
 
 An hourly BTC study shows the importance of testing transaction costs and
 walk-forward decisions, but its particular models and timeframe do not establish

@@ -10,13 +10,35 @@ from signal_sources import states
 
 
 class SourceMath(unittest.TestCase):
-    def test_experimental_source_cannot_enter_live_signal_packs(self):
+    def test_experimental_source_requires_explicit_live_selection(self):
         from signal_packs import parse,expand
-        self.assertIsNone(parse('sig-volume-momentum-short-t1'))
+        from signal_sources import SOURCES
+        self.assertNotIn('volume-momentum',SOURCES)
+        self.assertEqual(parse('sig-volume-momentum-short-t1'),('volume-momentum','short',1))
+        default=expand([{}],2,20,lambda x:x,[1])
+        self.assertEqual(len(default['packs']),72)
+        self.assertFalse(any('volume-momentum' in p for p in default['packs']))
         result=expand([{'sources':['volume-momentum'],'ranges':['short'],'timeframes':[1]}],
                       2,20,lambda x:x,[1])
-        self.assertEqual(result['packs'],[])
-        self.assertEqual(result['dropped'][0]['reason'],'unknown source, range or timeframe')
+        self.assertEqual(result['packs'],['sig-volume-momentum-short-t1'])
+        self.assertEqual(result['dropped'],[])
+        all_sources=expand([{'sources':[*SOURCES,'volume-momentum']}],2,20,lambda x:x,[1])
+        self.assertEqual(len(all_sources['packs']),80)
+        self.assertEqual(all_sources['dropped'],[])
+
+    def test_experimental_live_pack_uses_completed_bar_onsets(self):
+        from signal_packs import signal
+        from signal_sources import onsets
+        values=[100+4*math.sin(i/11)+math.sin(i/3) for i in range(600)]
+        volumes=[1+(i*7)%13 for i in range(len(values))]
+        bars=[[v,v+.1,v-.1,v,volumes[i]] for i,v in enumerate(values)]
+        timestamped=[[i*60000,*row] for i,row in enumerate(bars)]
+        for tf in (1,5):
+            expected=onsets(timestamped,'volume-momentum','short',tf)
+            for i in range(1,len(values)):
+                close=(i+1)*60
+                direction,_,_=signal(bars,i,close,f'sig-volume-momentum-short-t{tf}')
+                self.assertEqual(direction,expected.get(close*1000,0))
 
     def test_volume_momentum_matches_independent_rolling_calculation(self):
         values=[100+4*math.sin(i/11)+math.sin(i/3) for i in range(700)]

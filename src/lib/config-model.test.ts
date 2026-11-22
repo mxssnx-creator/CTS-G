@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { indicationConfigList, defaultOverlay, DEFAULT_OVERLAY, manualStepPf, overlayFromCts, pfRangeFloorsOf, SIGNAL_RANGES, SIGNAL_SOURCES, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { indicationConfigList, defaultOverlay, DEFAULT_OVERLAY, manualStepPf, overlayFromCts, pfRangeFloorsOf, SIGNAL_RANGES, SIGNAL_SOURCES, signalConfigList, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
@@ -19,6 +19,13 @@ test("Settings can render default and legacy signal entries without missing sele
   assert.deepEqual(entry.timeframes, [15]);
   assert.deepEqual(entry.sources, SIGNAL_SOURCES);
   assert.deepEqual(overlayFromCts(cts(), { signalConfigs: [] }).signalConfigs, []);
+});
+
+test("experimental Signal source is saved only when explicitly selected", () => {
+  assert.equal(DEFAULT_OVERLAY.signalConfigs.some((entry) => entry.sources.includes("volume-momentum")), false);
+  const [entry] = signalConfigList([{ sources: ["volume-momentum"], ranges: ["short"], timeframes: [1] }]);
+  assert.deepEqual(entry.sources, ["volume-momentum"]);
+  assert.deepEqual(overlayFromCts(cts(), { signalConfigs: [entry] }).signalConfigs[0].sources, ["volume-momentum"]);
 });
 
 test("global and per-range Last-N retain the lowest requested windows", () => {

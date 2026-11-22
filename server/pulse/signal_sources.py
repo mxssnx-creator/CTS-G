@@ -11,8 +11,8 @@ from collections import deque
 
 SOURCES = ("ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian",
            "bb-bounce", "cci-reversal", "obv-trend")
-# This separate catalogue is consumed only by offline experiments. In
-# particular, signal_packs imports SOURCES for ordinary Pulse live entry.
+# SOURCES remains the default live catalogue. Extra research sources are
+# selectable only by an explicit source name; they do not enter defaults.
 RESEARCH_SOURCES = (*SOURCES, "volume-momentum")
 RANGES = ("short", "medium")
 TIMEFRAMES = (1, 5, 15, 30)

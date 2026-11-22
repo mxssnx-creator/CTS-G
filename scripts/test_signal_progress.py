@@ -38,7 +38,9 @@ def plain_pass(rows,t,rule,floor=2.2):
         return l>0 and (not g or l/g>=floor)
     minimal=vals[-n:]
     short=vals[-n-b:-n]
-    return (positive(minimal) if mode=='positive' else negative(minimal)) and positive(vals[-n-a:-n]) and (positive(short) if rule.short_polarity=='positive' else negative(short))
+    return ((positive(minimal) if mode=='positive' else negative(minimal))
+            and positive(vals[-n-a:-n]) and positive(vals[-n-a:])
+            and (positive(short) if rule.short_polarity=='positive' else negative(short)))
 
 def scalar_path(bars,events,br,mr,side,p=P):
     """Deliberately slow normal-position oracle; no production gate/position helpers."""
@@ -116,14 +118,20 @@ class Windows(unittest.TestCase):
     def test_negative_minimal_never_changes_long_short_or_cumulative_losses(self):
         h=History(23)
         for i in range(20):h.record(i*60000,.01)
-        h.record(20*60000,-.9)
+        h.record(20*60000,-.03)
         passing=h.evaluate(21*60000,720*60000,rules(),2.2,.04)
         rule=passing['l20-s10-m1-negative']
         self.assertEqual(rule['long']['loss'],0)
-        self.assertEqual(rule['minimal']['loss'],.9)
-        self.assertAlmostEqual(h.cumulative()['loss'],.9)
-        self.assertLess(h.cumulative()['pf'],1)
+        self.assertEqual(rule['minimal']['loss'],.03)
+        self.assertEqual(rule['overall']['loss'],.03)
+        self.assertAlmostEqual(h.cumulative()['loss'],.03)
+        self.assertGreater(h.cumulative()['pf'],2.2)
         self.assertNotIn('l20-s10-m1-positive',passing)
+        losing=History(23)
+        for i in range(20):losing.record(i*60000,.01)
+        losing.record(20*60000,-.9)
+        self.assertNotIn('l20-s10-m1-negative',losing.evaluate(21*60000,720*60000,rules(),2.2,.04))
+        self.assertLess(losing.cumulative()['pf'],1)
 
     def test_strict_clock_expiry_and_full_windows(self):
         h=History(23)

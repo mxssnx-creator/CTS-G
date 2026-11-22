@@ -65,7 +65,7 @@ def policy_listing(raw=None):
             "minimal": r.minimal, "polarity": r.polarity, "shortPolarity": r.short_polarity} for r in allowed],
             "ruleCount": len(allowed), "excludedPairs": [{"long": a, "short": b, "reason": "short exceeds 50% of long"}
                 for a, b in product(sorted(raw["long"]), sorted(raw["short"])) if b > a * raw["shortRatio"]],
-            "windowBoundary": "long and short end before minimal; all actual returns remain in accounting"}
+            "windowBoundary": "long and short end before minimal; the full long-plus-minimal window must also meet the positive PF floor"}
 
 
 def metrics(values):
@@ -155,11 +155,14 @@ class History:
                 continue
             long = self.window(now, history_ms, rule.long, rule.minimal)
             short = self.window(now, history_ms, rule.short, rule.minimal)
+            overall = self.window(now, history_ms, rule.long + rule.minimal)
             short_ok = (positive(short, rule.short, floor, max_dd) if rule.short_polarity == "positive"
                         else negative(short, rule.short, floor))
-            if positive(long, rule.long, floor, max_dd) and short_ok:
+            if (positive(long, rule.long, floor, max_dd) and short_ok and
+                    positive(overall, rule.long + rule.minimal, floor, max_dd)):
                 passed[rule.id] = {"long": long, "short": short, "minimal": minimal,
-                                   "minimalPolarity": rule.polarity, "shortPolarity": rule.short_polarity, "floor": floor}
+                                   "overall": overall, "minimalPolarity": rule.polarity,
+                                   "shortPolarity": rule.short_polarity, "floor": floor}
         self.cache[memo] = passed
         return passed
 

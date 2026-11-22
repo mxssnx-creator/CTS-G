@@ -44,7 +44,8 @@ def gate(history,t,rule,cfg):
         return losses>0 and (gains==0 or losses/gains>=cfg['minPf'])
     recent=positive(last,n,cfg) if mode=='positive' else negative(last)
     short=rows[-n-b:-n]
-    return recent and positive(rows[-n-a:-n],a,cfg) and (positive(short,b,cfg) if short_mode=='positive' else negative(short))
+    return (recent and positive(rows[-n-a:-n],a,cfg) and positive(rows[-n-a:],a+n,cfg)
+            and (positive(short,b,cfg) if short_mode=='positive' else negative(short)))
 
 
 def reconstruct(bars,events,br,mr,side,p,cfg,real_mode='positive'):

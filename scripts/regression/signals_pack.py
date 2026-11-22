@@ -50,7 +50,7 @@ def the_signal_never_reads_a_later_bar():
 def every_signal_pack_is_its_own_set_grid_at_the_signals_floor():
     """stratSignals + signalConfigs: each (source, range, timeframe) is one pack with its entry's step range, SL ratios and types; its Sets ask minPfSignals;
     an unknown source is dropped and listed; off = no Signals pack."""
-    cfg = [{"sources": ["ema-cross", "donchian", "nope"], "ranges": ["short"], "timeframes": [5, 15], "stepMin": 6, "stepMax": 9, "slRatios": [0.5, 1.0],
+    cfg = [{"sources": ["ema-cross", "donchian", "volume-momentum", "nope"], "ranges": ["short"], "timeframes": [5, 15], "stepMin": 6, "stepMax": 9, "slRatios": [0.5, 1.0],
             "types": ["base", "trail"]}]
     b = se.SetBook()
     b.load(overlay(**{**SMALL, "stratSignals": True, "signalConfigs": cfg, "stratIndications": False, "stratGeneral": False}))
@@ -63,7 +63,7 @@ def every_signal_pack_is_its_own_set_grid_at_the_signals_floor():
     off = se.SetBook()
     off.load(overlay(**{**SMALL, "stratSignals": False, "signalConfigs": cfg}))
     dropped = [d["name"] for d in b.signal_report["dropped"]]
-    ok = (sorted(sig) == sorted(sp.pack_name(s, "short", tf) for s in ("ema-cross", "donchian") for tf in (5, 15)) and steps == {6, 7, 8, 9}
+    ok = (sorted(sig) == sorted(sp.pack_name(s, "short", tf) for s in ("ema-cross", "donchian", "volume-momentum") for tf in (5, 15)) and steps == {6, 7, 8, 9}
           and ratios == {0.5, 1.0} and kinds <= {"base", "trail"} and "exit" not in kinds and floors == {b.signal_min_pf} and b.signal_min_pf >= 2.2
           and any("nope" in d for d in dropped) and not any(p.startswith(sp.PREFIX) for p in off.packs) and all(se.is_signal_pack(p) for p in sig))
     return ok, f"packs {sig}; steps {sorted(steps)}; ratios {sorted(ratios)}; kinds {sorted(kinds)}; floors {sorted(floors)}; dropped {dropped}"
