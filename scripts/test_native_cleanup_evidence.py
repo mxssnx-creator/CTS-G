@@ -49,6 +49,13 @@ class CleanupEvidence(unittest.TestCase):
             api=SimpleNamespace(get=lambda *a:reply)
             self.assertEqual(terminal_intents(api,[intent],time.monotonic()+2,order_bodies),[body['clientOrderID']])
 
+    def test_direct_order_history_array_resolves_exact_identity(self):
+        body,row,intent=self.fixture();remembered=[]
+        api=SimpleNamespace(get=lambda *a:{'code':0,'data':[row]})
+        self.assertEqual(terminal_intents(api,[intent],time.monotonic()+2,order_bodies,
+                                         lambda order,request:remembered.append((order,request))),[])
+        self.assertEqual(remembered,[(row,body)])
+
     def test_expired_deadline_dispatches_no_history_reads(self):
         body, _, intent = self.fixture(); calls=[]
         api=SimpleNamespace(get=lambda *a:calls.append(a))

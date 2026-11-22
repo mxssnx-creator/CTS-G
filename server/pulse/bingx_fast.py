@@ -307,6 +307,10 @@ class FastBingX:
         # connections; pooled startup must pace the actual dispatches too.
         self.path_buckets = {path: TokenBucket(4.0, 1.0) for path in (
             '/openApi/swap/v2/user/commissionRate', '/openApi/swap/v1/trade/positionHistory')}
+        # BingX references disagree between 1/s and 5/s for this UID-scoped
+        # order-history endpoint. Use a non-bursting rate below the lower figure.
+        # This is per client; a shared account still needs process coordination.
+        self.path_buckets['/openApi/swap/v2/trade/allOrders'] = TokenBucket(.8, 1.0)
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.http = None
@@ -418,7 +422,7 @@ class FastBingX:
             for k, v in extra.items():
                 if v is None:
                     continue
-                if method == "GET" and path.endswith("/trade/order") and k == "clientOrderID":
+                if method == "GET" and path.endswith("/trade/order") and k in ("clientOrderID", "clientOrderId"):
                     k = "clientOrderId"  # lookup uses the canonical lower-camel spelling
                     v = str(v).lower()
                 params[k] = v if isinstance(v, str) else str(v)
@@ -458,7 +462,13 @@ class FastBingX:
             if prepared is not None and prepared.url.raw_path == expected:
                 try:
                     response = client.send(prepared)
-                    return loads(response.content)
+                    try:
+                        return loads(response.content)
+                    except Exception as exc:
+                        # The HTTP status helps diagnose a gateway or venue
+                        # failure without logging the signed URL or response
+                        # body. A malformed write response is still unknown.
+                        return {"code": -1, "msg": f"{type(exc).__name__} (HTTP {response.status_code})", "error": True}
                 except Exception as exc:
                     # A write may have reached the venue. Return its unknown
                     # outcome for exact-ID reconciliation; never resend it on

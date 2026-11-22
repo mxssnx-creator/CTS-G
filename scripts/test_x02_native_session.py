@@ -45,14 +45,46 @@ class NativeSessionTests(unittest.TestCase):
             self.assertTrue(rejected["localPolicyRejection"])
             self.assertEqual(len(calls), 1)
             self.assertEqual(journal.entry_orders, 1)
-            self.assertEqual(api._req("POST", order_path, {**entry,"clientOrderID":"Gtest-c"})["code"], 0)
-            self.assertEqual(journal.entry_orders, 2)
-            self.assertTrue(api._req("POST", order_path, {**entry,"clientOrderID":"Gtest-d"})["localPolicyRejection"])
+            self.assertIsNotNone(journal.unknown_write)
+            self.assertTrue(api._req("POST", order_path, {**entry,"clientOrderID":"Gtest-c"})["localPolicyRejection"])
+            self.assertEqual(journal.entry_orders, 1)
             journal.remember_order({"symbol":"BTC-USDT","orderId":"123","clientOrderID":"Gtest-entry","executedQty":"1"})
             close = {**entry,"side":"SELL","clientOrderID":"Gtest-close"}
             self.assertEqual(api._req("POST", order_path, close)["code"], 0)
-            self.assertEqual(journal.entry_orders, 2)
-            self.assertEqual(len(calls), 3)
+            self.assertEqual(journal.entry_orders, 1)
+            self.assertEqual(len(calls), 2)
+
+    def test_error_response_quarantines_entries_but_allows_owned_close(self):
+        calls=[]
+        order_path='/openApi/swap/v2/trade/order'
+        def dispatch(method,path,data):
+            calls.append(data)
+            return {'code':-1,'msg':'malformed response','error':True} if len(calls)==1 else {'code':0}
+        with tempfile.TemporaryDirectory() as tmp:
+            api=SimpleNamespace(base=session.HOST,_req=dispatch)
+            journal=session.Journal(api,tmp,'Gtest',{'BTC-USDT'},max_entry_orders=3)
+            journal.phase='active';journal.deadline=session.time.monotonic()+60
+            body={'symbol':'BTC-USDT','type':'MARKET','side':'BUY','positionSide':'LONG',
+                  'quantity':1,'clientOrderID':'Gtest-a'}
+            self.assertEqual(api._req('POST',order_path,body)['code'],-1)
+            self.assertIsNotNone(journal.unknown_write)
+            self.assertTrue(api._req('POST',order_path,{**body,'clientOrderID':'Gtest-b'})['localPolicyRejection'])
+            journal.remember_order({'symbol':'BTC-USDT','orderId':'123','clientOrderID':'Gtest-a','executedQty':'1'})
+            self.assertEqual(api._req('POST',order_path,{**body,'side':'SELL','clientOrderID':'Gtest-c'})['code'],0)
+            self.assertEqual(len(calls),2)
+
+    def test_missing_write_response_also_quarantines_entries(self):
+        for missing in (None,{}):
+            with self.subTest(response=missing),tempfile.TemporaryDirectory() as tmp:
+                api=SimpleNamespace(base=session.HOST,_req=lambda *_:missing)
+                journal=session.Journal(api,tmp,'Gtest',{'BTC-USDT'})
+                journal.phase='active';journal.deadline=session.time.monotonic()+60
+                body={'symbol':'BTC-USDT','type':'MARKET','side':'BUY','positionSide':'LONG',
+                      'quantity':1,'clientOrderID':'Gtest-a'}
+                api._req('POST','/openApi/swap/v2/trade/order',body)
+                self.assertIsNotNone(journal.unknown_write)
+                self.assertTrue(api._req('POST','/openApi/swap/v2/trade/order',
+                    {**body,'clientOrderID':'Gtest-b'})['localPolicyRejection'])
 
     def test_lower_position_cap_keeps_all_explicit_symbols(self):
         raw = {"stageLastN": {}}
@@ -313,6 +345,14 @@ class NativeSessionTests(unittest.TestCase):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 18))
         with self.assertRaises(ValueError):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 48))
+
+    def test_demo_rejects_a_silently_raised_signals_fallback(self):
+        raw=json.loads((session.ROOT/'server/pulse/overlay-bingx-x02.json').read_text())
+        raw['stratSignals']=True;raw['minPfSignals']=1.3
+        with self.assertRaisesRegex(ValueError,'fallback PF differs'):
+            session.context_requirement(session.frozen_overlay(raw,SYMBOLS))
+        raw['minPfSignals']=2.2
+        self.assertLessEqual(session.context_requirement(session.frozen_overlay(raw,SYMBOLS)),4320)
 
     def test_relocation_is_complete_and_does_not_move_unrelated_values(self):
         mod = SimpleNamespace(DIR='/opt/native', STATS_PATH='/opt/native/stats.json', OTHER='/opt/other')

@@ -68,6 +68,18 @@ class SignedPool(unittest.TestCase):
         reply=client._http('POST',self.signed_target(client))
         self.assertEqual(reply['code'],101400);self.assertEqual(len(calls),1)
 
+    def test_non_json_write_reports_status_without_retry_or_body(self):
+        calls=[]
+        def server(request):
+            calls.append(request)
+            return bx.httpx.Response(502,content=b'private gateway page with signature=secret')
+        client=self.client(server)
+        reply=client._http('POST',self.signed_target(client))
+        self.assertEqual(len(calls),1)
+        self.assertTrue(reply['error']);self.assertEqual(reply['code'],-1)
+        self.assertIn('HTTP 502',reply['msg'])
+        self.assertNotIn('signature',reply['msg']);self.assertNotIn('secret',reply['msg'])
+
     def test_parameter_merging_mismatch_uses_legacy_transport_before_dispatch(self):
         seen=[]
         client=self.client(lambda request:self.fail('changed signed target reached the network'))
@@ -93,10 +105,11 @@ class SignedPool(unittest.TestCase):
         client=self.client(lambda request:requests.append(request)or bx.httpx.Response(200,json={'code':0}))
         client._take=lambda *args:True;client._next_ts=lambda:1700000000000
         client.stats={'rest':0,'err':0};client._trip=lambda *args:None
-        client.get('/openApi/swap/v2/trade/order',{'symbol':'A-USDT','clientOrderID':'GtestMIXED'})
-        fields=dict(urllib.parse.parse_qsl(requests[0].url.query.decode()))
-        self.assertEqual(fields['clientOrderId'],'gtestmixed')
-        self.assertNotIn('clientOrderID',fields)
+        for key in ('clientOrderID','clientOrderId'):
+            client.get('/openApi/swap/v2/trade/order',{'symbol':'A-USDT',key:'GtestMIXED'})
+            fields=dict(urllib.parse.parse_qsl(requests[-1].url.query.decode()))
+            self.assertEqual(fields['clientOrderId'],'gtestmixed')
+            self.assertNotIn('clientOrderID',fields)
 
     def test_explicit_order_absence_does_not_cool_the_whole_order_path(self):
         client=self.client(lambda request:self.fail('no request expected'))
@@ -121,6 +134,14 @@ class SignedPool(unittest.TestCase):
         client.path_buckets['/openApi/swap/v2/user/commissionRate']=SimpleNamespace(take=lambda:seen.append('fee')or .25)
         self.assertTrue(client._take('private','/openApi/swap/v2/user/commissionRate'))
         self.assertEqual(seen,['private','fee'])
+
+    def test_order_history_has_conservative_nonbursting_slots(self):
+        client=bx.FastBingX('fixture-key','fixture-secret',SimpleNamespace(write=lambda *a,**k:None),base='https://open-api-vst.bingx.com')
+        self.addCleanup(client.http.close)
+        bucket=client.path_buckets['/openApi/swap/v2/trade/allOrders']
+        self.assertEqual((bucket.rate,bucket.burst),(.8,1.0))
+        with patch.object(bx.time,'monotonic',return_value=bucket.ts):
+            self.assertEqual([bucket.reserve() for _ in range(4)],[0,1.25,2.5,3.75])
 
     def test_cooldown_started_during_queue_wait_prevents_dispatch(self):
         client=self.client(lambda request:self.fail('no request expected'))
