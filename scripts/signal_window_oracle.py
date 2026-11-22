@@ -59,11 +59,15 @@ def reconstruct(bars,events,br,mr,side,p,cfg,real_mode='positive'):
             if n=='coordinated':real_ok=main
             else:
                 n=mr[2] if n=='lane-minimal' else n
-                real=[v for end,v in histories['real'][-n-1:] if t-cfg['historyMinutes']*60000<=end<t][-n:]
+                long_n=cfg.get('realLongN',0)
+                seen=[v for end,v in histories['real'][-n-long_n-1:] if t-cfg['historyMinutes']*60000<=end<t]
+                real=seen[-n:]
                 if real_mode=='positive':real_ok=positive(real,n,cfg)
                 else:
                     gain=sum(v for v in real if v>0);loss=-sum(v for v in real if v<0)
                     real_ok=len(real)==n and loss>0 and (gain==0 or loss/gain>=cfg['minPf'])
+                if long_n:
+                    real_ok=real_ok and positive(seen[-n-long_n:-n],long_n,cfg) and positive(seen[-n-long_n:],n+long_n,cfg)
             if base and main and real_ok:candidates.append(t)
             for stage,admit in [('base',True),('main',base),('real',base and main)]:
                 if admit and positions[stage] is None:

@@ -70,6 +70,7 @@
     "maxContextDrawdown": 0.01,
     "minPf": 2.2,
     "realLastN": "lane-minimal",
+    "realLongN": 8,
     "realModes": [
       "positive",
       "negative"

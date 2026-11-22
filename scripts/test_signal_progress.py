@@ -184,26 +184,34 @@ class Progress(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_real_positive_and_negative_are_own_independent_lanes(self):
-        raw=cfg();raw['realLastN']=2;raw['realModes']=['positive','negative']
+        raw=cfg();raw['realLastN']=2;raw['realLongN']=8;raw['realModes']=['positive','negative']
         book=SignalProgress(raw);rid=book.register(identity(),P);node=book.node()
         rule='l10-s4-m1-positive'
-        node.history.record(T,.01);node.history.record(T+60000,-.03)
-        ok_plus,_=book.real_pass(node,T+60001,rule,None,'positive')
-        ok_minus,m=book.real_pass(node,T+60001,rule,None,'negative')
+        for i in range(8):node.history.record(T+i*60000,.01)
+        node.history.record(T+8*60000,.01);node.history.record(T+9*60000,-.03)
+        now=T+12*60000
+        ok_plus,_=book.real_pass(node,now,rule,None,'positive')
+        ok_minus,m=book.real_pass(node,now,rule,None,'negative')
         self.assertFalse(ok_plus);self.assertTrue(ok_minus)
         self.assertEqual((m['gain'],m['loss'],m['polarity']),(.01,.03,'negative'))
+        self.assertAlmostEqual(m['long']['gain'],.08)
+        self.assertGreater(m['overall']['pf'],2.2)
         self.assertEqual(book.summary(T)['possibleExecutionLanes'],2*42*42)
-        root=book.roots[rid];root.main[rule]=book.node();root.real[rule,rule]=node;node.opened=2
+        root=book.roots[rid];root.main[rule]=book.node();root.real[rule,rule]=node;node.opened=10
         for parent in (root.base,root.main[rule]):
             for i in range(11):parent.history.record(T+i*60000,.01)
             parent.opened=11
-        now=T+12*60000
         candidates=book.step('A',[now,100,100.1,99.9,100,1],{book.event_key(identity()):1})
         chosen=[c for c in candidates if c['baseRule']==rule and c['mainRule']==rule]
         self.assertEqual(len(chosen),1)
         self.assertTrue(chosen[0]['id'].endswith('/real-negative'))
         self.assertEqual(chosen[0]['real']['loss'],.03)
         self.assertEqual(SignalProgress.restore(book.checkpoint()).checkpoint(),book.checkpoint())
+        losing=book.node()
+        for i,v in enumerate([.001]*8+[.01,-.03]):losing.history.record(T+i*60000,v)
+        self.assertFalse(book.real_pass(losing,now,rule,None,'negative')[0], 'negative Last cannot hide an overall losing Real window')
+        bad=cfg();bad['realLastN']=2;bad['realModes']=['negative']
+        with self.assertRaises(ValueError):SignalProgress(bad)
         raw['realLastN']='coordinated'
         with self.assertRaises(ValueError):SignalProgress(raw)
 

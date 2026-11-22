@@ -72,7 +72,7 @@ class Root:
 class SignalProgress:
     def __init__(self, config):
         required = {"base", "main", "realLastN", "minPf", "historyMinutes", "maxContextDrawdown", "fees"}
-        if set(config) - {"realModes"} != required:
+        if set(config) - {"realModes", "realLongN"} != required:
             raise ValueError("unknown/missing Signals progression controls")
         self.config = json.loads(canonical(config))
         self.base_rules, self.main_rules = rules(config["base"]), rules(config["main"])
@@ -88,6 +88,11 @@ class SignalProgress:
                 any(mode not in ("positive", "negative") for mode in self.real_modes) or
                 ("realModes" in config and real_n == "coordinated")):
             raise ValueError("independent Real modes require own Real history and valid signs")
+        self.real_long_n = config.get("realLongN", 0)
+        if (type(self.real_long_n) is not int or not 0 <= self.real_long_n <= 200 or
+                (self.real_long_n and real_n == "coordinated") or
+                ("negative" in self.real_modes and not self.real_long_n)):
+            raise ValueError("negative Real windows require a separate positive Real history")
         if type(config["minPf"]) not in (int,float) or not math.isfinite(config["minPf"]) or config["minPf"] <= 1:
             raise ValueError("Signals require a common PF floor above 1")
         if type(config["historyMinutes"]) is not int or not 1 <= config["historyMinutes"] <= 43200:
@@ -102,7 +107,8 @@ class SignalProgress:
         if any(type(f[k]) not in (int,float) or not math.isfinite(f[k]) or not 0 <= f[k] < .1 for k in ("maker","taker","slippagePerLeg")):
             raise ValueError("invalid Signal costs")
         self.main_by_id = {r.id: r for r in self.main_rules}
-        self.capacity = max(real_n if type(real_n) is int else 0,
+        max_real_n = real_n if type(real_n) is int else max(r.minimal for r in self.main_rules) if real_n == "lane-minimal" else 0
+        self.capacity = max(max_real_n + self.real_long_n,
                             *(r.long+r.minimal for r in (*self.base_rules,*self.main_rules)))
         self.roots, self.events, self.active, self.last_bars = {}, {}, {}, {}
         self.registered_symbols = set()
@@ -229,8 +235,15 @@ class SignalProgress:
             n = self.main_by_id[main_rule].minimal
         m = node.history.window(t,self.history_ms,n)
         allowed = positive(m,n,self.floor,self.max_dd) if mode == "positive" else negative(m,n,self.floor)
-        return allowed, {**m,"validationStage":"real", "polarity":mode,
-            "validationMode":self.config["realLastN"],"requiredN":n,"floor":self.floor}
+        proof = {**m,"validationStage":"real", "polarity":mode,
+                 "validationMode":self.config["realLastN"],"requiredN":n,"floor":self.floor}
+        if self.real_long_n:
+            prior = node.history.window(t,self.history_ms,self.real_long_n,skip=n)
+            overall = node.history.window(t,self.history_ms,self.real_long_n+n)
+            proof.update(long=prior,overall=overall,longRequiredN=self.real_long_n)
+            allowed = (allowed and positive(prior,self.real_long_n,self.floor,self.max_dd) and
+                       positive(overall,self.real_long_n+n,self.floor,self.max_dd))
+        return allowed, proof
 
     def step(self, symbol, bar, events):
         """Consume exactly one new completed minute and its prior-close signals.
@@ -340,6 +353,7 @@ class SignalProgress:
                 "activeShadowPositions":sum(len(v) for v in self.active.values()),"eventVisits":self.event_visits,
                 "basePolicy":policy_listing(self.config["base"]),"mainPolicy":policy_listing(self.config["main"]),
                 "minPf":self.floor,"realLastN":self.config["realLastN"],"realModes":self.real_modes,
+                "realLongN":self.real_long_n,
                 "realValidationStage":"main" if self.config["realLastN"]=="coordinated" else "real",
                 "historyMinutes":self.config["historyMinutes"],"baseRuleCount":nb,"mainRuleCount":nm,
                 "strategyRanges":list(STRATEGY_RANGES)}
