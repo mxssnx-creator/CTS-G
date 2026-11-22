@@ -401,8 +401,15 @@ def every_name_gets_the_history_its_timeframe_needs():
         if name.startswith("rsi_reclaim_n"):
             period = int(name.split("_")[2][1:])
             return 8 * period * tf
+        if name.startswith("rsi_trend_n"):
+            _, _, period, trend, _ = name.split("_")
+            return max(8 * int(period[1:]), 3 * int(trend[3:])) * tf
         if name.startswith("psar_"):
             return 120 * tf
+        if name.startswith("bb_reclaim_n"):
+            return (int(name.split("_")[2][1:]) + 2) * tf
+        if name.startswith("kelt_cross_n"):
+            return (4 * int(name.split("_")[2][1:]) + 1) * tf
         return rows_for(tf)
 
     bad_w = [k for k in INDICATORS if (k.endswith("_t15") or k.startswith("g_")) and window_of(k) < required(k, 15)]

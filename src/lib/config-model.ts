@@ -605,11 +605,19 @@ export type PulseOverlay = {
   modules?: Record<string, boolean>;
 };
 
+export const SIGNAL_SOURCES = ["ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian", "bb-bounce", "cci-reversal", "obv-trend"] as const;
+export const SIGNAL_RANGES = ["short", "medium"] as const;
+export const SIGNAL_TIMEFRAMES = [1, 5, 15, 30] as const;
+export const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
+  label: "signals", enabled: true, sources: [...SIGNAL_SOURCES], ranges: [...SIGNAL_RANGES], timeframes: [5, 15],
+  stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"],
+};
+
 /** The signal entries x01 / x02 ship (owner 2026-11-14 / 15): 1 / 5 min base + trailing, 15 / 30 min trailing. */
 const SHIPPED_SIGNAL_CONFIGS: SignalConfig[] = [
-  { label: "signals 1/5m", timeframes: [1, 5], stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"] },
-  { label: "signals 15/30m trailing", timeframes: [15, 30], stepMin: 6, stepMax: 15, slRatios: [0.5, 0.75, 1.0], types: ["trail"] },
-] as SignalConfig[];
+  { ...DEFAULT_SIGNAL_CONFIG, label: "signals 1/5m", timeframes: [1, 5] },
+  { ...DEFAULT_SIGNAL_CONFIG, label: "signals 15/30m trailing", timeframes: [15, 30], stepMin: 6, stepMax: 15, types: ["trail"] },
+];
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
@@ -1315,9 +1323,6 @@ const numList = (v: unknown, lo: number, hi: number): number[] =>
   [...new Set((Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;\s]+/) : []).map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x) && x >= lo && x <= hi))];
 /** Normalise the saved range configurations; the engine expands and validates the names, so an unknown family is reported there, not silently kept here. */
 /** Signals packs (engine `signal_packs`): every source x range x timeframe is its own pack sig-<source>-<range>-t<tf> with this entry's Set geometry. */
-export const SIGNAL_SOURCES = ["ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian", "bb-bounce", "cci-reversal", "obv-trend"] as const;
-export const SIGNAL_RANGES = ["short", "medium"] as const;
-export const SIGNAL_TIMEFRAMES = [1, 5, 15, 30] as const;
 export interface SignalConfig {
   label: string;
   enabled: boolean;
@@ -1329,10 +1334,6 @@ export interface SignalConfig {
   slRatios: number[];
   types: string[];
 }
-export const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
-  label: "signals", enabled: true, sources: [...SIGNAL_SOURCES], ranges: [...SIGNAL_RANGES], timeframes: [5, 15],
-  stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"],
-};
 export function signalConfigList(v: unknown): SignalConfig[] {
   if (!Array.isArray(v)) return [];
   const words = (x: unknown): string[] => (Array.isArray(x) ? x : typeof x === "string" ? x.split(/[,;\s]+/) : []).map((y) => String(y).trim().toLowerCase()).filter(Boolean);
@@ -1650,7 +1651,6 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
     stratSignals: bool(cts.stratSignals, false),
-    signalConfigs: signalConfigList(cts.signalConfigs),
     stratTrend: bool(cts.stratTrend, false),
     stratBreakout: bool(cts.stratBreakout, false),
     stratReversion: bool(cts.stratReversion, false),
@@ -1842,6 +1842,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...live,
     ...blockAddAutoSettings(live?.blockAddLastN ?? cts.blockAddLastN, live?.blockAddAutoMin ?? cts.blockAddAutoMin),
   };
+  out.signalConfigs = signalConfigList(live?.signalConfigs ?? cts.signalConfigs ?? DEFAULT_OVERLAY.signalConfigs);
   out.stageLastN = stageGridOf(out.stageLastN);
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
   out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);

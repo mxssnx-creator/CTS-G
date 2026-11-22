@@ -84,3 +84,8 @@ export type StageGridSelection = {
   validatedBase?: StageEvidence;
   postStages?: Partial<Record<StageName, StageEvidence>>;
 };
+
+export function postStageEvidence(grid: Pick<StageGridSelection, "postStages" | "validatedBase"> | undefined, stage: StageName) {
+  if (stage === "base" && grid?.validatedBase) return grid.validatedBase;
+  return grid?.postStages?.[stage];
+}

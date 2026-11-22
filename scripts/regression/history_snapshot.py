@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import threading
+from unittest.mock import patch
 
 from common import T0, synth_bars
 from set_engine import SetBook
@@ -23,19 +24,28 @@ def live_feed_cannot_advance_a_later_symbol_inside_a_replay_pass():
     reference,live=make(),make()
     reference.replay_all(now=T0)
     advanced=[]
+    replay_sizes = {}
+    replay_symbol = SetBook._replay_symbol
+
+    def record_replay(book, symbol, histories, now, on_step=None):
+        replay_sizes[symbol] = len(book.bars[symbol])
+        return replay_symbol(book, symbol, histories, now, on_step)
+
     def advance_feed():
         if not advanced:
             rows=live.bars[NAMES[1]]
             last=rows[-1]
             live.ingest_bars(NAMES[1],rows[-15:]+[list(last)],last_t=T0,tail=True)
             advanced.append(True)
-    live.replay_all(now=T0,on_step=advance_feed)
+    with patch.object(SetBook, "_replay_symbol", record_replay):
+        live.replay_all(now=T0,on_step=advance_feed)
     rows=lambda b:{s:{k:list(v)for k,v in tapes.items()}for s,tapes in b._hist_rows.items()}
     ok=(bool(advanced) and live.progress.errors==0 and rows(live)==rows(reference)
         and live.bar_t[NAMES[1]]==T0 and len(live.bars[NAMES[1]])==201
         and live._hist_replay_bar_at[NAMES[1]]==T0-60
-        and len(live._hist_inputs[NAMES[1]]['bars'])==200)
-    return ok,f'feed advanced={bool(advanced)}; replay errors={live.progress.errors}; all symbol tapes match frozen reference={rows(live)==rows(reference)}'
+        and replay_sizes.get(NAMES[1]) == 200 and not live._hist_inputs)
+    return ok, (f'feed advanced={bool(advanced)}, frozen replay bars={replay_sizes}, '
+                f'replay errors={live.progress.errors}, tapes match={rows(live) == rows(reference)}')
 
 
 def _book(opt_in=True, live_clock=False, stages=False):

@@ -17,7 +17,7 @@ import re
 import threading
 from array import array
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 LOOKBACK = 160
 Row = Sequence[float]
@@ -997,6 +997,19 @@ def rsi_band_reclaim(bars: Sequence[Row], period: int, band: float) -> Signal:
     return None
 
 
+def rsi_trend_reclaim(bars: Sequence[Row], period: int, trend: int) -> Signal:
+    """Buy a reclaim of RSI 45 in an uptrend, or sell a loss of 55 in a downtrend."""
+    signal = rsi_band_reclaim(bars, period, 45.0)
+    if signal is None or len(bars) < trend + 3:
+        return None
+    side, confidence = signal
+    closes = _closes(bars[-3 * trend:])
+    ema = _ema_list(closes, trend)
+    if side * (ema[-1] - ema[-4]) > 0 and side * (closes[-1] - ema[-1]) > 0:
+        return side, confidence
+    return None
+
+
 def sar_state(bars: Sequence[Row], start: float, step: float, maximum: float) -> tuple[int, float, bool]:
     """Wilder SAR at the last completed bar, including whether it reversed."""
     if len(bars) < 2:
@@ -1047,13 +1060,70 @@ def sar_signal(bars: Sequence[Row], start: float, step: float, maximum: float, c
     return side, 0.72
 
 
-def _thin_settings() -> Dict[str, Tuple[int, Callable[[Sequence[Row]], Signal]]]:
+def sar_retest(bars: Sequence[Row], start: float, step: float, maximum: float) -> Signal:
+    """A close back across EMA(8) in an established SAR trend."""
+    if len(bars) < 21:
+        return None
+    side, stop, flipped = sar_state(bars, start, step, maximum)
+    if flipped:
+        return None
+    closes = _closes(bars[-24:])
+    ema = _ema_list(closes, 8)
+    if not (side * (closes[-2] - ema[-2]) <= 0 < side * (closes[-1] - ema[-1])
+            and side * (ema[-1] - ema[-4]) > 0):
+        return None
+    atr = _atr(bars[-29:-1], 14)
+    return (side, 0.72) if atr > 0 and 0 < side * (closes[-1] - stop) <= 3.0 * atr else None
+
+
+def bollinger_reclaim(bars: Sequence[Row], period: int) -> Signal:
+    """Re-enter the prior two-standard-deviation band against the preceding excursion."""
+    if len(bars) < period + 2:
+        return None
+    closes = _closes(bars[-period - 2:])
+    reference = closes[:-2]
+    center = sum(reference) / period
+    width = 2 * math.sqrt(sum((c - center) ** 2 for c in reference) / period)
+    previous, current = closes[-2:]
+    if width <= 0:
+        return None
+    if previous < center - width <= current < center:
+        return 1, 0.72
+    if previous > center + width >= current > center:
+        return -1, 0.72
+    return None
+
+
+def keltner_cross(bars: Sequence[Row], period: int) -> Signal:
+    """Break the prior EMA channel by two prior ATRs in the direction of its slope."""
+    if len(bars) < 2 * period + 2:
+        return None
+    closes = _closes(bars)
+    ema = _ema_list(closes[:-1], period)
+    width = 2 * _atr(bars[:-1], period)
+    if width <= 0:
+        return None
+    previous, current = closes[-2:]
+    if ema[-1] > ema[-4] and previous <= ema[-1] + width < current:
+        return 1, 0.72
+    if ema[-1] < ema[-4] and previous >= ema[-1] - width > current:
+        return -1, 0.72
+    return None
+
+
+class _ThinIndicator(NamedTuple):
+    timeframe: int
+    bars: int
+    calculate: Callable[[Sequence[Row]], Signal]
+
+    def __call__(self, rows: Sequence[Row]) -> Signal:
+        tail = rows[-self.timeframe * self.bars:]
+        return self.calculate(tail if self.timeframe == 1 else _agg(tail, self.timeframe))
+
+
+def _thin_settings() -> Dict[str, Tuple[int, _ThinIndicator]]:
     def on_frame(fn, tf, bars):
-        width = tf * bars
-        def at_bar(rows):
-            tail = rows[-width:]
-            return fn(tail if tf == 1 else _agg(tail, tf))
-        return width, at_bar
+        return tf * bars, _ThinIndicator(tf, bars, fn)
 
     out = {}
     psar = {"slow": (.01, .01, .10, False), "classic": (.02, .02, .20, False),
@@ -1066,6 +1136,21 @@ def _thin_settings() -> Dict[str, Tuple[int, Callable[[Sequence[Row]], Signal]]]
                 )
         for name, factors in psar.items():
             out[f"psar_{name}_t{tf}"] = on_frame(lambda b, af=factors: sar_signal(b, *af), tf, 120)
+    for tf in (3, 5, 15):
+        out[f"rsi_reclaim_n14_b30_t{tf}"] = on_frame(lambda b: rsi_band_reclaim(b, 14, 30), tf, 112)
+        for period, trend in ((7, 24), (14, 30)):
+            out[f"rsi_trend_n{period}_ema{trend}_t{tf}"] = on_frame(
+                lambda b, p=period, e=trend: rsi_trend_reclaim(b, p, e), tf, max(8 * period, 3 * trend)
+            )
+        for name in ("slow", "classic"):
+            factors = psar[name][:3]
+            out[f"psar_retest_{name}_t{tf}"] = on_frame(lambda b, af=factors: sar_retest(b, *af), tf, 120)
+    for name, factors in psar.items():
+        out[f"psar_{name}_t15"] = on_frame(lambda b, af=factors: sar_signal(b, *af), 15, 120)
+    for tf in (5, 15):
+        for period in (12, 20):
+            out[f"bb_reclaim_n{period}_t{tf}"] = on_frame(lambda b, p=period: bollinger_reclaim(b, p), tf, period + 2)
+            out[f"kelt_cross_n{period}_t{tf}"] = on_frame(lambda b, p=period: keltner_cross(b, p), tf, 4 * period + 1)
     return out
 
 
@@ -1194,6 +1279,34 @@ THIN_INDICATOR_SETTINGS = _thin_settings()
 INDICATORS.update({name: fn for name, (_, fn) in THIN_INDICATOR_SETTINGS.items()})
 WINDOWS.update({name: width for name, (width, _) in THIN_INDICATOR_SETTINGS.items()})
 HISTORY = max(WINDOWS.values())         # the most 1m rows any indicator reads
+
+
+def thin_signals(rows: Sequence[Row], names: Sequence[str]) -> Dict[str, Tuple[int, float, str]]:
+    """Share completed trailing frames across independent thin indicators on one bar."""
+    settings = {name: THIN_INDICATOR_SETTINGS[name][1] for name in names if name in THIN_INDICATOR_SETTINGS}
+    widths: Dict[int, int] = {}
+    for rule in settings.values():
+        tf = rule.timeframe
+        widths[tf] = max(widths.get(tf, 0), rule.bars)
+    frames = {1: rows}
+    for tf, width in widths.items():
+        if tf == 1:
+            continue
+        try:
+            frames[tf] = _aggregate_rows(rows[-tf * width:], tf)
+        except (ValueError, TypeError, IndexError):
+            # Try each indicator's own tail when a malformed earlier bar
+            # only affects the wider profiles on this timeframe.
+            continue
+    result = {}
+    for name, rule in settings.items():
+        try:
+            frame = frames.get(rule.timeframe)
+            signal = rule.calculate(frame[-rule.bars:]) if frame is not None else rule(rows)
+        except Exception:
+            signal = None
+        result[name] = (int(signal[0]), float(signal[1]), name) if signal else (0, 0.0, "flat")
+    return result
 
 
 def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, float, str]]:

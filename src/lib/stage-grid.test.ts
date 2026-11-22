@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stageGridOf } from "./stage-grid.ts";
+import { postStageEvidence, stageGridOf } from "./stage-grid.ts";
+
+test("Post-Base uses the distinct validated closes of every qualified Base lane", () => {
+  const validatedBase = { orders: 100, gain: 1.25, loss: 1, pf: 1.25 };
+  const selected = { orders: 5, gain: 0.2, loss: 0.1, pf: 2 };
+  const postStages = { base: selected, main: selected };
+  assert.equal(postStageEvidence({ validatedBase, postStages }, "base"), validatedBase);
+  assert.equal(postStageEvidence({ validatedBase, postStages }, "main"), selected);
+  assert.equal(postStageEvidence({ postStages }, "base"), selected);
+});
 
 test("stage settings preserve independent sign and inherited Long selections", () => {
   const settings = stageGridOf({

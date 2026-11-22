@@ -411,11 +411,38 @@ class StageHistory:
         self.entry_floor = entry_floor
         self._entry_floors = None
         self.main_filter, self.filter_need = main_filter, filter_need
-        self.root = _Tape(self, range(len(closes)))
-        self._views: OrderedDict[Sequence[int], _Tape] = OrderedDict({self.root.ids: self.root})
+        self._root: _Tape | None = None
+        self._decision: tuple[float, _Tape] | None = None
+        self._views: OrderedDict[Sequence[int], _Tape] = OrderedDict()
         self._children: OrderedDict[tuple[_Tape, int], _Tape] = OrderedDict()
         self._filter_masks: OrderedDict[_Tape, int] = OrderedDict()
         self._rules = {(i, n): grid.windows(i, n) for i in range(len(STAGES)) for n in ((0,) if i == 0 else grid.longs)}
+
+    @property
+    def root(self) -> _Tape:
+        if self._root is None:
+            self._root = _Tape(self, range(len(self.closes)))
+        return self._root
+
+    def _decision_tape(self, now: float) -> _Tape:
+        """Find the raw closes the current gates and their history can reach."""
+        if self._decision and self._decision[0] == now:
+            return self._decision[1]
+        end = first = bisect_left(self.closes, now)
+        earliest = now
+        # A child can reach older evidence through the entry of a position
+        # closed inside its window. Walk back once for each historical stage,
+        # including the Exec closes reported after the four gates.
+        for _ in STAGES:
+            start = bisect_left(self.closes, earliest - self.lookback, 0, first)
+            if start == first:
+                break
+            earliest = min(earliest, min(self.entries[i] for i in range(start, first)))
+            first = start
+        start = bisect_left(self.closes, earliest - self.lookback, 0, first)
+        tape = self.root if start == 0 and end == len(self.closes) else _Tape(self, range(start, end))
+        self._decision = now, tape
+        return tape
 
     def floor_at(self, n: int, at: float) -> float:
         return self.entry_floor(at) if self.entry_floor else self.floors[n]
@@ -482,8 +509,8 @@ class StageHistory:
             bits ^= 1 << current
         return tuple(reversed(latest))
 
-    def related_tapes(self, path: Path):
-        tape = self.root
+    def related_tapes(self, path: Path, root: _Tape | None = None):
+        tape = self.root if root is None else root
         for depth, w in enumerate(path):
             tape = self.child(tape, tape.child_mask(w, depth))
             yield tape
@@ -497,8 +524,8 @@ class StageHistory:
             out.append(tuple(tape.ids[start:end]))
         return tuple(out)
 
-    def selected_blocks(self, path: Path, now: float) -> tuple[tuple[Evidence, ...], ...]:
-        tape = self.root
+    def selected_blocks(self, path: Path, now: float, root: _Tape | None = None) -> tuple[tuple[Evidence, ...], ...]:
+        tape = self._decision_tape(now) if root is None else root
         out = []
         for depth, w in enumerate(path):
             _, end = tape.indices(now)
@@ -518,7 +545,7 @@ class StageHistory:
         """Current Real evidence for a held position's exact Exec path."""
         if len(path) != len(STAGES):
             return None
-        tape = self.root
+        tape = self._decision_tape(now)
         for depth, w in enumerate(path):
             if not tape.passes(w, depth, now):
                 return None
@@ -531,6 +558,7 @@ class StageHistory:
 
     def evaluate(self, now: float, *, streams: bool = False, limit: int | None = None) -> GridResult:
         validated_base_mask = 0
+        root = self._decision_tape(now)
 
         @lru_cache(maxsize=2048)
         def last_stage(ids: tuple[int, ...], base_long: int) -> GridResult:
@@ -602,25 +630,25 @@ class StageHistory:
             return pick
 
         try:
-            result = walk(0, self.root, 0)
+            result = walk(0, root, 0)
         finally:
             walk.cache_clear()
             last_stage.cache_clear()
         if streams and result.path:
             row_ids, post = [], []
-            for tape in self.related_tapes(result.path):
+            for tape in self.related_tapes(result.path, root):
                 start, end = tape.indices(now)
                 post.append(tape.evidence(end - start, end))
                 shown = start if limit is None else max(start, end - limit)
                 row_ids.append(tuple(tape.ids[shown:end]))
             row_ids = tuple(row_ids)
-            blocks = self.selected_blocks(result.path, now)
+            blocks = self.selected_blocks(result.path, now, root)
             selected = tuple(sum(group, Evidence()) for group in blocks)
-            low, high = self.root.indices(now)
+            low, high = root.indices(now)
             # A Base position can belong to several qualifying First Stage Sets.
             # Preserve its exact membership in each path, but contribute it once
             # to the Base Set's aggregate and let relations deduplicate signals.
-            base_ids = self.latest_members(self.root, validated_base_mask, low, high, high - low)
+            base_ids = self.latest_members(root, validated_base_mask, low, high, high - low)
             base_net = [self.nets[i] for i in base_ids]
             base = Evidence(len(base_ids), math.fsum(x for x in base_net if x > 0),
                             math.fsum(-x for x in base_net if x < 0))

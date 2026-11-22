@@ -2,7 +2,7 @@ import { type ReactNode } from "react";
 import type { LiveStats } from "@/lib/live-stats";
 import {
   type StageGridConfig, type StageName, LONG_COUNTS, SHORT_COUNTS, EXEC_SHORT_COUNTS, LAST_COUNTS,
-  SIGN_MODES, LONG_MODES, STAGE_ORDER, STAGE_LABEL, stageGridOf,
+  SIGN_MODES, LONG_MODES, STAGE_ORDER, STAGE_LABEL, stageGridOf, postStageEvidence,
 } from "@/lib/stage-grid";
 
 function Choices<T extends string | number>({ label, choices, values, onChange, display }: {
@@ -93,12 +93,6 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
         <h2 className="text-sm font-semibold">Base → Main → Real → Exec → Live</h2>
         <p className="text-xs text-muted">{count.format(grid.baseSets)} Base Sets · sample coverage among reached lanes</p>
       </div>
-      {grid.validatedBase && (
-        <p className="text-xs">
-          Validated Base lanes · {count.format(grid.validatedBase.orders)} paper closes · PF{" "}
-          {grid.validatedBase.pf?.toFixed(2) ?? (grid.validatedBase.gain > 0 ? "No losses" : "—")}
-        </p>
-      )}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[37rem] text-left text-xs">
           <thead className="text-muted">
@@ -111,7 +105,7 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
           <tbody className="font-mono">
             {STAGE_ORDER.map((stage) => {
               const row = grid.stages[stage];
-              const post = grid.postStages?.[stage];
+              const post = postStageEvidence(grid, stage);
               return (
                 <tr key={stage} className="border-t border-border">
                   <th scope="row" className="py-2 font-medium">{STAGE_LABEL[stage]}</th>
@@ -136,7 +130,7 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
           </tbody>
         </table>
       </div>
-      {grid.postStages && <p className="text-xs text-muted">Post-stage PF uses the closed paper positions in the selected path of each Base Set.</p>}
+      {grid.postStages && <p className="text-xs text-muted">Post-stage PF uses closed paper positions. Base includes each validated close once per Set. Main, Real and Exec follow each Set’s selected path.</p>}
       {executed && (
         <p className="text-xs text-muted">
           Live mirrors Exec · {count.format(executed.activePositions)} active positions · {count.format(executed.activeFilledOrders)} filled orders on active positions

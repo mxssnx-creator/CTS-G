@@ -3229,11 +3229,21 @@ def the_side_aware_group_gate_judges_long_and_short_groups_apart():
     book.load({"groupGate": True, "groupGateSide": True})
     default_book = SetBook()
     default_book.load({"groupGate": True})
-    import inspect as _insp
-    import set_engine as _se
-    # The legacy entry selection and the config gate share this side-aware lookup.
-    wired = ("exec_gates_allow(" in _insp.getsource(pt.Pulse._scope_choice)
-             and "group_gate_side" in _insp.getsource(_se.exec_gates_allow))
+    # Give both directions ready candidates and exercise the real entry selector.
+    candidates = {1: types.SimpleNamespace(id=long_id, exe=[]), -1: types.SimpleNamespace(id=short_id, exe=[])}
+
+    def pick(_pack, side=0, predicate=None):
+        candidate = candidates[side]
+        return candidate if predicate is None or predicate(candidate) else None
+
+    pulse = _bare_pulse()
+    pulse.sets, pulse.group_exec = book, rec_on
+    book.pick_any, book.lane_of = pick, lambda _st: "pos"
+    scope = tuple(getattr(pulse._scope_choice("general", side)[0], "id", None) for side in (1, -1))
+    from stage_grid import StageGrid
+    book.stage_grid = StageGrid.from_settings({})
+    mirrored = tuple(pulse._scope_choice("general", side)[0].id for side in (1, -1))
+    wired = scope == (None, short_id) and mirrored == (long_id, short_id)
     # pooled scope (groupGateScope "side", CTS-A-O's engine direction acceptance): one record per direction, whatever the pack, kind, range or lane
     pooled_rec = {set_group(long_id, "pos", "pooled"): list(losses)}
     other_long, other_short = "flow:L:1m:tr0.80:0.70", "flow:S:1m:tr0.80:0.70"

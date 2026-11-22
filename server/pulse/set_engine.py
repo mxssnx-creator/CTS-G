@@ -90,7 +90,8 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
-from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
+from indication_extra import (FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes,
+                              known as extra_known, thin_signals, window_of)
 from risk_variants import fixed_trail, parse_trail, trail_grid, trailing_stop
 from indication_config import source_name, expand as expand_indication_configs
 import signal_packs
@@ -1160,9 +1161,13 @@ def bar_signal(
     for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
         if pk in packs:
             row[pk] = _variant_signal(hist, ind_settings.get(vkey) or list(default))
+    extra = {p: source_name(p[len(EXTRA_INDICATOR_PREFIX):]) for p in packs
+             if p.startswith(EXTRA_INDICATOR_PREFIX) and p not in imported}
+    thin = thin_signals(hist, tuple(extra.values())) if extra else {}
     for pk in packs:
-        if pk.startswith(EXTRA_INDICATOR_PREFIX) and pk not in imported:
-            row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
+        if pk in extra:
+            source = extra[pk]
+            row[pk] = thin[source] if source in thin else _variant_signal(hist, [source])
         elif pk.startswith(signal_packs.PREFIX):
             row[pk] = signal_packs.signal(bars, i, ts, pk)
     return row

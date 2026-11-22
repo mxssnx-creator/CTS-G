@@ -2877,6 +2877,8 @@ function IndicationConfigEditor({
   const list = (t: string) => t.split(/[,;]/).map((x) => x.trim());
   const profileGroups = [
     { label: "Add RSI and Parabolic SAR profiles", profiles: execIndicationProfiles.rsiSar },
+    { label: "Add trend, retest and channel profiles", profiles: execIndicationProfiles.confirmed },
+    { label: "Add inverse Exec comparison profiles", profiles: execIndicationProfiles.inverseExec },
     { label: "Add CTS-C technical profiles", profiles: execIndicationProfiles.ctsC },
     { label: "Add standard indicators with short windows", profiles: execIndicationProfiles.common },
   ];

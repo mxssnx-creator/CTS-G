@@ -12,6 +12,20 @@
     { "label": "Parabolic SAR · 3m", "names": ["psar_slow_t3", "psar_classic_t3", "psar_fast_t3", "psar_trend_t3"], "stepMin": 8, "stepMax": 8, "trailStepMin": 8, "trailStepMax": 8, "types": ["base", "trail"], "slRatios": [0.75] },
     { "label": "Parabolic SAR · 5m", "names": ["psar_slow_t5", "psar_classic_t5", "psar_fast_t5", "psar_trend_t5"], "stepMin": 9, "stepMax": 10, "types": ["base"], "slRatios": [0.75] }
   ],
+  "confirmed": [
+    { "label": "Wilder RSI reclaim · 14 bars", "names": ["rsi_reclaim_n14_b30_t3", "rsi_reclaim_n14_b30_t5", "rsi_reclaim_n14_b30_t15"], "stepMin": 12, "stepMax": 12, "types": ["base"], "slRatios": [0.75] },
+    { "label": "Wilder RSI pullback in EMA trend", "names": ["rsi_trend_n7_ema24_t3", "rsi_trend_n14_ema30_t3", "rsi_trend_n7_ema24_t5", "rsi_trend_n14_ema30_t5", "rsi_trend_n7_ema24_t15", "rsi_trend_n14_ema30_t15"], "stepMin": 12, "stepMax": 12, "types": ["base"], "slRatios": [0.75] },
+    { "label": "Parabolic SAR · 15m", "names": ["psar_slow_t15", "psar_classic_t15", "psar_fast_t15", "psar_trend_t15"], "stepMin": 15, "stepMax": 15, "types": ["base"], "slRatios": [0.75] },
+    { "label": "Parabolic SAR with EMA retest", "names": ["psar_retest_slow_t3", "psar_retest_classic_t3", "psar_retest_slow_t5", "psar_retest_classic_t5", "psar_retest_slow_t15", "psar_retest_classic_t15"], "stepMin": 15, "stepMax": 15, "types": ["base"], "slRatios": [0.75] },
+    { "label": "Bollinger Band reclaim", "names": ["bb_reclaim_n12_t5", "bb_reclaim_n20_t5", "bb_reclaim_n12_t15", "bb_reclaim_n20_t15"], "stepMin": 12, "stepMax": 12, "types": ["base"], "slRatios": [0.75] },
+    { "label": "Keltner Channel breakout", "names": ["kelt_cross_n12_t5", "kelt_cross_n20_t5", "kelt_cross_n12_t15", "kelt_cross_n20_t15"], "stepMin": 15, "stepMax": 15, "types": ["base"], "slRatios": [0.75] }
+  ],
+  "inverseExec": [
+    { "label": "Inverse MACD histogram · 1m", "names": ["macdh_n8_t1@I"], "stepMin": 20, "stepMax": 20, "types": ["base"], "slRatios": [0.5], "pause": 0 },
+    { "label": "Inverse Parabolic SAR classic · 1m", "names": ["psar_classic_t1@I"], "stepMin": 12, "stepMax": 12, "types": ["base"], "slRatios": [0.75], "pause": 0 },
+    { "label": "Inverse Parabolic SAR fast · 1m", "names": ["psar_fast_t1@I"], "stepMin": 12, "stepMax": 12, "types": ["base"], "slRatios": [0.75], "pause": 0 },
+    { "label": "Inverse EMA crossover · 1m", "names": ["emax_n5_t1@I"], "stepMin": 12, "stepMax": 12, "types": ["base"], "slRatios": [0.75], "pause": 0 }
+  ],
   "common": [
     { "label": "EMA crossover · short", "families": ["emax"], "ranges": [5, 8], "timeframes": [1], "stepMin": 4, "stepMax": 5, "trailStepMin": 6, "trailStepMax": 6, "types": ["base", "trail"], "slRatios": [0.75, 1] },
     { "label": "MACD histogram · short", "families": ["macdh"], "ranges": [5, 8], "timeframes": [1], "stepMin": 4, "stepMax": 5, "types": ["base"], "slRatios": [0.75, 1] },

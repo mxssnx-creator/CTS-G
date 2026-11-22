@@ -15,7 +15,8 @@ import pulse_trader as pt
 import set_engine as se
 import stage_grid as sg
 import auto_set_pf
-from indication_extra import CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, resolve, sar_state, sar_signal
+from indication_extra import (CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, bollinger_reclaim, keltner_cross,
+                              resolve, rsi_trend_reclaim, sar_retest, sar_signal, sar_state)
 from stage_eval import AutoFloors, relation_rows
 
 
@@ -194,7 +195,7 @@ class StageGridTest(unittest.TestCase):
         self.assertEqual(resolve("rsi_reclaim_n5_b25_t1")(bars), (1, .72))
         mirror = [[200 - c, 200 - l, 200 - h, 200 - c, v] for _, h, l, c, v in bars]
         self.assertEqual(resolve("rsi_reclaim_n5_b25_t1")(mirror), (-1, .72))
-        self.assertEqual(len(THIN_INDICATOR_SETTINGS), 30)
+        self.assertEqual(len(THIN_INDICATOR_SETTINGS), 57)
 
         path = Path(__file__).resolve().parents[1] / "presets" / "exec-indication-profiles.json"
         book = se.SetBook()
@@ -203,6 +204,106 @@ class StageGridTest(unittest.TestCase):
         self.assertEqual(len(book.packs), 30)
         self.assertEqual(book.config_report["dropped"], [])
         self.assertTrue(all({st.side for st in book.by_idx if st.pack == pack} == {-1, 1} for pack in book.packs))
+
+    def test_trend_retest_and_channel_signals_mirror_and_require_the_last_close(self):
+        def rows(prices, width):
+            return [[c, c + width, c - width, c, 25] for c in prices]
+
+        rising = [100 + i * .2 for i in range(75)]
+        top = rising[-1]
+        sar = [100 + i * .05 for i in range(80)]
+        cases = (
+            (lambda b: rsi_trend_reclaim(b, 7, 24), rows(rising + [top - .7, top - .98, top - 1.33, top + .4], .16)),
+            (lambda b: sar_retest(b, .01, .01, .1), rows(sar + [sar[-1] - .25, sar[-1] - .2, sar[-1] + .14], .1)),
+            (lambda b: bollinger_reclaim(b, 12), rows([99, 101] * 6 + [97, 99], .16)),
+            (lambda b: keltner_cross(b, 12), rows([100 + .08 * i for i in range(60)] + [105.72], .16)),
+        )
+        for fn, bars in cases:
+            self.assertIsNone(fn(bars[:-1]))
+            self.assertEqual(fn(bars), (1, .72))
+            self.assertEqual(fn([[250 - o, 250 - lo, 250 - hi, 250 - c, v] for o, hi, lo, c, v in bars]), (-1, .72))
+            self.assertIsNone(fn([[100] * 4 + [10] for _ in range(len(bars))]))
+
+        profiles = json.loads((Path(__file__).resolve().parents[1] / "presets/exec-indication-profiles.json").read_text())
+        names = {name for row in profiles["rsiSar"] + profiles["confirmed"] for name in row["names"]}
+        self.assertEqual(names, set(THIN_INDICATOR_SETTINGS))
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "stratGeneral": False, "stratIndications": False,
+                   "directionMode": "split", "indicationConfigs": profiles["confirmed"]})
+        self.assertEqual(book.config_report["dropped"], [])
+        self.assertEqual(len(book.packs), 27)
+        self.assertEqual(set(st.side for st in book.by_idx), {-1, 1})
+
+    def test_inverse_exec_profiles_build_distinct_directional_sets(self):
+        profiles = json.loads((Path(__file__).resolve().parents[1] / "presets/exec-indication-profiles.json").read_text())
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "stratGeneral": False, "stratIndications": False,
+                   "directionMode": "split", "indicationConfigs": profiles["inverseExec"]})
+        self.assertEqual(book.config_report["dropped"], [])
+        self.assertEqual(len(book.packs), 4)
+        self.assertEqual(len(book.by_idx), 8)
+        self.assertTrue(all({st.side for st in book.by_idx if st.pack == pack} == {-1, 1} for pack in book.packs))
+        self.assertTrue(all("@I~cfg" in st.id and st.kind == "base" for st in book.by_idx))
+
+    def test_shared_thin_frames_match_separate_profile_calculations(self):
+        rng = random.Random(71)
+        prices = [100.0]
+        for _ in range(1_864):
+            prices.append(prices[-1] * rng.uniform(0.996, 1.005))
+        bars = [[o, max(o, c) * 1.0004, min(o, c) * .9996, c, 20.0]
+                for o, c in zip(prices, prices[1:])]
+        packs = [f"extra.{name}" for name in THIN_INDICATOR_SETTINGS]
+        for index in (0, 21, 78, 190, 491, 900, 1_800, 1_863):
+            expected = {p: se._variant_signal(bars[:index + 1], [p.removeprefix("extra.")]) for p in packs}
+            self.assertEqual(se.bar_signal(bars, index, packs, {}, 60.0 * (index + 1)), expected)
+
+    def test_exec_short_thirty_reads_only_its_real_parent(self):
+        base = {"long": [10], "short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        child = {"short": [4], "last": [1], "longModes": ["none"],
+                 "shortModes": ["positive"], "lastModes": ["positive"]}
+        grid = sg.StageGrid.from_settings({"base": base, "main": child, "real": child,
+                                           "exec": {**child, "short": [28, 30]}})
+        rows = [(60.0 * t, 60.0 * t - 1, .005) for t in range(95)]
+        actual = sg.StageHistory(grid, *zip(*rows), 2400, lambda _: 1.1).evaluate(95 * 60, streams=True)
+        counts, expected = plain(grid, rows, 95 * 60, 2400, 1.1)
+        self.assertTrue(actual.ready)
+        self.assertEqual(actual.path[-1].short, 30)
+        self.assertEqual(actual.counts[-1].qualified, counts[-1][2])
+        self.assertEqual(actual.streams[-1], expected[actual.path])
+        self.assertEqual(actual.selected_blocks[-1][1].count, 30)
+        self.assertEqual(actual.selected_blocks[-1][2].count, 1)
+
+    def test_decision_context_keeps_all_parent_memberships_and_original_ids(self):
+        class FullHistory(sg.StageHistory):
+            def _decision_tape(self, now):
+                return self.root
+
+        grid = sg.StageGrid.from_settings({"base": {"long": [10, 20], "short": [4, 8], "last": [1, 2]},
+                                           "main": {"short": [4, 8], "last": [1, 2]},
+                                           "real": {"short": [4, 8], "last": [1, 2]},
+                                           "exec": {"short": [4, 8, 20, 30], "last": [1, 2]}})
+        rng = random.Random(18)
+        closes = [i // 2 for i in range(2_600)]
+        entries = [t - (180 if i % 45 == 0 else rng.randrange(0, 9)) for i, t in enumerate(closes)]
+        net = [rng.choice((.004, .006, .008, -.003, -.005)) for _ in closes]
+        settings = (grid, closes, entries, net, 85, lambda _n: 1.08)
+        bounded, full = sg.StageHistory(*settings), FullHistory(*settings)
+        for now in (1150, 1225, 1090, 1280):
+            self.assertLess(len(bounded._decision_tape(now).ids), len(closes))
+            self.assertEqual(bounded._decision_tape(now), bounded._decision_tape(now))
+            new, old = (x.evaluate(now, streams=True, limit=9) for x in (bounded, full))
+            self.assertEqual((new.path, new.row_ids, new.streams, new.validated_base_ids),
+                             (old.path, old.row_ids, old.streams, old.validated_base_ids))
+            for a, b in zip(new.counts, old.counts):
+                self.assertEqual((a.evaluated, a.sample_full, a.qualified, a.orders), (b.evaluated, b.sample_full, b.qualified, b.orders))
+                self.assertAlmostEqual(a.gain, b.gain)
+                self.assertAlmostEqual(a.loss, b.loss)
+            for a, b in zip((*new.post_evidence, new.validated_base), (*old.post_evidence, old.validated_base)):
+                self.assertEqual(a.count, b.count)
+                self.assertAlmostEqual(a.gain, b.gain)
+                self.assertAlmostEqual(a.loss, b.loss)
+            if new.ready:
+                self.assertEqual(bounded.active_real(new.path, now, 14), full.active_real(old.path, now, 14))
 
     def test_default_paths_and_signed_windows(self):
         grid = sg.StageGrid.from_settings({})

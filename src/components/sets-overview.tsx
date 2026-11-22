@@ -1,4 +1,4 @@
-import { STAGE_LABEL, STAGE_ORDER } from "@/lib/stage-grid";
+import { STAGE_LABEL, STAGE_ORDER, postStageEvidence } from "@/lib/stage-grid";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Legend, ReferenceLine, Tooltip, XAxis, YAxis } from "recharts";
 import { ClientChart } from "@/components/visual-stats";
@@ -240,7 +240,7 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                       {STAGE_ORDER.map((name) => {
                         const grid = r.stageGrid;
                         const w = grid?.windows[name];
-                        const post = grid?.postStages?.[name];
+                        const post = postStageEvidence(grid, name);
                         const blocks = grid?.selectedBlocks?.[name];
                         const related = [grid?.parentIds[name], grid?.setIds?.[name]].filter(Boolean).join(" → ");
                         return w ? <div key={name} title={related} className="whitespace-nowrap">
