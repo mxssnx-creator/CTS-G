@@ -333,6 +333,14 @@ class NativeSessionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 48))
 
+    def test_demo_rejects_a_silently_raised_signals_fallback(self):
+        raw=json.loads((session.ROOT/'server/pulse/overlay-bingx-x02.json').read_text())
+        raw['stratSignals']=True;raw['minPfSignals']=1.3
+        with self.assertRaisesRegex(ValueError,'fallback PF differs'):
+            session.context_requirement(session.frozen_overlay(raw,SYMBOLS))
+        raw['minPfSignals']=2.2
+        self.assertLessEqual(session.context_requirement(session.frozen_overlay(raw,SYMBOLS)),4320)
+
     def test_relocation_is_complete_and_does_not_move_unrelated_values(self):
         mod = SimpleNamespace(DIR='/opt/native', STATS_PATH='/opt/native/stats.json', OTHER='/opt/other')
         session.relocate_runtime(mod, Path('/private/run'), 'G1234')

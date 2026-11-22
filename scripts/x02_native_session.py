@@ -416,6 +416,13 @@ def context_requirement(overlay):
     from set_engine import SetBook
     book = SetBook()
     book.load(overlay)
+    if overlay.get('stratSignals') and overlay.get('minPfSignals') is not None:
+        try:
+            requested = float(overlay['minPfSignals'])
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError('test Signals fallback PF is not finite') from None
+        if not math.isfinite(requested) or not math.isclose(requested, book.signal_min_pf, rel_tol=0, abs_tol=1e-12):
+            raise ValueError(f"test Signals fallback PF differs from the engine minimum {book.signal_min_pf:g}")
     count = book.history_bars()
     if count > 72 * 60:
         raise ValueError(f"test history requires {count} minutes including earlier stage context and warmup; exceeds 72 hours")
