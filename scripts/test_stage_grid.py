@@ -52,6 +52,8 @@ def plain(grid, rows, now, lookback, floor):
                 not (net < -1e-12 if negative_last else net > 1e-12)):
             return True, None
         values = long + short + last
+        if not meets_floor(values):
+            return True, None
         return True, (len(values), math.fsum(x for x in values if x > 0), math.fsum(-x for x in values if x < 0))
 
     def walk(tape, path):
@@ -461,6 +463,24 @@ class StageGridTest(unittest.TestCase):
                                         100, lambda n: floor)
                 self.assertEqual(owner.root.test(2, 2, kind, 3) is not None, allowed)
 
+    def test_negative_blocks_cannot_pass_a_losing_total_or_seed_a_child(self):
+        grid = sg.StageGrid.from_settings({})
+        w = sg.Window(0, 4, 1, "negative", "negative")
+        rows = [(i, i - .1, -.01) for i in range(1, 12)]
+        history = sg.StageHistory(grid, *zip(*rows), 100, lambda _: 1.1)
+        tape = history.root
+        self.assertIsNotNone(tape.test(4, 10, "negative", 12))
+        self.assertIsNotNone(tape.test(1, 11, "negative", 12))
+        for depth in (1, 2, 3):
+            self.assertFalse(tape.passes(w, depth, 12))
+            self.assertEqual(tape.child_mask(w, depth), 0)
+        mixed = [(.02 if i % 5 else -.002) for i in range(1, 13)]
+        owner = sg.StageHistory(grid, tuple(range(1, 13)), tuple(i-.1 for i in range(1, 13)),
+                                mixed, 100, lambda _: 1.1)
+        eligible = sg.Window(0, 4, 1, "negative", "positive")
+        self.assertTrue(owner.root.passes(eligible, 3, 11))
+        self.assertTrue(owner.root.child_mask(eligible, 3) & (1 << 10))
+
     def test_each_parent_and_sign_matches_plain_walk(self):
         downstream = {"short": [4], "last": [1], "longModes": ["none", "inherit"]}
         grid = sg.StageGrid.from_settings({"base": {"long": [10, 20], "short": [4], "last": [1, 2]},
@@ -556,16 +576,17 @@ class StageGridTest(unittest.TestCase):
         rng = random.Random(32)
         rows = [sg.StageOrder(i, i - (i % 4), rng.choice((.01, .02, .04, -.017))) for i in range(760)]
         at = lambda decision: 1.10 if decision < 420 else 1.65
-        history = sg.StageHistory(grid, *zip(*rows), 350, lambda _: 1.65, entry_floor=at)
-        full = history.evaluate(550, streams=True)
-        _, paths = plain(grid, rows, 550, 350, at)
+        now, lookback = 650, 550
+        history = sg.StageHistory(grid, *zip(*rows), lookback, lambda _: 1.65, entry_floor=at)
+        full = history.evaluate(now, streams=True)
+        _, paths = plain(grid, rows, now, lookback, at)
         self.assertTrue(full.ready)
         self.assertEqual(full.streams, tuple(paths[full.path[:i]] for i in range(1, 5)))
-        self.assertNotEqual(full.streams[0], sg.StageHistory(grid, *zip(*rows), 350, lambda _: 1.65).stream(
-            full.path, 550 - 350, 550)[0])
-        shortened = [r for r in rows if r.close < 550]
-        older = sg.StageHistory(grid, *zip(*shortened), 350, lambda _: 1.65, entry_floor=at)
-        self.assertEqual(full, older.evaluate(550, streams=True))
+        self.assertNotEqual(full.streams[0], sg.StageHistory(grid, *zip(*rows), lookback, lambda _: 1.65).stream(
+            full.path, now - lookback, now)[0])
+        shortened = [r for r in rows if r.close < now]
+        older = sg.StageHistory(grid, *zip(*shortened), lookback, lambda _: 1.65, entry_floor=at)
+        self.assertEqual(full, older.evaluate(now, streams=True))
 
     def test_equal_clock_and_insufficient_lanes(self):
         grid = sg.StageGrid.from_settings({})

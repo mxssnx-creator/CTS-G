@@ -264,7 +264,7 @@ class GridResult:
                 "selectedWindows": {s: ev.report() for s, ev in zip(STAGES, self.selected_evidence)},
                 "selectedBlocks": {s: {name: ev.report() for name, ev in zip(BLOCK_NAMES, blocks) if ev.count}
                                    for s, blocks in zip(STAGES, self.selected_blocks)},
-                "selectedFloors": {s: {name: floor for name, floor in zip(BLOCK_NAMES, floors) if floor}
+                "selectedFloors": {s: {name: floor for name, floor in zip((*BLOCK_NAMES, "total"), floors) if floor}
                                     for s, floors in zip(STAGES, self.selected_floors)},
                 "validatedBase": self.validated_base.report(),
                 "postStages": {s: ev.report() for s, ev in zip(STAGES, self.post_evidence)}}
@@ -471,13 +471,16 @@ class _Tape:
             self.values[max(start, end - self.owner.filter_need):end]
         ):
             return False
-        return all(self.test(n, end - offset, kind, now, offset) is not None
-                   for n, offset, kind in window_blocks(w, depth) if n)
+        return (all(self.test(n, end - offset, kind, now, offset) is not None
+                    for n, offset, kind in window_blocks(w, depth) if n)
+                and self.test(w.need, end, "pf", now) is not None)
 
     def child_mask(self, w: Window, depth: int) -> int:
         mask = self.mask(w.last, 0, w.last_mode) & self.mask(w.short, w.last, "pf" if w.short_mode == "positive" else "negative")
         if mask and w.long:
             mask &= self.mask(w.long, w.last + w.short, "risk" if depth == 0 else "pf")
+        if mask:
+            mask &= self.mask(w.need, 0, "pf")
         if mask and depth == 1 and self.owner.main_filter:
             mask &= self.owner.filter_mask(self)
         return mask
@@ -499,6 +502,7 @@ class StageHistory:
         self.grid, self.closes, self.entries, self.nets = grid, closes, entries, nets
         self.lookback, self.base_risk = lookback, base_risk
         sizes = {n for options in grid.options for n in (*options.shorts, *options.lasts)}
+        sizes.update(n for minimum, maximum in grid.sample_bounds.values() for n in range(minimum, maximum + 1))
         self.floors = {n: floor(n) for n in {*grid.longs, *sizes}}
         self.entry_floor = entry_floor
         self.window_auto = window_auto
@@ -630,7 +634,8 @@ class StageHistory:
             _, end = tape.indices(now)
             blocks = tuple(reversed(window_blocks(w, depth)))
             evidence.append(tuple(tape.evidence(n, end - offset) if n else Evidence() for n, offset, _ in blocks))
-            floors.append(tuple(tape.floor(n, offset, kind, now) if n else 0.0 for n, offset, kind in blocks))
+            floors.append((*tuple(tape.floor(n, offset, kind, now) if n else 0.0 for n, offset, kind in blocks),
+                           tape.floor(w.need, 0, "pf", now)))
             if depth + 1 < len(path):
                 tape = self.child(tape, tape.child_mask(w, depth))
         return tuple(evidence), tuple(floors)
@@ -691,18 +696,21 @@ class StageHistory:
                 tally.sample_full += 1
                 if not filter_ok:
                     continue
-                evidence = Evidence()
                 for n, offset, kind in window_blocks(w, depth):
                     if not n:
                         continue
                     key = (n, offset, kind)
                     if key not in results:
                         results[key] = tape.test(n, end - offset, kind, now, offset)
-                    window = results[key]
-                    if window is None:
+                    if results[key] is None:
                         break
-                    evidence += window
                 else:
+                    key = (w.need, 0, "pf")
+                    if key not in results:
+                        results[key] = tape.test(w.need, end, "pf", now)
+                    evidence = results[key]
+                    if evidence is None:
+                        continue
                     tally.qualified += 1
                     tally.negative_short += int(w.short_mode == "negative")
                     tally.negative_last += int(w.last_mode == "negative")

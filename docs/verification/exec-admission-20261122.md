@@ -20,6 +20,9 @@ in both chronological halves. A window with too few outcomes for training
 uses its fallback threshold. Positive blocks compare gain to loss. Negative
 blocks compare loss to gain and retain their own evaluations. The hourly
 boundary excludes the close at that exact hour.
+The complete disjoint window also has to meet its own positive PF threshold.
+This test runs both at the live decision and at the historical entry used
+to place a close in the next related Set.
 
 A completed live position rests its own symbol and direction. The observed
 net return determines whether the winning-trade pause applies. The engine

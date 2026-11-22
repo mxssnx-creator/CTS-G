@@ -81,7 +81,8 @@ export type StageGridSelection = {
   parentIds: Partial<Record<StageName, string>>;
   setIds?: Partial<Record<StageName, string>>;
   selectedBlocks?: Partial<Record<StageName, Partial<Record<"long" | "short" | "last", StageEvidence>>>>;
-  selectedFloors?: Partial<Record<StageName, Partial<Record<"long" | "short" | "last", number>>>>;
+  selectedWindows?: Partial<Record<StageName, StageEvidence>>;
+  selectedFloors?: Partial<Record<StageName, Partial<Record<"long" | "short" | "last" | "total", number>>>>;
   validatedBase?: StageEvidence;
   postStages?: Partial<Record<StageName, StageEvidence>>;
 };
