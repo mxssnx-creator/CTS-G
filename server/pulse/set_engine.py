@@ -4444,7 +4444,16 @@ class SetBook:
     def _learn_grid_floors(self, tape_order: Sequence[str], now: float) -> None:
         """Fit independent Set floors from the two causal folds ending at the last full hour."""
         _, upper = auto_set_pf.training_window(now)
-        key = (upper, tuple(tape_order), self._evaluation_config)
+        # The first chunk across an hour can still lack earlier closes on
+        # some symbols. Refit when that training prefix catches up, then
+        # ignore bars whose closes are at or after the hourly cutoff.
+        last_training_open = upper - 2 * BAR_S
+        training_sources = []
+        for symbol in tape_order:
+            bar_open = self._hist_replay_bar_at.get(symbol)
+            prefix = id(self._hist_rows[symbol]) if bar_open is None else min(bar_open, last_training_open)
+            training_sources.append((symbol, prefix))
+        key = (upper, tuple(training_sources), self._evaluation_config)
         if key == self._grid_auto_key:
             return
         sources = tuple(self._hist_rows[symbol] for symbol in tape_order)
@@ -4799,10 +4808,10 @@ class SetBook:
             if grid_result is None:
                 decision = now if now is not None else math.nextafter(full[-1][0], math.inf) if full else 0.0
                 grid_result = self.grid_history(st, full).evaluate(decision, streams=True, limit=PROC_KEEP)
-            # The Base indices address this replay's transient source rows.
-            # Keep the summary in the published Set, so a long lookback does
-            # not retain another position-by-position listing for every Set.
-            st.exec_grid = replace(grid_result, validated_base_ids=()) if grid_result.validated_base_ids else grid_result
+            # Keep the published decision and its figures. Main and Real
+            # already retain the orders they need below.
+            st.exec_grid = replace(grid_result, streams=(), row_ids=(), validated_base_ids=(),
+                                   stream_sizes=tuple(map(len, grid_result.streams)))
             candidates = self._exec_candidates.setdefault((st.pack, st.kind), {})
             if grid_result.ready:
                 candidates[st.id] = st
@@ -5197,11 +5206,8 @@ class SetBook:
 
     def gate_reason(self, st: SetState) -> str:
         """Entry readiness: PF/risk validation plus the Set's own minimal coordination."""
-        policy = range_processing(getattr(self, "processing_overlay", {}), self.processing_range(st))
-        if st.kind == "trail" and not policy["trailing"]:
+        if not self.processing_allows(st):
             return "type-disabled"
-        if st.kind in ("base", "trail") and not policy["normal"] and not additional_processing_enabled(getattr(self, "processing_overlay", {})):
-            return "type-disabled"  # calculation remains available to independently enabled adjustments
         reason = self.base_validation_reason(st)
         if reason:
             return reason
@@ -5222,6 +5228,14 @@ class SetBook:
         if not self._execution_lanes(st):
             return "execution"       # actual fills fail their own window; never contaminate paper PF
         return ""
+
+    def processing_allows(self, st: SetState) -> bool:
+        overlay = getattr(self, "processing_overlay", {})
+        policy = range_processing(overlay, self.processing_range(st))
+        if st.kind == "trail" and not policy["trailing"]:
+            return False
+        # Keep parent evidence available to independently enabled adjustments.
+        return st.kind not in ("base", "trail") or policy["normal"] or additional_processing_enabled(overlay)
 
     def state_of(self, st: SetState) -> Tuple[str, str]:
         """One state: ready, waiting for coordination, invalid, locked or error."""
@@ -5366,11 +5380,18 @@ class SetBook:
         was validated and executes, not the raw Base tape (which holds every order, the ones the stages rejected too). Without stages, or with rankByLane off,
         the Base tape's rank_key."""
         if self.stage_grid and st.exec_grid and st.exec_grid.ready:
-            return st.exec_grid.rank
+            return self.exec_rank_key(st, st.exec_grid)
         if not (self.rank_by_lane and (self.main_on or self.neg_on or self.realst_on)):
             return self.rank_key(st)
         w_ = self.win(st)
         return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(w_.real_neg_n if lane == "neg" else w_.real_n, st.pack, st), st.max_dd_s)
+
+    @staticmethod
+    def exec_rank_key(st: SetState, result: stage_grid.GridResult) -> Tuple[float, int, int]:
+        # Equal evidence is common when two exit geometries settled the same
+        # orders. Use configuration order even after a Set loses and regains
+        # eligibility in the live candidate index.
+        return (*result.rank, -st.idx)
 
     def _of_pack_kind(self, pack: str, kind: str) -> List[SetState]:
         """The Sets of one pack and type in by_idx order, from an index rebuilt when the Set list changes. Found live on x02 (16,844 Sets, 2026-11-15):
@@ -5385,13 +5406,14 @@ class SetBook:
             idx = self._pk_index = (key, table)
         return idx[1].get((pack, kind), [])
 
+    def _eligible_exec(self, pack: str, kind: str, side: int):
+        candidates = self._exec_candidates.get((pack, kind), {})
+        return (st for st in candidates.values() if self.sets.get(st.id) is st
+                and (not side or st.side in (0, side)) and self.is_eligible(st))
+
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
         if self.stage_grid:
-            candidates = self._exec_candidates.get((pack, kind), {})
-            rows = [s for s in candidates.values() if self.sets.get(s.id) is s
-                    and (not side or s.side in (0, side)) and self.is_eligible(s)]
-            rows.sort(key=self.lane_rank_key, reverse=True)
-            return rows
+            return sorted(self._eligible_exec(pack, kind, side), key=self.lane_rank_key, reverse=True)
         rows = [s for s in self._of_pack_kind(pack, kind) if (not side or s.side in (0, side)) and self.is_eligible(s)]
         rows.sort(key=self.rank_key, reverse=True)
         return rows
@@ -5715,9 +5737,12 @@ class SetBook:
                 if allowed_lanes is not None and "pos" not in allowed_lanes:
                     return None
                 for kinds in self.kind_order_for(pack):
-                    ranked = sorted((st for kind in kinds for st in self._valid_for(pack, kind, side)),
-                                    key=self.lane_rank_key, reverse=True)
-                    chosen = next((st for st in ranked if predicate is None or predicate(st)), None)
+                    candidates = (st for kind in kinds for st in self._eligible_exec(pack, kind, side))
+                    if predicate is None:
+                        chosen = max(candidates, key=self.lane_rank_key, default=None)
+                    else:
+                        chosen = next((st for st in sorted(candidates, key=self.lane_rank_key, reverse=True)
+                                       if predicate(st)), None)
                     if chosen is not None:
                         return chosen
                 return None

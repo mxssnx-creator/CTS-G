@@ -4,7 +4,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from itertools import product
 import math
 import re
@@ -118,6 +118,15 @@ class StageGrid:
             counts.append(product_so_far)
         return tuple(counts)
 
+    @cached_property
+    def sample_bounds(self) -> dict[tuple[int, int], tuple[int, int]]:
+        bounds = {}
+        for depth in range(len(STAGES)):
+            for base_long in self.longs if depth else (0,):
+                sizes = [window.need for window in self.windows(depth, base_long)]
+                bounds[depth, base_long] = min(sizes), max(sizes)
+        return bounds
+
     def path(self, base_id: str, identity: str) -> Path:
         prefix = base_id + "/"
         if not identity.startswith(prefix):
@@ -220,6 +229,7 @@ class GridResult:
     selected_blocks: tuple[tuple[Evidence, ...], ...] = ()
     validated_base: Evidence = field(default_factory=Evidence)
     validated_base_ids: tuple[int, ...] = ()
+    stream_sizes: tuple[int, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -227,9 +237,7 @@ class GridResult:
 
     @property
     def rank(self) -> tuple[float, int]:
-        count, gain, loss = self.evidence
-        # Reduce the effect of very short, zero-loss samples on selection.
-        return round((min(5.0, pf(gain, loss)) - 1) * count / (20 + count), 12), count
+        return evidence_rank(self.evidence)
 
     def report(self, grid: StageGrid, set_id: str) -> dict:
         ids = [lane_id(set_id, self.path[:depth]) for depth in range(len(self.path) + 1)]
@@ -238,12 +246,18 @@ class GridResult:
                 "parentIds": dict(zip(STAGES, ids[:-1])),
                 "setIds": dict(zip(STAGES, ids[1:])),
                 "windows": path_settings(self.path),
-                "selectedOrders": dict(zip(STAGES, map(len, self.streams))),
+                "selectedOrders": dict(zip(STAGES, self.stream_sizes or tuple(map(len, self.streams)))),
                 "selectedWindows": {s: ev.report() for s, ev in zip(STAGES, self.selected_evidence)},
                 "selectedBlocks": {s: {name: ev.report() for name, ev in zip(BLOCK_NAMES, blocks) if ev.count}
                                    for s, blocks in zip(STAGES, self.selected_blocks)},
                 "validatedBase": self.validated_base.report(),
                 "postStages": {s: ev.report() for s, ev in zip(STAGES, self.post_evidence)}}
+
+
+def evidence_rank(evidence: Evidence) -> tuple[float, int]:
+    count, gain, loss = evidence
+    # Reduce the effect of very short, zero-loss samples on selection.
+    return round((min(5.0, pf(gain, loss)) - 1) * count / (20 + count), 12), count
 
 
 BYTE_BITS = tuple(tuple(bit for bit in range(8) if byte & (1 << bit)) for byte in range(256))
@@ -559,6 +573,7 @@ class StageHistory:
     def evaluate(self, now: float, *, streams: bool = False, limit: int | None = None) -> GridResult:
         validated_base_mask = 0
         root = self._decision_tape(now)
+        bounds = self.grid.sample_bounds
 
         @lru_cache(maxsize=2048)
         def last_stage(ids: tuple[int, ...], base_long: int) -> GridResult:
@@ -573,9 +588,13 @@ class StageHistory:
             tally.evaluated = len(choices)
             start, end = tape.indices(now)
             size = end - start
+            if size < bounds[depth, base_long][0]:
+                return GridResult(counts)
             results: dict[tuple[int, int, str], Evidence | None] = {}
             paths: dict[tuple[int, int], tuple[Window, int]] = {}
-            pick = GridResult(counts)
+            picked_path: Path = ()
+            picked_evidence = Evidence()
+            picked_key = (0, (0.0, 0))
             filter_ok = depth != 1 or not self.main_filter or self.main_filter(
                 tape.values[max(start, end - self.filter_need):end]
             )
@@ -605,9 +624,9 @@ class StageHistory:
                     tally.gain += evidence.gain
                     tally.loss += evidence.loss
                     if depth == len(STAGES) - 1:
-                        candidate = GridResult(counts, (w,), evidence)
-                        if not pick.path or candidate.rank > pick.rank:
-                            pick = candidate
+                        candidate_key = (1, evidence_rank(evidence))
+                        if candidate_key > picked_key:
+                            picked_path, picked_evidence, picked_key = (w,), evidence, candidate_key
                         continue
                     key = (w.long if depth == 0 else base_long, tape.child_mask(w, depth))
                     first, copies = paths.get(key, (w, 0))
@@ -617,17 +636,18 @@ class StageHistory:
                 if streams and depth == 0:
                     validated_base_mask |= mask
                 if depth == len(STAGES) - 2:
-                    max_window = max(w.need for w in self._rules[depth + 1, long])
+                    max_window = bounds[depth + 1, long][1]
                     ids = self.latest_members(tape, mask, start, end, max_window)
                     next_result = last_stage(ids, long)
                 else:
                     next_result = walk(depth + 1, self.child(tape, mask), long)
                 for dest, source in zip(counts[1:], next_result.counts):
                     dest.add(source, copies)
-                path = (first, *next_result.path)
-                if (len(path), next_result.rank) > (len(pick.path), pick.rank):
-                    pick = GridResult(counts, path, next_result.evidence)
-            return pick
+                candidate_key = (1 + len(next_result.path), next_result.rank)
+                if candidate_key > picked_key:
+                    picked_path = (first, *next_result.path)
+                    picked_evidence, picked_key = next_result.evidence, candidate_key
+            return GridResult(counts, picked_path, picked_evidence)
 
         try:
             result = walk(0, root, 0)

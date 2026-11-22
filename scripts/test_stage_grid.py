@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent, causal oracle for disjoint windows and Exec attribution."""
+from dataclasses import asdict
 import json
 import math
 from pathlib import Path
@@ -17,7 +18,7 @@ import stage_grid as sg
 import auto_set_pf
 from indication_extra import (CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, bollinger_reclaim, keltner_cross,
                               resolve, rsi_trend_reclaim, sar_retest, sar_signal, sar_state)
-from stage_eval import AutoFloors, relation_rows
+from stage_eval import AutoFloors, execute, gate_metrics, relation_rows
 
 
 def plain(grid, rows, now, lookback, floor):
@@ -71,6 +72,72 @@ def plain(grid, rows, now, lookback, floor):
 
 
 class StageGridTest(unittest.TestCase):
+    def test_auto_pf_refits_when_late_training_closes_arrive(self):
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "minPfByStep": True, "minPfStepAuto": True,
+                   "setMinStep": 4, "setStepMax": 4, "stratIndications": False, "setSlRatios": [1.0]})
+        st = next(st for st in book.by_idx if st.kind == "base")
+        symbol, hour = "BTC-USDT", float(48 * 3600)
+        rows = [(hour - (100 - i) * 60, symbol, "LONG", .005, .006, 30, "tp", st.id) for i in range(103)]
+        book._hist_rows[symbol] = {st.id: rows[:70]}
+        book._hist_replay_bar_at[symbol] = rows[69][0] - se.BAR_S
+        with book._lock:
+            book._learn_grid_floors((symbol,), hour + 15)
+            incomplete = book._grid_auto_models[st.id]
+            book._hist_rows[symbol] = {st.id: rows[:100]}
+            book._hist_replay_bar_at[symbol] = hour - 2 * se.BAR_S
+            book._learn_grid_floors((symbol,), hour + 30)
+            complete = book._grid_auto_models[st.id]
+            self.assertGreater(len(complete.closes), len(incomplete.closes))
+            self.assertLess(complete.closes[-1], hour)
+            book._hist_rows[symbol] = {st.id: rows}
+            book._hist_replay_bar_at[symbol] = hour + se.BAR_S
+            book._learn_grid_floors((symbol,), hour + 130)
+            self.assertIs(book._grid_auto_models[st.id], complete)
+
+    def test_exec_replay_uses_the_live_kind_policy_and_stable_set_rank(self):
+        win = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        book = se.SetBook()
+        book.load({"stageLastN": {"base": {**win, "long": [10]},
+                                  **{s: {**win, "longModes": ["none"]} for s in sg.STAGES[1:]}},
+                   "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 4, "histEnabled": True,
+                   "stratIndications": False, "stratTrailing": False, "exitSets": False,
+                   "setSlRatios": [.5, 1.0], "directionMode": "split",
+                   "blockEnabled": False, "dcaEnabled": False})
+        choices = [st for st in book.by_idx if st.kind == "base" and st.side == 1]
+        self.assertEqual(len(choices), 2)
+        first, second = choices
+        symbol, hour = "BTC-USDT", 200 * 3600
+        dates = list(range(hour, hour + 3600, 60))
+        past = [hour - 60 * i for i in range(160, 0, -1)]
+        entries = [t - 30 for t in past]
+        gross = [.02] * len(past)
+        tapes = SimpleNamespace(by_set={st.idx: (past, entries, gross) if st in choices else ([], [], [])
+                                        for st in book.by_idx}, cf=se.cost_as_frac(book.cost_pct))
+        # The second Set becomes ready first in the live candidate index.
+        for st in (second, first):
+            rows = [(t, symbol, "LONG", .019, .02, 30, "tp", st.id) for t in past]
+            book.set_processed(st, rows, hour + 60)
+            book._score_one(st, now=hour + 60)
+        self.assertEqual(first.exec_grid.rank, second.exec_grid.rank)
+        self.assertIs(book.pick_any(first.pack, side=1), first)
+        self.assertEqual(gate_metrics(book, tapes, first, hour + 60)[1], book.lane_rank_key(first))
+        # An old Negative-lane preference must not hide the new Exec stage.
+        book.lane_order = ("neg",)
+        bars = [[100.0, 102.0, 100.0, 100.0] for _ in dates]
+        signals = {first.pack: [1] * len(dates)}
+        confidence = {first.pack: [.9] * len(dates)}
+        shadow = {symbol: (0, signals, confidence, {})}
+        report = execute(book, [symbol], {symbol: bars}, {symbol: dates}, shadow, tapes, [hour])
+        self.assertEqual({r["set"] for r in report if "set" in r}, {first.id})
+        self.assertTrue(all(r["execLaneId"] == book.exec_lane_id(first) for r in report if "set" in r))
+        book.processing_overlay.update(stratNormal=False, axisPrevEnabled=False, axisLastEnabled=False,
+                                       axisContEnabled=False, axisPauseEnabled=False)
+        self.assertIsNone(book.pick_any(first.pack, side=1))
+        self.assertFalse(gate_metrics(book, tapes, first, hour + 60)[0])
+        disabled = execute(book, [symbol], {symbol: bars}, {symbol: dates}, shadow, tapes, [hour])
+        self.assertFalse([r for r in disabled if "set" in r])
+
     def test_auto_pf_independence_and_strict_boundaries(self):
         early = 72 * 3600
         rows = [(early + i * 60, early + i * 60 - 30, net)
@@ -405,6 +472,8 @@ class StageGridTest(unittest.TestCase):
                            grid_result=got)
         self.assertEqual(st.exec_grid.validated_base, got.validated_base)
         self.assertEqual(st.exec_grid.validated_base_ids, ())
+        self.assertEqual((st.exec_grid.row_ids, st.exec_grid.streams), ((), ()))
+        self.assertEqual(st.exec_grid.report(book.stage_grid, st.id), got.report(book.stage_grid, st.id))
         tx = [row[0] for row in tape]
         te = [row[0]-row[5] for row in tape]
         tapes = SimpleNamespace(by_set={st.idx:(tx,te,[row[4] for row in tape])},cf=cost,
@@ -516,6 +585,75 @@ class StageGridTest(unittest.TestCase):
         before = st.exec_grid
         book.on_live_close(loss)
         self.assertIs(st.exec_grid, before)
+
+    def test_exec_reentry_rests_only_its_side_and_uses_settled_net(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        pulse.sets = SimpleNamespace(stage_grid=True, pause_minutes=lambda *_: 9, cooldown_bars=2)
+        pulse.cooldown, pulse.ignore_syms = {}, {}
+        pulse.position_cost_pct = .176
+        pos = pt.Position("TEST-USDT", "LONG", 1, 100, 601, 99, 102, 100, exec_lane_id="lane")
+        with patch.object(pt.time, "time", return_value=609):
+            pulse.rest_position_slot(pos, 0)
+            self.assertTrue(pulse.entry_slot_rests(pos.symbol, "LONG", 609))
+            self.assertFalse(pulse.entry_slot_rests(pos.symbol, "LONG", 660))
+            self.assertFalse(pulse.entry_slot_rests(pos.symbol, "SHORT", 609))
+            pause = pulse.symbol_backoff(pos.symbol, .0014, 62, "tp", True, "general", 1,
+                                         net_pnl_pct=.0003)
+            self.assertEqual(pause, 540)
+            pulse.rest_position_slot(pos, pause)
+            pulse.rest_position_slot(pos, 90)
+            self.assertTrue(pulse.entry_slot_rests(pos.symbol, "LONG", 1000))
+            self.assertFalse(pulse.entry_slot_rests(pos.symbol, "SHORT", 1000))
+            pulse.cooldown[pos.symbol] = 1200
+            self.assertTrue(pulse.entry_slot_rests(pos.symbol, "SHORT", 1000))
+
+    def test_exec_cash_pf_includes_reported_funding_on_restart(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        win = pt.Closed(1795254001, "BTC-USDT", "LONG", 1, 100, 101, .9, .01, "tp", 60,
+                        funding_usdt=-.3, exec_lane_id="lane", filled_orders=2, net_pnl_pct=.009)
+        loss = pt.Closed(1795254002, "BTC-USDT", "SHORT", 1, 100, 101, -.6, -.01, "sl", 60,
+                         funding_usdt=.1, exec_lane_id="lane", filled_orders=2, net_pnl_pct=-.006)
+        for row in (win, loss):
+            pulse._exec_note(row)
+        before = pulse.exec_scope["stage:exec"].copy()
+        self.assertAlmostEqual(before["cash_gain"] / before["cash_loss"], 1.2)
+        self.assertAlmostEqual(before["return_gain"] / before["return_loss"], 1.5)
+        self.assertAlmostEqual(before["reported_funding"], -.2)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "closed.jsonl"
+            ledger.write_text("".join(json.dumps(asdict(row)) + "\n" for row in (win, loss)))
+            with patch.object(pt, "TRADES_PATH", str(ledger)), patch.object(pt, "downtime_intervals", return_value=()), \
+                    patch.object(pt.time, "time", return_value=1795254090):
+                pulse._exec_boot()
+        self.assertEqual(pulse.exec_scope["stage:exec"], before)
+
+    def test_flat_probe_preserves_one_way_and_hedge_slots(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        pos = pt.Position("TEST-USDT", "SHORT", 1, 100, 601, 101, 98, 100)
+        for side, qty in (("BOTH", "-1"), ("SHORT", "1"), ("SHORT", "NaN")):
+            response = {"code": 0, "data": [{"symbol": pos.symbol, "positionSide": side, "positionAmt": qty}]}
+            pulse.api = SimpleNamespace(get=lambda _: response)
+            self.assertFalse(pulse._exchange_flat(pos))
+        response["data"][0].update(positionSide="LONG", positionAmt="1")
+        self.assertTrue(pulse._exchange_flat(pos))
+
+    def test_exec_entry_scan_reuses_pack_side_ranks_across_200_symbols(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        book = se.SetBook()
+        book.stage_grid = sg.StageGrid.from_settings({})
+        pulse.sets, pulse.open, pulse.cooldown = book, {}, {}
+        symbols = [f"TEST{i}-USDT" for i in range(200)]
+        pulse.cooldown[pulse.position_key(symbols[0], "LONG")] = 1000
+        signals = [("scoped", 1, .9, "test"), ("general", 1, .8, "test"), ("general", -1, .7, "test")]
+        pulse._entry_sig = {symbol: (540, signals) for symbol in symbols}
+        with patch.object(pt, "SYMBOLS", symbols), patch.object(book, "entry_signals_pending", return_value=False), \
+                patch.object(book, "symbol_allows", side_effect=lambda pack, sym: pack != "scoped" or sym == symbols[-1]), \
+                patch.object(pulse, "_scope_choice", return_value=(object(), "pos", "")) as pick:
+            candidates = pulse.set_entry_candidates(now=610)
+        self.assertEqual(len(candidates), 399)
+        self.assertEqual(pick.call_count, 3)
+        self.assertIn("set:scoped:", candidates[pulse.position_key(symbols[-1], "LONG")][3])
+        self.assertIn("set:general:", candidates[pulse.position_key(symbols[1], "LONG")][3])
 
 
 if __name__ == "__main__":

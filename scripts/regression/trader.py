@@ -77,15 +77,18 @@ def restored_book_drops_a_position_only_when_two_reads_agree():
     other = {"symbol": "OTHER-USDT", "positionSide": "LONG", "positionAmt": "1"}
     mine = {"symbol": "A-USDT", "positionSide": "LONG", "positionAmt": "1"}
     oneway = {"symbol": "A-USDT", "positionSide": "BOTH", "positionAmt": "-2"}
+    hedge_short = {"symbol": "A-USDT", "positionSide": "SHORT", "positionAmt": "2"}
     lag = run([other], [other, mine], [("A-USDT", "LONG")])                  # the second read lists it: kept
     gone = run([other], [other], [("A-USDT", "LONG")])                       # two reads agree: dropped
     held = run([other, mine], [other, mine], [("A-USDT", "LONG")])           # listed: kept
     both = run([oneway], [oneway], [("A-USDT", "SHORT")])                    # one-way mode: the sign of the amount is the side
     empty = run([], [], [("A-USDT", "LONG")])                                # two empty reads: the account is flat, the ghost is dropped
     empty_lag = run([], [mine], [("A-USDT", "LONG")])                        # an empty first read that the second read contradicts: kept
-    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == [] and empty_lag == ["A-USDT"]
+    hedge_lag = run([], [hedge_short], [("A-USDT", "SHORT")])
+    ok = (lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"]
+          and empty == [] and empty_lag == ["A-USDT"] and hedge_lag == ["A-USDT"])
     return ok, (f"lagging read kept={lag}, two reads agree dropped={gone}, listed kept={held}, one-way short kept={both}, "
-                f"two empty reads dropped={empty == []}, empty then listed kept={empty_lag}")
+                f"two empty reads dropped={empty == []}, empty then listed kept={empty_lag}, hedge short kept={hedge_lag}")
 
 
 def cycles_start_at_least_scan_apart():
@@ -3200,7 +3203,9 @@ def a_manual_close_rests_only_that_symbol_and_direction():
     def calls(method,name):
         return any(isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr==name
                    for n in ast.walk(methods[method]))
-    wired = ("manual_rest_active(getattr(self, \"manual_rest\", {}), sym, \"LONG\" if direction > 0 else \"SHORT\", time.time())" in src
+    manual_check = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'manual_rest_active'
+                       for n in ast.walk(methods['place']))
+    wired = (manual_check
              and calls('adopt_exchange_positions','drop_ghost')and calls('drop_ghost','note_manual_close')
              and calls('reconcile_restored_book','note_manual_close'))
     ok = active == [True, False, False] and not later and off and pruned == 1 and list(expired) == ["Y:LONG"] and list(saved) == ["AAA-USDT:LONG"] and wired

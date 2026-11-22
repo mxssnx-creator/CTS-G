@@ -242,6 +242,7 @@ export type Execution = {
   /** The replay's result next to the exchange's result of the same settled Set closes (server: sim_diff.diff_report). */
   simDiff?: SimDiff;
   exec?: Partial<NonNullable<OverallScope["executed"]>> & {
+    reportedFundingUsdt?: number;
     activePositions: number;
     activeFilledOrders: number;
     activeControlOrders?: number;

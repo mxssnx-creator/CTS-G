@@ -136,6 +136,8 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
           Live mirrors Exec · {count.format(executed.activePositions)} active positions · {count.format(executed.activeFilledOrders)} filled orders on active positions
           {executed.activeControlOrders != null && ` · ${count.format(executed.activeControlOrders)} live controls`}
           {" · "}{count.format(executed.closedFilledOrders)} filled orders on closed positions · {executed.orders == null || !executed.orders ? "Exec PF awaiting settled positions" : executed.noLoss ? `Exec PF no losses (${executed.orders} closed positions)` : `Exec PF ${executed.pf?.toFixed(2) ?? "—"} (${executed.orders} closed positions)`}
+          {!!executed.cashOrders && ` · Cash PF ${executed.cashNoLoss ? "no losses" : executed.cashPf?.toFixed(2) ?? "—"}`}
+          {!!executed.reportedFundingUsdt && ` including ${executed.reportedFundingUsdt.toFixed(4)} USDT reported funding`}
           {!!executed.unverifiedPositions && ` · ${executed.unverifiedPositions} closed positions awaiting verified returns`}
         </p>
       )}
