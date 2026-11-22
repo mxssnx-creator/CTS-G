@@ -119,6 +119,7 @@ class Journal:
         self.order_bodies = {}
         self.order_filled = {}
         self.inventory = {}
+        self.unknown_write = None
         self.lock = threading.RLock()
         self.original = api._req
         api._req = self.request
@@ -249,15 +250,18 @@ class Journal:
                     return reply
         with self.lock:
             requested_entries = sum(is_entry(order) for order in bodies)
+            identities = [(str(order['symbol']), str(order.get('clientOrderID') or order.get('clientOrderId')).lower()) for order in bodies]
+            if requested_entries and (self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline):
+                return {"code": 101209, "error": True, "cooled": True, "msg": "session admission paused or deadline reached"}
+            if len(set(identities)) != len(identities) or any(identity in self.owned_clients for identity in identities):
+                raise RuntimeError('client order ID was already journaled; reconcile it without resubmission')
             if requested_entries:
-                if self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline:
-                    return {"code": 101209, "error": True, "cooled": True, "msg": "session admission paused or deadline reached"}
+                if self.unknown_write is not None:
+                    return {"code": 101209, "error": True, "cooled": True, "localPolicyRejection": True,
+                            "msg": "session entry paused after an uncertain order write"}
                 if self.max_entry_orders is not None and self.entry_orders + requested_entries > self.max_entry_orders:
                     return {"code": 101209, "error": True, "cooled": True, "localPolicyRejection": True,
                             "msg": "session entry submission budget exhausted"}
-            identities = [(str(order['symbol']), str(order.get('clientOrderID') or order.get('clientOrderId')).lower()) for order in bodies]
-            if len(set(identities)) != len(identities) or any(identity in self.owned_clients for identity in identities):
-                raise RuntimeError('client order ID was already journaled; reconcile it without resubmission')
             index = len(self.intents)
             row = {"index": index, "at": time.time(), "phase": self.phase, "method": method,
                    "path": path, "body": body, "result": "pending"}
@@ -271,10 +275,18 @@ class Journal:
             try:
                 reply = self.original(method, path, body)
             except BaseException as exc:
+                if method == 'POST':
+                    self.unknown_write = {"at": time.time(), "errorType": type(exc).__name__}
                 self.append({"index": index, "at": time.time(), "result": "unknown", "errorType": type(exc).__name__})
                 raise
             row["response"] = reply
             self.append({"index": index, "at": time.time(), "result": "response", "response": reply})
+            if (method == 'POST' and isinstance(reply, dict) and reply.get('cooled') is not True
+                    and (reply.get('error') is True or str(reply.get('code')) == '-1')):
+                # A transport failure is not a rejection. Stop new entries;
+                # allow the current cycle to finish recording its position
+                # and protective-order state before cleanup begins.
+                self.unknown_write = {"at": time.time(), "code": reply.get('code')}
             if method == 'POST' and len(bodies) == 1:
                 self.observe_orders('/openApi/swap/v2/trade/order', bodies[0], reply)
             elif method == 'POST' and isinstance(reply, dict) and str(reply.get('code')) == '0':
@@ -795,6 +807,9 @@ def main(argv=None):
             last_active_start[0] = started
         original_cycle()
         finished = time.monotonic()
+        if journal.unknown_write is not None:
+            report['uncertainWrite'] = journal.unknown_write
+            raise SessionEnd("uncertain order submission; entries paused")
         if journal.phase == "active":
             active_cycle_ms.append((finished - started) * 1000)
         # Also check synchronously: a long GIL-holding operation may delay the
