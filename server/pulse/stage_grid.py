@@ -427,18 +427,27 @@ class _Tape:
             floors = self.owner.entry_floors
             local_floors = (np.fromiter((floors[i] for i in self.ids), dtype=np.float64, count=len(self.ids))
                             if floors is not None else None)
+            refit = auto_set_pf.REFIT_SECONDS
+            entry_hours = (np.unique(np.floor(entries / refit) * refit, return_inverse=True)
+                           if self.owner.window_auto is not None else None)
             self.numeric = (np.searchsorted(times, entries - self.owner.lookback),
-                            np.searchsorted(times, entries), np.asarray(self.gains), np.asarray(self.losses), local_floors)
-        first, ends, gains, losses, local_floors = self.numeric
+                            np.searchsorted(times, entries), np.asarray(self.gains), np.asarray(self.losses),
+                            local_floors, entry_hours)
+        first, ends, gains, losses, local_floors, entry_hours = self.numeric
         valid = ends - first >= offset + size
         rows = np.flatnonzero(valid)
         right = ends[rows] - offset
         left = right - size
         gain, loss = gains[right] - gains[left], losses[right] - losses[left]
-        scoped = self.owner.window_auto is not None
-        if scoped:
-            floors = np.fromiter((self.floor(size, offset, kind, self.owner.entries[self.ids[i]]) for i in rows),
-                                 dtype=np.float64, count=len(rows))
+        if entry_hours is not None:
+            # Every entry in this hour uses the same strict training prefix of
+            # this parent and block. Resolve it once, even when it falls back.
+            hours, hour_ids = entry_hours
+            selected = hour_ids[rows]
+            thresholds = np.empty(len(hours))
+            for hour_id in np.flatnonzero(np.bincount(selected)):
+                thresholds[hour_id] = self.floor(size, offset, kind, float(hours[hour_id]))
+            floors = thresholds[selected]
         else:
             floors = local_floors[rows] if local_floors is not None else self.owner.floors[size]
         if kind in SIGN_MODES:

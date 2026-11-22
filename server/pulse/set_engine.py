@@ -2614,8 +2614,8 @@ class SetBook:
                               [self.stage_params(pack) for pack in self.packs]))
             self._evaluation_config = signature
             if previous is not None and signature != previous:
-                # Until a complete pass under the new rules, no old row may validate
-                # a new signal/cost/hold configuration (including chunked refreshes).
+                # No row may validate new evaluation rules before it has been
+                # replayed under the configuration just loaded.
                 self._hist_rows.clear()
                 self._hist_inputs.clear()
                 self._hist_replay_key.clear()
@@ -2623,6 +2623,13 @@ class SetBook:
                 self._hist_replay_bar_at.clear()
                 self._sig_cache.clear()
                 self._history_snapshot_active = False
+                if self.stage_grid and self.hist_keep_last_complete:
+                    # Assemble the replacement universe before scoring it. A
+                    # chunk by itself can have a different qualifying Exec path.
+                    self._lookback_pending = True
+                    self._lookback_retry_fast = True
+                    self._lookback_progress_key = None
+                    self._lookback_progress_count = 0
                 self.progress.ready = False
                 self.last_run = 0.0
                 self._exec_candidates.clear()
@@ -2667,9 +2674,10 @@ class SetBook:
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback_cfg = max(120, min(LOOKBACK_MAX, int(num(ov, "histLookbackBars", LOOKBACK_DEFAULT))))
         # Collection grows for sparse scored Sets independently of the admission gate.
+        was_automatic = self.lookback_auto
         self.lookback_auto = bool(ov.get("histLookbackAuto", True))
         self.hist_keep_last_complete = bool(ov.get("histKeepLastComplete", False))
-        if not self.lookback_auto:
+        if not self.lookback_auto and (was_automatic or not (self.stage_grid and self.hist_keep_last_complete)):
             self._lookback_pending = False
             self._lookback_retry_fast = False
             self._lookback_progress_key = None
@@ -4019,7 +4027,7 @@ class SetBook:
             self.progress.errors = len(errors)
             self.progress.error = "; ".join(errors[:3])[:220]
             self.progress.symbols_done = len(names) if not aborted else self.progress.symbols_done
-            self.progress.sets_done = len(self.sets)
+            self.progress.sets_done = 0 if defer_score else len(self.sets)
             if not names:
                 self.progress.phase = "waiting"
                 self.progress.ready = False
@@ -4031,7 +4039,7 @@ class SetBook:
             else:
                 self.progress.phase = "rebuilding" if defer_score else "ready"
                 self.progress.pct = 90.0 if defer_score else 100.0
-                self.progress.ready = True
+                self.progress.ready = not defer_score or self._history_snapshot_usable()
                 with self._lock:
                     # A chunk is not the whole universe. After each growth step, wait
                     # until every usable expected symbol has been replayed at that
@@ -4047,6 +4055,7 @@ class SetBook:
                         scoring_stale = True
                         self.progress.phase = "partial"
                         self.progress.pct = 90.0
+                        self.progress.ready = False
                     if self._lookback_pending:
                         key = (lookback0, gen0, tuple(sorted(expected)))
                         if key != self._lookback_progress_key:

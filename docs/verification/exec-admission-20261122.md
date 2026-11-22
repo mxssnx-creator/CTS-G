@@ -24,6 +24,13 @@ The complete disjoint window also has to meet its own positive PF threshold.
 This test runs both at the live decision and at the historical entry used
 to place a close in the next related Set.
 
+When complete history snapshots are enabled, a change to the evaluation rules
+rebuilds all expected symbols before scoring any replacement Set. The engine
+keeps managing positions during the rebuild. Vectorized membership checks
+reuse each parent block's Auto PF for all orders that share its training hour.
+The scalar and vector paths agree on the close immediately before, at and
+after an hourly boundary.
+
 A completed live position rests its own symbol and direction. The observed
 net return determines whether the winning-trade pause applies. The engine
 keeps its symbol-wide liquidity and rapid stop-out limits. Venue checks use

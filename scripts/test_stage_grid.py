@@ -79,6 +79,62 @@ def plain(grid, rows, now, lookback, floor):
 
 
 class StageGridTest(unittest.TestCase):
+    def test_rule_reload_discards_in_flight_tape_and_scores_the_complete_universe(self):
+        block = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        config = {"stageLastN": {"base": {**block, "long": [10]},
+                                  **{s: {**block, "longModes": ["none"]} for s in sg.STAGES[1:]}},
+                  "histKeepLastComplete": True, "histLookbackAuto": False, "histLookbackBars": 240,
+                  "histMinBars": 60, "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 4,
+                  "stratIndications": False, "stratTrailing": False, "exitSets": False,
+                  "setSlRatios": [1.0], "directionMode": "both"}
+        changed = {**config, "lastNBasis": "count"}
+        book = se.SetBook()
+        book.load(config)
+        names = ("AAA-USDT", "BBB-USDT")
+        now = 48 * 3600.0
+        book.bars = {s: [[100.0, 102.0, 99.0, 101.0, 1.0]] * 120 for s in names}
+        calls = []
+        change_during_replay = False
+
+        def replay(symbol, rows, decision, on_step=None):
+            calls.append(symbol)
+            for st in book.by_idx:
+                rows[st.id].extend(dict(t=decision - 120 * i - names.index(symbol) * 60,
+                                        symbol=symbol, side="LONG", pnl=.019, pnl_pct=.02,
+                                        hold_s=30, reason="fixture", set_id=st.id)
+                                   for i in range(40, 0, -1))
+            if change_during_replay:
+                book.load(changed)
+            return {}
+
+        book._replay_symbol = replay
+        book.replay_all(now=now, expected_symbols=names)
+        st = book.by_idx[0]
+        self.assertTrue(st.exec_grid.ready)
+        self.assertTrue(book.progress.ready)
+
+        change_during_replay = True
+        book.replay_all(now=now, expected_symbols=names)
+        change_during_replay = False
+        self.assertEqual(calls, [*names, names[0]])
+        self.assertFalse(book._hist_rows)
+        self.assertIsNone(st.exec_grid)
+        self.assertTrue(book._lookback_pending)
+
+        book.replay_all(now=now, symbols=names[:1], expected_symbols=names)
+        self.assertFalse(book.progress.ready)
+        self.assertEqual(book.progress.sets_done, 0)
+        self.assertIsNone(book.pick_any(st.pack))
+        book.load(changed)  # A routine reload must leave the fixed-window rebuild pending.
+        self.assertTrue(book._lookback_pending)
+        book.replay_all(now=now, symbols=names[1:], expected_symbols=names)
+        self.assertFalse(book.progress.ready)
+        book.replay_all(now=now, symbols=names[:1], expected_symbols=names)
+        self.assertTrue(book.progress.ready)
+        self.assertFalse(book._lookback_pending)
+        self.assertEqual(st.n, 80)
+        self.assertTrue(st.exec_grid.ready)
+
     def test_auto_pf_refits_when_late_training_closes_arrive(self):
         book = se.SetBook()
         book.load({"stageLastN": {}, "minPfByStep": True, "minPfStepAuto": True,
@@ -613,6 +669,25 @@ class StageGridTest(unittest.TestCase):
             scalar = sg.StageHistory(grid, *zip(*rows), 99, lambda _: 1.05,
                                      main_filter=without, filter_need=3).evaluate(238, streams=True)
         self.assertEqual(vector.evaluate(238, streams=True), scalar)
+
+    @unittest.skipIf(sg.np is None, "optional vector operations unavailable")
+    def test_scoped_auto_vector_mask_matches_scalar_at_hour_boundaries(self):
+        block = {"short": [4, 8], "last": [1, 2]}
+        grid = sg.StageGrid.from_settings({"base": {**block, "long": [10, 20]},
+                                           **{s: {**block, "longModes": ["none"]} for s in sg.STAGES[1:]}})
+        policy = sg.WindowAuto(1.14, 10, (1.1, 1.25, 1.5), .05, 0.0)
+        rng = random.Random(61)
+        closes = [float(i * 60 + 60) for i in range(540)]
+        entries = [t - rng.choice((1, 60, 61, 290)) for t in closes]
+        nets = [rng.choice((.003, .005, .007, -.001, -.004, -.006)) for _ in closes]
+        args = grid, closes, entries, nets, 6 * 3600, lambda _: 1.14
+        vector = sg.StageHistory(*args, window_auto=policy)
+        scalar = sg.StageHistory(*args, window_auto=policy)
+        for minute in (479, 480, 481, 540):
+            now = minute * 60.0
+            with patch.object(sg, "np", None):
+                expected = scalar.evaluate(now, streams=True)
+            self.assertEqual(vector.evaluate(now, streams=True), expected)
 
     def test_exec_gate_mirror_sides_and_settlement(self):
         book = se.SetBook()
