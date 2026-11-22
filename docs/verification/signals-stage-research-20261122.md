@@ -151,8 +151,11 @@ transport changes were not part of this session. It was stopped after 624
 seconds because an entry write received a non-JSON response, leaving its exact
 outcome unknown. The journal records 11 entry submissions. The engine recorded
 10 closes: three natural and seven requested during session cleanup.
-Although the test overlay requested a Signals floor of 1.3, the existing
-project rule enforced its 2.2 minimum; 2.2 was the effective live threshold.
+Although the test overlay requested a Signals fallback of 1.3, the existing
+project rule enforced its 2.2 fallback. Auto PF was enabled and may learn a
+different floor per window: in four sampled Signals rows at the final snapshot,
+Base-long floors ranged 1.02–1.12, while the displayed selected Main and Real
+floors were 2.2. These samples do not describe every evaluation during the run.
 
 The three natural closes had recorded return PF 0.124 and net cash -0.0538
 VST. The seven cleanup closes are excluded from that natural PF. These figures
