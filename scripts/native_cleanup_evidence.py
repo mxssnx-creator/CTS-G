@@ -93,7 +93,7 @@ def terminal_intents(api, intents, deadline, order_bodies, remember=None, allow_
             try:
                 reply = future.result()
                 data = reply.get('data') or {}
-                rows = data.get('orders') if isinstance(data, dict) else None
+                rows = data.get('orders') if isinstance(data, dict) else data if isinstance(data, list) else None
                 if str(reply.get('code')) == '0' and not reply.get('error') and isinstance(rows, list):
                     histories[futures[future]] = rows
             except Exception:
