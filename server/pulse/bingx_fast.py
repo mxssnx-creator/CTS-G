@@ -307,6 +307,10 @@ class FastBingX:
         # connections; pooled startup must pace the actual dispatches too.
         self.path_buckets = {path: TokenBucket(4.0, 1.0) for path in (
             '/openApi/swap/v2/user/commissionRate', '/openApi/swap/v1/trade/positionHistory')}
+        # BingX references disagree between 1/s and 5/s for this UID-scoped
+        # order-history endpoint. Use a non-bursting rate below the lower figure.
+        # This is per client; a shared account still needs process coordination.
+        self.path_buckets['/openApi/swap/v2/trade/allOrders'] = TokenBucket(.8, 1.0)
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.http = None

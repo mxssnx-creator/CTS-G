@@ -135,6 +135,14 @@ class SignedPool(unittest.TestCase):
         self.assertTrue(client._take('private','/openApi/swap/v2/user/commissionRate'))
         self.assertEqual(seen,['private','fee'])
 
+    def test_order_history_has_conservative_nonbursting_slots(self):
+        client=bx.FastBingX('fixture-key','fixture-secret',SimpleNamespace(write=lambda *a,**k:None),base='https://open-api-vst.bingx.com')
+        self.addCleanup(client.http.close)
+        bucket=client.path_buckets['/openApi/swap/v2/trade/allOrders']
+        self.assertEqual((bucket.rate,bucket.burst),(.8,1.0))
+        with patch.object(bx.time,'monotonic',return_value=bucket.ts):
+            self.assertEqual([bucket.reserve() for _ in range(4)],[0,1.25,2.5,3.75])
+
     def test_cooldown_started_during_queue_wait_prevents_dispatch(self):
         client=self.client(lambda request:self.fail('no request expected'))
         path='/openApi/swap/v2/user/commissionRate'
