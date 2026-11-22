@@ -151,6 +151,8 @@ transport changes were not part of this session. It was stopped after 624
 seconds because an entry write received a non-JSON response, leaving its exact
 outcome unknown. The journal records 11 entry submissions. The engine recorded
 10 closes: three natural and seven requested during session cleanup.
+Although the test overlay requested a Signals floor of 1.3, the existing
+project rule enforced its 2.2 minimum; 2.2 was the effective live threshold.
 
 The three natural closes had recorded return PF 0.124 and net cash -0.0538
 VST. The seven cleanup closes are excluded from that natural PF. These figures
@@ -158,6 +160,10 @@ come from native statistics; one natural close used an exchange-rate fee
 estimate, and a full independent venue fill audit is not complete. Ten active
 snapshots contained 50 position observations; each had verified controls and
 none was flagged undercovered. This cannot rule out events between snapshots.
+The final snapshot showed 24 Block Auto groups, all on manual fallback with no
+Auto results; DCA emitted no adds. Relate retained one pending entry associated
+with an uncertain submission. The observation therefore did not verify those
+strategies' live sizing or Auto learning.
 
 The final local position book was empty. The cleanup deadline expired with 26
 order intents lacking terminal evidence, so the session did not claim confirmed
@@ -187,5 +193,12 @@ Search intensity and look-ahead must be accounted for when selecting from many
 strategies ([Gençay, 2026](https://arxiv.org/abs/2608.27734)). Dynamic trailing
 and volatility regimes are hypotheses for testing, not proof that this short
 window will be profitable ([Bui and Nguyen, 2026](https://arxiv.org/abs/2602.11708)).
+Han, Kang and Ryu's [momentum study](https://doi.org/10.1093/rapstu/raag011)
+highlights how marking and liquidation assumptions can change results; it does
+not validate this minute-scale candidate. BingX's own descriptions of order
+history rate limits disagree ([swap reference](https://github.com/BingX-API/api-ai-skills/blob/main/skills/swap-trade/api-reference.md),
+[trade review reference](https://github.com/BingX-API/api-ai-skills/blob/main/skills/bingx-trade-review/api-reference.md)),
+so the companion client-side pacing change follows the lower figure and does
+not coordinate other processes on the same account.
 The exchange's documented trade updates distinguish cumulative/last partial
 fills and commissions ([BingX account-stream reference](https://github.com/BingX-API/api-ai-skills/blob/main/skills/swap-ws-account/api-reference.md)).
