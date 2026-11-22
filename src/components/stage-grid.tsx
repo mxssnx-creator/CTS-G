@@ -51,7 +51,7 @@ export function StageGridSettings({ value, onChange }: {
         <>
           <p className="text-xs text-muted">
             Every enabled combination gets its own Set at each stage. The Long, Short and Last blocks use distinct earlier closes.
-            Long and positive Short use the Set's PF floor. Negative Short and signed Last compare PF against 1.
+            Each block uses its minimum or Auto PF. Negative blocks divide losses by gains. The full window must also meet its positive PF floor.
             Negative Short is available for 4, 8 and 12 samples.
           </p>
           <div className="grid gap-3 md:grid-cols-2">
