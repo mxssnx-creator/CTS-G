@@ -16,7 +16,7 @@ import math
 
 from signal_replay import Position, open_position, advance_position, close_result, canonical
 from signal_sources import validate_bars
-from signal_windows import History, rules, positive, STRATEGY_RANGES, SIGNAL_MIN_PF, policy_listing
+from signal_windows import History, rules, positive, negative, STRATEGY_RANGES, policy_listing
 
 
 def distance_checks(p, fees):
@@ -72,7 +72,7 @@ class Root:
 class SignalProgress:
     def __init__(self, config):
         required = {"base", "main", "realLastN", "minPf", "historyMinutes", "maxContextDrawdown", "fees"}
-        if set(config) != required:
+        if set(config) - {"realModes", "realLongN"} != required:
             raise ValueError("unknown/missing Signals progression controls")
         self.config = json.loads(canonical(config))
         self.base_rules, self.main_rules = rules(config["base"]), rules(config["main"])
@@ -82,8 +82,19 @@ class SignalProgress:
         if not ((type(real_n) is int and 1 <= real_n <= 200) or
                 (type(real_n) is str and real_n in ("lane-minimal", "coordinated"))):
             raise ValueError("invalid Signals Real last N")
-        if type(config["minPf"]) not in (int,float) or not math.isfinite(config["minPf"]) or config["minPf"] < SIGNAL_MIN_PF:
-            raise ValueError("Signals use a common PF floor >= 2.2 at every positive gate")
+        self.real_modes = config.get("realModes", ["positive"])
+        if (not isinstance(self.real_modes, list) or not self.real_modes or
+                len(set(self.real_modes)) != len(self.real_modes) or
+                any(mode not in ("positive", "negative") for mode in self.real_modes) or
+                ("realModes" in config and real_n == "coordinated")):
+            raise ValueError("independent Real modes require own Real history and valid signs")
+        self.real_long_n = config.get("realLongN", 0)
+        if (type(self.real_long_n) is not int or not 0 <= self.real_long_n <= 200 or
+                (self.real_long_n and real_n == "coordinated") or
+                ("negative" in self.real_modes and not self.real_long_n)):
+            raise ValueError("negative Real windows require a separate positive Real history")
+        if type(config["minPf"]) not in (int,float) or not math.isfinite(config["minPf"]) or config["minPf"] <= 1:
+            raise ValueError("Signals require a common PF floor above 1")
         if type(config["historyMinutes"]) is not int or not 1 <= config["historyMinutes"] <= 43200:
             raise ValueError("invalid Signals history minutes")
         if type(config["maxContextDrawdown"]) not in (int,float) or not 0 < config["maxContextDrawdown"] <= 1:
@@ -96,7 +107,8 @@ class SignalProgress:
         if any(type(f[k]) not in (int,float) or not math.isfinite(f[k]) or not 0 <= f[k] < .1 for k in ("maker","taker","slippagePerLeg")):
             raise ValueError("invalid Signal costs")
         self.main_by_id = {r.id: r for r in self.main_rules}
-        self.capacity = max(real_n if type(real_n) is int else 0,
+        max_real_n = real_n if type(real_n) is int else max(r.minimal for r in self.main_rules) if real_n == "lane-minimal" else 0
+        self.capacity = max(max_real_n + self.real_long_n,
                             *(r.long+r.minimal for r in (*self.base_rules,*self.main_rules)))
         self.roots, self.events, self.active, self.last_bars = {}, {}, {}, {}
         self.registered_symbols = set()
@@ -202,7 +214,7 @@ class SignalProgress:
     def allowed(self, node, t, policy):
         return node.history.evaluate(t,self.history_ms,policy,self.floor,self.max_dd)
 
-    def real_pass(self,node,t,main_rule,main_evidence):
+    def real_pass(self,node,t,main_rule,main_evidence,mode="positive"):
         """Execution admission, distinct from the Real stream's measured PF.
 
         Coordinated mode uses the complete, current Main long/short/minimal
@@ -211,6 +223,8 @@ class SignalProgress:
         minimal count; integer mode retains an explicit fixed-count gate.
         Neither mode borrows another lane or changes recorded returns.
         """
+        if mode not in self.real_modes:
+            raise ValueError("unknown Real polarity")
         n = self.config["realLastN"]
         if n == "coordinated":
             if main_evidence is None:
@@ -220,8 +234,16 @@ class SignalProgress:
         if n == "lane-minimal":
             n = self.main_by_id[main_rule].minimal
         m = node.history.window(t,self.history_ms,n)
-        return positive(m,n,self.floor,self.max_dd), {**m,"validationStage":"real",
-            "validationMode":self.config["realLastN"],"requiredN":n,"floor":self.floor}
+        allowed = positive(m,n,self.floor,self.max_dd) if mode == "positive" else negative(m,n,self.floor)
+        proof = {**m,"validationStage":"real", "polarity":mode,
+                 "validationMode":self.config["realLastN"],"requiredN":n,"floor":self.floor}
+        if self.real_long_n:
+            prior = node.history.window(t,self.history_ms,self.real_long_n,skip=n)
+            overall = node.history.window(t,self.history_ms,self.real_long_n+n)
+            proof.update(long=prior,overall=overall,longRequiredN=self.real_long_n)
+            allowed = (allowed and positive(prior,self.real_long_n,self.floor,self.max_dd) and
+                       positive(overall,self.real_long_n+n,self.floor,self.max_dd))
+        return allowed, proof
 
     def step(self, symbol, bar, events):
         """Consume exactly one new completed minute and its prior-close signals.
@@ -267,11 +289,13 @@ class SignalProgress:
                         path=(br,mr)
                         real=root.real.get(path)
                         if real is None:real=root.real[path]=self.node()
-                        passed,rf=self.real_pass(real,t,mr,mf)
-                        if passed:
-                            cid=f"{root.id}/{br}/{mr}"
-                            candidates.append({"id":cid,"root":root.id,"identity":root.identity,"protection":root.protection,
-                                "baseRule":br,"mainRule":mr,"base":bf,"main":mf,"real":rf,"decisionT":t})
+                        for mode in self.real_modes:
+                            passed,rf=self.real_pass(real,t,mr,mf,mode)
+                            if passed:
+                                suffix=f"/real-{mode}" if "realModes" in self.config else ""
+                                cid=f"{root.id}/{br}/{mr}{suffix}"
+                                candidates.append({"id":cid,"root":root.id,"identity":root.identity,"protection":root.protection,
+                                    "baseRule":br,"mainRule":mr,"base":bf,"main":mf,"real":rf,"decisionT":t})
                         enter(root,real,(root.id,"real",br,mr))
                     enter(root,main,(root.id,"main",br))
                 enter(root,root.base,(root.id,"base"))
@@ -290,7 +314,7 @@ class SignalProgress:
 
     def summary(self, now, detail=False):
         nb,nm=len(self.base_rules),len(self.main_rules)
-        counts={s:{"population":len(self.roots)*(nb if s=="base" else nb*nm),"passed":0,"chainPassed":0,
+        counts={s:{"population":len(self.roots)*(nb if s=="base" else nb*nm*(len(self.real_modes) if s=="real" else 1)),"passed":0,"chainPassed":0,
                    "allocatedStreams":0,"closed":0,"gain":0.0,"loss":0.0,"windowGain":0.0,"windowLoss":0.0} for s in ("base","main","real")}
         records=[]
         for root in self.roots.values():
@@ -307,10 +331,12 @@ class SignalProgress:
                         count["passed"]+=len(passed);count["chainPassed"]+=chain
                     else:
                         main_passed=self.allowed(root.main[path[0]],now,self.main_rules)
-                        ok,metric=self.real_pass(node,now,path[1],main_passed.get(path[1]))
-                        passed={"real":metric} if ok else {}
-                        chain=int(ok and path[0] in base and path[1] in main_passed)
-                        count["passed"]+=int(ok);count["chainPassed"]+=chain
+                        passed={}
+                        for mode in self.real_modes:
+                            ok,metric=self.real_pass(node,now,path[1],main_passed.get(path[1]),mode)
+                            if ok:passed[mode if "realModes" in self.config else "real"]=metric
+                        chain=len(passed) if path[0] in base and path[1] in main_passed else 0
+                        count["passed"]+=len(passed);count["chainPassed"]+=chain
                     for p in passed.values():
                         m=p if stage=="real" else p["long"]
                         count["windowGain"]+=m["gain"];count["windowLoss"]+=m["loss"]
@@ -323,10 +349,11 @@ class SignalProgress:
             count["pf"]=count["gain"]/count["loss"] if count["loss"] else None
             count["passingWindowPf"]=count["windowGain"]/count["windowLoss"] if count["windowLoss"] else None
             count["passingWindowState"]="finite" if count["windowLoss"] else "no-loss" if count["windowGain"] else "empty"
-        result={"at":now,"stages":counts,"roots":len(self.roots),"possibleExecutionLanes":len(self.roots)*nb*nm,
+        result={"at":now,"stages":counts,"roots":len(self.roots),"possibleExecutionLanes":len(self.roots)*nb*nm*len(self.real_modes),
                 "activeShadowPositions":sum(len(v) for v in self.active.values()),"eventVisits":self.event_visits,
                 "basePolicy":policy_listing(self.config["base"]),"mainPolicy":policy_listing(self.config["main"]),
-                "minPf":self.floor,"realLastN":self.config["realLastN"],
+                "minPf":self.floor,"realLastN":self.config["realLastN"],"realModes":self.real_modes,
+                "realLongN":self.real_long_n,
                 "realValidationStage":"main" if self.config["realLastN"]=="coordinated" else "real",
                 "historyMinutes":self.config["historyMinutes"],"baseRuleCount":nb,"mainRuleCount":nm,
                 "strategyRanges":list(STRATEGY_RANGES)}

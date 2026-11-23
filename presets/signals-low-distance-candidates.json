@@ -23,6 +23,10 @@
         8,
         10
       ],
+      "shortPolarity": [
+        "positive",
+        "negative"
+      ],
       "shortRatio": 0.5
     },
     "fees": {
@@ -57,11 +61,20 @@
         8,
         10
       ],
+      "shortPolarity": [
+        "positive",
+        "negative"
+      ],
       "shortRatio": 0.5
     },
     "maxContextDrawdown": 0.01,
     "minPf": 2.2,
-    "realLastN": "coordinated"
+    "realLastN": "lane-minimal",
+    "realLongN": 8,
+    "realModes": [
+      "positive",
+      "negative"
+    ]
   },
   "protections": [
     {

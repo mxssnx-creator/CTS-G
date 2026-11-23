@@ -10,6 +10,51 @@ from signal_sources import states
 
 
 class SourceMath(unittest.TestCase):
+    def test_experimental_source_requires_explicit_live_selection(self):
+        from signal_packs import parse,expand
+        from signal_sources import SOURCES
+        self.assertNotIn('volume-momentum',SOURCES)
+        self.assertEqual(parse('sig-volume-momentum-short-t1'),('volume-momentum','short',1))
+        default=expand([{}],2,20,lambda x:x,[1])
+        self.assertEqual(len(default['packs']),72)
+        self.assertFalse(any('volume-momentum' in p for p in default['packs']))
+        result=expand([{'sources':['volume-momentum'],'ranges':['short'],'timeframes':[1]}],
+                      2,20,lambda x:x,[1])
+        self.assertEqual(result['packs'],['sig-volume-momentum-short-t1'])
+        self.assertEqual(result['dropped'],[])
+        all_sources=expand([{'sources':[*SOURCES,'volume-momentum']}],2,20,lambda x:x,[1])
+        self.assertEqual(len(all_sources['packs']),80)
+        self.assertEqual(all_sources['dropped'],[])
+
+    def test_experimental_live_pack_uses_completed_bar_onsets(self):
+        from signal_packs import signal
+        from signal_sources import onsets
+        values=[100+4*math.sin(i/11)+math.sin(i/3) for i in range(600)]
+        volumes=[1+(i*7)%13 for i in range(len(values))]
+        bars=[[v,v+.1,v-.1,v,volumes[i]] for i,v in enumerate(values)]
+        timestamped=[[i*60000,*row] for i,row in enumerate(bars)]
+        for tf in (1,5):
+            expected=onsets(timestamped,'volume-momentum','short',tf)
+            for i in range(1,len(values)):
+                close=(i+1)*60
+                direction,_,_=signal(bars,i,close,f'sig-volume-momentum-short-t{tf}')
+                self.assertEqual(direction,expected.get(close*1000,0))
+
+    def test_volume_momentum_matches_independent_rolling_calculation(self):
+        values=[100+4*math.sin(i/11)+math.sin(i/3) for i in range(700)]
+        volume=[1+(i*7)%13 for i in range(len(values))]
+        for label,period in (('short',20),('medium',50)):
+            expected=[0]*len(values)
+            for i in range(period,len(values)):
+                changes=[(values[j]/values[j-1]-1)*volume[j] for j in range(i-period+1,i+1)]
+                v=sum(volume[i-period+1:i+1]);weighted=math.fsum(changes)
+                epsilon=1e-12*math.fsum(abs(x) for x in changes)
+                if v and volume[i]*period>=v:
+                    expected[i]=1 if weighted>epsilon else -1 if weighted < -epsilon else 0
+            self.assertEqual(states(values,'volume-momentum',label,volumes=volume),expected)
+        self.assertEqual(states([100.]*100,'volume-momentum','short',volumes=[0]*100),[0]*100)
+        with self.assertRaises(ValueError):states(values,'volume-momentum','short')
+
     def test_bollinger_matches_decimal_population_variance(self):
         fixtures=[[100+scale*(1+math.sin(i/11)) for i in range(500)] for scale in (1e-10,1,1e5)]
         fixtures.append([100+(i//20)%6 for i in range(1200)])

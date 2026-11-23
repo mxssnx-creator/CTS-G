@@ -33,8 +33,14 @@ def plain_pass(rows,t,rule,floor=2.2):
         peak=total=dd=0
         for x in v:total+=x;peak=max(peak,total);dd=max(dd,peak-total)
         return g>0 and (not l or g/l>=floor) and dd<=.04
+    def negative(v):
+        g=sum(x for x in v if x>0);l=-sum(x for x in v if x<0)
+        return l>0 and (not g or l/g>=floor)
     minimal=vals[-n:]
-    return (positive(minimal) if mode=='positive' else sum(minimal)<0) and positive(vals[-n-a:-n]) and positive(vals[-n-b:-n])
+    short=vals[-n-b:-n]
+    return ((positive(minimal) if mode=='positive' else negative(minimal))
+            and positive(vals[-n-a:-n]) and positive(vals[-n-a:])
+            and (positive(short) if rule.short_polarity=='positive' else negative(short)))
 
 def scalar_path(bars,events,br,mr,side,p=P):
     """Deliberately slow normal-position oracle; no production gate/position helpers."""
@@ -90,17 +96,42 @@ class Windows(unittest.TestCase):
             raw=copy.deepcopy(DEFAULT_WINDOWS);raw[key]=value
             with self.subTest(key=key),self.assertRaises(ValueError):rules(raw)
 
+    def test_negative_short_and_last_have_independent_signed_pf(self):
+        policy={'long':[20], 'short':[4], 'minimal':[1,3],
+                'polarity':['positive','negative'], 'shortPolarity':['positive','negative'], 'shortRatio':.5}
+        h=History(23)
+        for i,v in enumerate([.01]*16+[-.015]*4+[.01]):h.record(i,v)
+        passed=h.evaluate(21,100,rules(policy),2.2,.1)
+        self.assertIn('l20-s4-m1-positive-short-negative',passed)
+        self.assertNotIn('l20-s4-m1-positive',passed)
+        signed=passed['l20-s4-m1-positive-short-negative']
+        self.assertAlmostEqual(signed['short']['loss'],.06)
+        self.assertAlmostEqual(h.cumulative()['net'],.11)
+        self.assertEqual(signed['shortPolarity'],'negative')
+        # A mixed Last block can be net negative while failing its own PF.
+        mixed=History(23)
+        for i,v in enumerate([.01]*20+[-.01,.004,.001]):mixed.record(i,v)
+        selected=[Rule(20,4,3,'negative')]
+        self.assertFalse(mixed.evaluate(23,100,selected,2.2,.1))
+        self.assertTrue(mixed.evaluate(23,100,selected,1.3,.1))
+
     def test_negative_minimal_never_changes_long_short_or_cumulative_losses(self):
         h=History(23)
         for i in range(20):h.record(i*60000,.01)
-        h.record(20*60000,-.9)
+        h.record(20*60000,-.03)
         passing=h.evaluate(21*60000,720*60000,rules(),2.2,.04)
         rule=passing['l20-s10-m1-negative']
         self.assertEqual(rule['long']['loss'],0)
-        self.assertEqual(rule['minimal']['loss'],.9)
-        self.assertAlmostEqual(h.cumulative()['loss'],.9)
-        self.assertLess(h.cumulative()['pf'],1)
+        self.assertEqual(rule['minimal']['loss'],.03)
+        self.assertEqual(rule['overall']['loss'],.03)
+        self.assertAlmostEqual(h.cumulative()['loss'],.03)
+        self.assertGreater(h.cumulative()['pf'],2.2)
         self.assertNotIn('l20-s10-m1-positive',passing)
+        losing=History(23)
+        for i in range(20):losing.record(i*60000,.01)
+        losing.record(20*60000,-.9)
+        self.assertNotIn('l20-s10-m1-negative',losing.evaluate(21*60000,720*60000,rules(),2.2,.04))
+        self.assertLess(losing.cumulative()['pf'],1)
 
     def test_strict_clock_expiry_and_full_windows(self):
         h=History(23)
@@ -120,6 +151,19 @@ class Windows(unittest.TestCase):
         self.assertLessEqual(len(h.times),24)
         self.assertEqual(h.count,250)
 
+    def test_both_short_polarities_match_scalar_and_round_trip(self):
+        raw=copy.deepcopy(DEFAULT_WINDOWS);raw['shortPolarity']=['positive','negative']
+        policy=rules(raw);h=History(23);rows=[];rng=random.Random(843)
+        for i in range(110):
+            val=rng.choice([.03,.02,.01,-.003,-.01,-.02,0]);t=T+i*60000
+            h.record(t,val);rows.append((t,val))
+            for now in (t,t+1):
+                got=h.evaluate(now,720*60000,policy,1.3,.04)
+                self.assertEqual(set(got),{r.id for r in policy if plain_pass(rows,now,r,1.3)})
+        config=cfg();config['base']=raw;config['main']=copy.deepcopy(raw);config['minPf']=1.3
+        book=SignalProgress(config);book.register(identity(),P)
+        self.assertEqual(SignalProgress.restore(book.checkpoint()).checkpoint(),book.checkpoint())
+
     def test_empty_flat_and_no_loss_not_finite_infinity(self):
         h=History(23);self.assertIsNone(h.cumulative()['pf'])
         h.record(T,0);self.assertEqual(h.cumulative()['pf'],1)
@@ -131,7 +175,7 @@ class Progress(unittest.TestCase):
     def test_default_keeps_full_windows_and_adds_main_eight(self):
         preset=json.loads((ROOT/'presets/signals-independent-windows.json').read_text())['progress']
         book=SignalProgress(preset)
-        self.assertEqual(preset['realLastN'],'coordinated')
+        self.assertEqual(preset['realLastN'],'lane-minimal')
         self.assertEqual(preset['historyMinutes'],100*60)
         self.assertEqual(len(book.base_rules),42)
         self.assertEqual(len(book.main_rules),48)
@@ -146,6 +190,38 @@ class Progress(unittest.TestCase):
         node.history.record(T+60000,-.001)
         ok,m=book.real_pass(node,T+60001,'l10-s4-m1-positive',None)
         self.assertFalse(ok)
+
+    def test_real_positive_and_negative_are_own_independent_lanes(self):
+        raw=cfg();raw['realLastN']=2;raw['realLongN']=8;raw['realModes']=['positive','negative']
+        book=SignalProgress(raw);rid=book.register(identity(),P);node=book.node()
+        rule='l10-s4-m1-positive'
+        for i in range(8):node.history.record(T+i*60000,.01)
+        node.history.record(T+8*60000,.01);node.history.record(T+9*60000,-.03)
+        now=T+12*60000
+        ok_plus,_=book.real_pass(node,now,rule,None,'positive')
+        ok_minus,m=book.real_pass(node,now,rule,None,'negative')
+        self.assertFalse(ok_plus);self.assertTrue(ok_minus)
+        self.assertEqual((m['gain'],m['loss'],m['polarity']),(.01,.03,'negative'))
+        self.assertAlmostEqual(m['long']['gain'],.08)
+        self.assertGreater(m['overall']['pf'],2.2)
+        self.assertEqual(book.summary(T)['possibleExecutionLanes'],2*42*42)
+        root=book.roots[rid];root.main[rule]=book.node();root.real[rule,rule]=node;node.opened=10
+        for parent in (root.base,root.main[rule]):
+            for i in range(11):parent.history.record(T+i*60000,.01)
+            parent.opened=11
+        candidates=book.step('A',[now,100,100.1,99.9,100,1],{book.event_key(identity()):1})
+        chosen=[c for c in candidates if c['baseRule']==rule and c['mainRule']==rule]
+        self.assertEqual(len(chosen),1)
+        self.assertTrue(chosen[0]['id'].endswith('/real-negative'))
+        self.assertEqual(chosen[0]['real']['loss'],.03)
+        self.assertEqual(SignalProgress.restore(book.checkpoint()).checkpoint(),book.checkpoint())
+        losing=book.node()
+        for i,v in enumerate([.001]*8+[.01,-.03]):losing.history.record(T+i*60000,v)
+        self.assertFalse(book.real_pass(losing,now,rule,None,'negative')[0], 'negative Last cannot hide an overall losing Real window')
+        bad=cfg();bad['realLastN']=2;bad['realModes']=['negative']
+        with self.assertRaises(ValueError):SignalProgress(bad)
+        raw['realLastN']='coordinated'
+        with self.assertRaises(ValueError):SignalProgress(raw)
 
     def test_coordinated_real_uses_complete_main_proof_not_duplicate_gate(self):
         raw=cfg();raw['realLastN']='coordinated';book=SignalProgress(raw)
@@ -388,8 +464,10 @@ class Progress(unittest.TestCase):
             with self.subTest(key=key),self.assertRaises(ValueError):SignalProgress.restore(bad)
 
     def test_common_floor_and_no_ordinary_strategy_ranges(self):
-        raw=cfg();raw['minPf']=2.19
+        raw=cfg();raw['minPf']=1.0
         with self.assertRaises(ValueError):SignalProgress(raw)
+        raw['minPf']=1.3
+        SignalProgress(raw)
         for name in ('micro','minimal','short','general','wide','long'):
             with self.subTest(name=name),self.assertRaises(ValueError):self.book(p={**P,'strategyRange':name})
 

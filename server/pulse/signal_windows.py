@@ -1,9 +1,9 @@
 """Independent Signals window policies. All inputs are already net of costs.
 
 The most recent minimal window is a condition, not an inverse strategy. The
-long and short evaluations end before it in BOTH polarities. No loss is ever
-removed from cumulative/executed accounting. No future/equal-clock close can
-qualify an entry. This module has no exchange or ordinary-Set dependencies.
+long and short evaluations end before it in BOTH polarities. Negative windows
+test loss/gain, without changing the sign of any recorded result. No loss is
+removed from cumulative accounting and no equal-clock close qualifies an entry.
 """
 from __future__ import annotations
 
@@ -24,15 +24,17 @@ class Rule:
     short: int
     minimal: int
     polarity: str
+    short_polarity: str = "positive"
 
     @property
     def id(self):
-        return f"l{self.long}-s{self.short}-m{self.minimal}-{self.polarity}"
+        suffix = "" if self.short_polarity == "positive" else "-short-negative"
+        return f"l{self.long}-s{self.short}-m{self.minimal}-{self.polarity}{suffix}"
 
 
 def rules(raw=None):
     raw = DEFAULT_WINDOWS if raw is None else raw
-    if set(raw) != set(DEFAULT_WINDOWS):
+    if set(raw) - {"shortPolarity"} != set(DEFAULT_WINDOWS):
         raise ValueError("Signals windows require long, short, minimal, polarity and shortRatio")
     for key in ("long", "short", "minimal"):
         values = raw[key]
@@ -44,10 +46,15 @@ def rules(raw=None):
             len(set(raw["polarity"])) != len(raw["polarity"]) or
             any(x not in ("positive", "negative") for x in raw["polarity"])):
         raise ValueError("unsupported Signals minimal polarity")
+    short_polarity = raw.get("shortPolarity", ["positive"])
+    if (not isinstance(short_polarity, list) or not short_polarity or
+            len(set(short_polarity)) != len(short_polarity) or
+            any(x not in ("positive", "negative") for x in short_polarity)):
+        raise ValueError("unsupported Signals short polarity")
     if type(raw["shortRatio"]) not in (int, float) or not math.isfinite(raw["shortRatio"]) or not 0 < raw["shortRatio"] <= .5:
         raise ValueError("Signals short/long ratio must be positive and at most 0.5")
-    return tuple(Rule(a, b, n, mode) for a, b, n, mode in product(
-        sorted(raw["long"]), sorted(raw["short"]), sorted(raw["minimal"]), raw["polarity"])
+    return tuple(Rule(a, b, n, mode, short_mode) for a, b, n, mode, short_mode in product(
+        sorted(raw["long"]), sorted(raw["short"]), sorted(raw["minimal"]), raw["polarity"], short_polarity)
         if b <= a * raw["shortRatio"])
 
 
@@ -55,10 +62,10 @@ def policy_listing(raw=None):
     raw = DEFAULT_WINDOWS if raw is None else raw
     allowed = rules(raw)
     return {"rules": [{"id": r.id, "long": r.long, "short": r.short,
-            "minimal": r.minimal, "polarity": r.polarity} for r in allowed],
+            "minimal": r.minimal, "polarity": r.polarity, "shortPolarity": r.short_polarity} for r in allowed],
             "ruleCount": len(allowed), "excludedPairs": [{"long": a, "short": b, "reason": "short exceeds 50% of long"}
                 for a, b in product(sorted(raw["long"]), sorted(raw["short"])) if b > a * raw["shortRatio"]],
-            "windowBoundary": "long and short end before minimal; all actual returns remain in accounting"}
+            "windowBoundary": "long and short end before minimal; the full long-plus-minimal window must also meet the positive PF floor"}
 
 
 def metrics(values):
@@ -78,6 +85,16 @@ def metrics(values):
 def positive(m, n, floor, max_dd):
     return (m["n"] == n and m["gain"] > 0 and
             (m["loss"] == 0 or m["pf"] >= floor) and m["maxReturnDrawdown"] <= max_dd)
+
+
+def negative(m, n, floor):
+    """Apply the same floor to a negative condition using loss/gain.
+
+    The returns remain signed in every history and execution statistic.
+    Drawdown is not used as a second sign test on a negative condition.
+    """
+    return (m["n"] == n and m["loss"] > 0 and
+            (m["gain"] == 0 or m["loss"] >= floor * m["gain"]))
 
 
 class History:
@@ -116,8 +133,8 @@ class History:
         return self.cache[key]
 
     def evaluate(self, now, history_ms, policy, floor=SIGNAL_MIN_PF, max_dd=1):
-        if not math.isfinite(floor) or floor < SIGNAL_MIN_PF:
-            raise ValueError("Signals positive evaluations require the common PF floor >= 2.2")
+        if not math.isfinite(floor) or floor <= 1:
+            raise ValueError("Signals evaluations require a PF floor above 1")
         lo, hi = bisect_left(self.times, now-history_ms), bisect_left(self.times, now)
         if not policy or hi-lo < min(r.long+r.minimal for r in policy):
             return {}
@@ -134,13 +151,18 @@ class History:
             if rule.polarity == "positive":
                 if not positive(minimal, rule.minimal, floor, max_dd):
                     continue
-            elif minimal["net"] >= 0:
+            elif not negative(minimal, rule.minimal, floor):
                 continue
             long = self.window(now, history_ms, rule.long, rule.minimal)
             short = self.window(now, history_ms, rule.short, rule.minimal)
-            if positive(long, rule.long, floor, max_dd) and positive(short, rule.short, floor, max_dd):
+            overall = self.window(now, history_ms, rule.long + rule.minimal)
+            short_ok = (positive(short, rule.short, floor, max_dd) if rule.short_polarity == "positive"
+                        else negative(short, rule.short, floor))
+            if (positive(long, rule.long, floor, max_dd) and short_ok and
+                    positive(overall, rule.long + rule.minimal, floor, max_dd)):
                 passed[rule.id] = {"long": long, "short": short, "minimal": minimal,
-                                   "minimalPolarity": rule.polarity, "floor": floor}
+                                   "overall": overall, "minimalPolarity": rule.polarity,
+                                   "shortPolarity": rule.short_polarity, "floor": floor}
         self.cache[memo] = passed
         return passed
 

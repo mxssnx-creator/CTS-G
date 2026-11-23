@@ -23,6 +23,12 @@ def source_math():
     return run.returncode == 0, (run.stderr+run.stdout).strip()[-300:]
 
 
+def python_event_export():
+    run = subprocess.run([sys.executable,"-B",os.path.join(ROOT,"scripts/test_signal_python_events.py")],
+                         capture_output=True,text=True,timeout=60)
+    return run.returncode == 0, (run.stderr+run.stdout).strip()[-300:]
+
+
 def window_lanes():
     run = subprocess.run([sys.executable,"-B",os.path.join(ROOT,"scripts/test_signal_progress.py")],
                          capture_output=True,text=True,timeout=120)
@@ -42,5 +48,6 @@ def demo_safety():
 
 
 CHECKS = [("signals.independent-replay-contracts", contracts), ("trader.overall-control-coverage", controls),
-          ("signals.independent-source-math", source_math), ("signals.multiple-window-lanes", window_lanes),
+          ("signals.independent-source-math", source_math), ("signals.python-event-export", python_event_export),
+          ("signals.multiple-window-lanes", window_lanes),
           ("signals.complete-source-catalogue", catalogue), ("trader.x02-demo-safety", demo_safety)]

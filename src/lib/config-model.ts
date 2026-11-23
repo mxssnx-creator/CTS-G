@@ -606,6 +606,8 @@ export type PulseOverlay = {
 };
 
 export const SIGNAL_SOURCES = ["ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian", "bb-bounce", "cci-reversal", "obv-trend"] as const;
+export const SIGNAL_RESEARCH_SOURCES = ["volume-momentum"] as const;
+export const SIGNAL_SOURCE_CHOICES = [...SIGNAL_SOURCES, ...SIGNAL_RESEARCH_SOURCES] as const;
 export const SIGNAL_RANGES = ["short", "medium"] as const;
 export const SIGNAL_TIMEFRAMES = [1, 5, 15, 30] as const;
 export const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
@@ -1341,7 +1343,7 @@ export function signalConfigList(v: unknown): SignalConfig[] {
     const e = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
     const lo = Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMin) || DEFAULT_SIGNAL_CONFIG.stepMin)));
     const hi = Math.max(lo, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMax) || DEFAULT_SIGNAL_CONFIG.stepMax)));
-    const sources = words(e.sources).filter((s) => (SIGNAL_SOURCES as readonly string[]).includes(s));
+    const sources = words(e.sources).filter((s) => (SIGNAL_SOURCE_CHOICES as readonly string[]).includes(s));
     const ranges = words(e.ranges).filter((s) => (SIGNAL_RANGES as readonly string[]).includes(s));
     const tfs = words(e.timeframes).map(Number).filter((x) => (SIGNAL_TIMEFRAMES as readonly number[]).includes(x));
     const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.05 && x <= 5);

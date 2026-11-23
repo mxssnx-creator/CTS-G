@@ -1,7 +1,8 @@
 """Signals as Set-engine packs (owner 2026-11-14: "Signals ... for each source, symbol, type, range independent ... own coordination through the stages").
 
-Every (source, range, timeframe) of `signal_sources` (the CTS-A-O sources ported in, see that module) is its own pack ``sig-<source>-<range>-t<tf>``:
-it builds its own Sets (SL ratio x TP step, Exit Sets, trailing pairs, both directions) and every Set runs the same stage chain, last-N windows, lanes,
+Every configured (source, range, timeframe) is its own pack ``sig-<source>-<range>-t<tf>``. The original source catalogue remains the default;
+research sources must be explicitly named in a Signal configuration. Each pack
+builds its own Sets (SL ratio x TP step, Exit Sets, trailing pairs, both directions) and every Set runs the same stage chain, last-N windows, lanes,
 Auto floor and execution check as any other pack. ``set_engine.is_signal_pack`` already gives these packs the Signals floor (``minPfSignals``).
 
 The signal of a pack on 1m bar i: the 1m bars up to and including i are aggregated into completed UTC-aligned timeframe bars
@@ -16,12 +17,12 @@ from __future__ import annotations
 import math
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from signal_sources import RANGES, SOURCES, TIMEFRAMES, completed_bars, states, warmup_bars
+from signal_sources import RANGES, RESEARCH_SOURCES, SOURCES, TIMEFRAMES, completed_bars, states, warmup_bars
 
 PREFIX = "sig-"
 KINDS = ("base", "exit", "trail")
 MAX_ENTRIES = 32
-MAX_PACKS = 72                 # 9 sources x 2 ranges x 4 timeframes
+MAX_PACKS = len(RESEARCH_SOURCES) * len(RANGES) * len(TIMEFRAMES)
 WINDOW_CAP = 1920              # 1m rows a Signals pack reads at most on the 1 / 5 min timeframes (the Set history's default lookback)
 WINDOW_CAP_SLOW = 4320         # on 15 / 30 min: three days, so the slow EMAs warm up (64 bars of 30 min starved them; owner 2026-11-14 "make also 15, 30 min work")
 CONF = 0.6
@@ -41,7 +42,7 @@ def parse(pack: str) -> Optional[Tuple[str, str, int]]:
         return None
     for rng in RANGES:
         suffix = "-" + rng
-        if head.endswith(suffix) and head[: -len(suffix)] in SOURCES:
+        if head.endswith(suffix) and head[: -len(suffix)] in RESEARCH_SOURCES:
             return head[: -len(suffix)], rng, int(tf)
     return None
 
@@ -150,7 +151,7 @@ def expand(configs: Any, step_lo: int, step_hi: int, snap_ratio: Callable[[float
         for s in srcs:
             for r in rngs:
                 for tf in tfs:
-                    if s not in SOURCES or r not in RANGES or tf not in TIMEFRAMES:
+                    if s not in RESEARCH_SOURCES or r not in RANGES or tf not in TIMEFRAMES:
                         dropped.append({"entry": label, "name": f"{s}/{r}/t{tf}", "reason": "unknown source, range or timeframe"})
                         continue
                     name = pack_name(s, r, tf)

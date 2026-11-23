@@ -1,7 +1,8 @@
 import {
   DEFAULT_SIGNAL_CONFIG,
   SIGNAL_RANGES,
-  SIGNAL_SOURCES,
+  SIGNAL_SOURCE_CHOICES,
+  SIGNAL_RESEARCH_SOURCES,
   SIGNAL_TIMEFRAMES,
   type SignalConfig,
 } from "@/lib/config-model";
@@ -33,7 +34,7 @@ function Chips<T extends string | number>({ all, on, onChange, fmt }: { all: rea
 }
 
 /** Editor of `signalConfigs`: every source x range x timeframe of an entry becomes its own Signals pack (own Sets, stages, lanes), with this entry's TP-step
- * range, SL ratios and Set types. Packs = sources x ranges x timeframes (engine bound 72). */
+ * range, SL ratios and Set types. Packs = sources x ranges x timeframes (engine bound 80). */
 export function SignalConfigEditor({ value, onChange }: { value: SignalConfig[]; onChange: (v: SignalConfig[]) => void }) {
   const set = (i: number, patch: Partial<SignalConfig>) => onChange(value.map((e, k) => (k === i ? { ...e, ...patch } : e)));
   const packs = value.filter((e) => e.enabled).reduce((n, e) => n + e.sources.length * e.ranges.length * e.timeframes.length, 0);
@@ -66,7 +67,8 @@ export function SignalConfigEditor({ value, onChange }: { value: SignalConfig[];
             </button>
           </div>
           <div className="text-xs text-muted">Sources</div>
-          <Chips all={SIGNAL_SOURCES} on={e.sources as (typeof SIGNAL_SOURCES)[number][]} onChange={(v) => set(i, { sources: v })} />
+          <Chips all={SIGNAL_SOURCE_CHOICES} on={e.sources as (typeof SIGNAL_SOURCE_CHOICES)[number][]} onChange={(v) => set(i, { sources: v })}
+            fmt={(v) => (SIGNAL_RESEARCH_SOURCES as readonly string[]).includes(v) ? `${v} (experimental)` : v} />
           <div className="grid gap-2 sm:grid-cols-3">
             <div>
               <div className="text-xs text-muted">Ranges</div>

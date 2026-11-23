@@ -17,11 +17,12 @@ import time
 
 
 def policy(raw):
-    return [(a,b,n,mode) for a,b,n,mode in itertools.product(raw['long'],raw['short'],raw['minimal'],raw['polarity'])
+    return [(a,b,n,mode,short_mode) for a,b,n,mode,short_mode in itertools.product(
+            raw['long'],raw['short'],raw['minimal'],raw['polarity'],raw.get('shortPolarity',['positive']))
             if b<=a*raw['shortRatio']]
 
 
-def rule_id(r):return f'l{r[0]}-s{r[1]}-m{r[2]}-{r[3]}'
+def rule_id(r):return f'l{r[0]}-s{r[1]}-m{r[2]}-{r[3]}' + ('-short-negative' if len(r)>4 and r[4]=='negative' else '')
 
 
 def positive(values,n,cfg):
@@ -33,15 +34,21 @@ def positive(values,n,cfg):
 
 
 def gate(history,t,rule,cfg):
-    a,b,n,mode=rule
+    a,b,n,mode=rule[:4]
+    short_mode=rule[4] if len(rule)>4 else 'positive'
     rows=[v for end,v in history[-(a+n+1):] if t-cfg['historyMinutes']*60000<=end<t]
     if len(rows)<a+n:return False
     last=rows[-n:]
-    recent=positive(last,n,cfg) if mode=='positive' else sum(last)<0
-    return recent and positive(rows[-n-a:-n],a,cfg) and positive(rows[-n-b:-n],b,cfg)
+    def negative(values):
+        gains=sum(x for x in values if x>0);losses=-sum(x for x in values if x<0)
+        return losses>0 and (gains==0 or losses/gains>=cfg['minPf'])
+    recent=positive(last,n,cfg) if mode=='positive' else negative(last)
+    short=rows[-n-b:-n]
+    return (recent and positive(rows[-n-a:-n],a,cfg) and positive(rows[-n-a:],a+n,cfg)
+            and (positive(short,b,cfg) if short_mode=='positive' else negative(short)))
 
 
-def reconstruct(bars,events,br,mr,side,p,cfg):
+def reconstruct(bars,events,br,mr,side,p,cfg,real_mode='positive'):
     histories={s:[] for s in ('base','main','real')};positions={s:None for s in histories}
     candidates=[];opened=dict.fromkeys(histories,0);fee=cfg['fees']
     entry_fee=fee[fee['entryLiquidity']];exit_fee=fee[fee['exitLiquidity']];slip=fee['slippagePerLeg']
@@ -53,8 +60,15 @@ def reconstruct(bars,events,br,mr,side,p,cfg):
             if n=='coordinated':real_ok=main
             else:
                 n=mr[2] if n=='lane-minimal' else n
-                real=[v for end,v in histories['real'][-n-1:] if t-cfg['historyMinutes']*60000<=end<t][-n:]
-                real_ok=positive(real,n,cfg)
+                long_n=cfg.get('realLongN',0)
+                seen=[v for end,v in histories['real'][-n-long_n-1:] if t-cfg['historyMinutes']*60000<=end<t]
+                real=seen[-n:]
+                if real_mode=='positive':real_ok=positive(real,n,cfg)
+                else:
+                    gain=sum(v for v in real if v>0);loss=-sum(v for v in real if v<0)
+                    real_ok=len(real)==n and loss>0 and (gain==0 or loss/gain>=cfg['minPf'])
+                if long_n:
+                    real_ok=real_ok and positive(seen[-n-long_n:-n],long_n,cfg) and positive(seen[-n-long_n:],n+long_n,cfg)
             if base and main and real_ok:candidates.append(t)
             for stage,admit in [('base',True),('main',base),('real',base and main)]:
                 if admit and positions[stage] is None:
@@ -127,15 +141,23 @@ def main():
         # Every main stream observed in this root is represented at least once.
         pairs.update((r['path'],rule_id(mrules[0])) for r in records if r['stage']=='main')
         for br,mr in sorted(pairs):
-            hist,pos,opened,times=reconstruct(bars,signals,by_rule[br],by_main[mr],ident['side'],p,cfg)
+            real_modes=cfg.get('realModes',['positive'])
+            first_mode=real_modes[0]
+            hist,pos,opened,times=reconstruct(bars,signals,by_rule[br],by_main[mr],ident['side'],p,cfg,first_mode)
             for stage,node in [('base',root.base),('main',root.main.get(br)),('real',root.real.get((br,mr)))]:
                 values=[v for _,v in hist[stage]];count=node.history.count if node else 0
                 net=node.history.cumulative()['net'] if node else 0
                 if count!=len(values) or not math.isclose(net,sum(values),rel_tol=1e-10,abs_tol=1e-11) or bool(node and node.position)!=bool(pos[stage]) or (node.opened if node else 0)!=opened[stage]:
                     raise AssertionError((source,rid,br,mr,stage,'scalar divergence',count,len(values),net,sum(values)))
                 root_checks+=1
-            actual=[c['decisionT'] for c in actual_candidates if c['baseRule']==br and c['mainRule']==mr]
+            actual=[c['decisionT'] for c in actual_candidates if c['baseRule']==br and c['mainRule']==mr
+                    and c['real'].get('polarity','positive')==first_mode]
             if actual!=times:raise AssertionError((source,rid,br,mr,'admission divergence'))
+            for mode in real_modes[1:]:
+                _,_,_,expected=reconstruct(bars,signals,by_rule[br],by_main[mr],ident['side'],p,cfg,mode)
+                actual=[c['decisionT'] for c in actual_candidates if c['baseRule']==br and c['mainRule']==mr
+                        and c['real'].get('polarity','positive')==mode]
+                if actual!=expected:raise AssertionError((source,rid,br,mr,mode,'admission divergence'))
             paths+=1
         for r in records:
             node=root.base if r['stage']=='base' else root.main.get(r['path']) if r['stage']=='main' else root.real.get(tuple(r['path']))
