@@ -102,6 +102,7 @@ def _ts_default(raw):
 
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
+    "stratGeneral": "owner 2026-11-24, x01 only: the general pack is off (pooled PF 0.72 on 74 orders); the desk default keeps it on",
     "setMinStep": "owner 2026-11-24, x01 only: grid minimum step 3; the desk default stays 5",
     "tpStepMin": "owner 2026-11-24, x01 only: TP Sets from step 3; the desk default stays 5",
     "timeStopS": "owner 2026-11-24, x01 only: max hold 3 h (10800 s); the desk default stays 6 h",

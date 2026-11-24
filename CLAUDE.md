@@ -2,6 +2,13 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-24, owner: "Disable all non performing on live x01 Now and double vol factor. And list what was disabled."** x01 `volumeFactor` 0.4 -> **0.8**. Off, by the 2026-11-05
+  rule (pooled PF < 0.8 on >= 35 orders AND every source with orders < 1; sources: live x01 closes, sim B2 5 days, sim qX 2 days): pack `general` (74 orders, PF 0.72; `stratGeneral`
+  false), `reversion` LONG (135, 0.53; new key `packSidesOff` ["reversion:L"]), TP range `minimal` (154, 0.50; `tpRanges.minimal` false), SL ratio 1.0 (210, 0.62;
+  `setSlRatios` [0.5, 0.75, 1.25]), TP steps 7 / 9 / 19 (73 / 37 / 37 orders, 0.73 / 0.66 / 0.36; new key `tpStepsOff` [7, 9, 19]; steps 5 / 6 are inside the minimal range).
+  Not off (mixed signs): flow LONG, reversion as a whole, trailing, SL 1.25, signal packs. Caveat (2026-11-06): removing groups by isolated PF lowered the counterfactual replay then;
+  the removal still needs its own counterfactual sim. Revert = the old values of those keys. Fixtures pin the keys back (`common.overlay`); check
+  `grid.steps-off-and-pack-sides-off-remove-only-those-sets`. Live x01: 8,532 -> 6,910 configured Sets; open positions under removed Sets keep running on their own lane.
 - **2026-11-17, owner (from CTS-A-O): "use own configs scope" — config-wide last-N windows.** CTS-A-O measured config-wide windows (a configuration's own
   last N results across all symbols) against windows per symbol × side on the same data: executed PF 0.56 -> **1.33**, General / Long executing again (PF 2.79 / 1.82),
   Micro better per symbol (so judged on both there). **CTS-G already judges every Set on one tape of all symbols (`SetBook._tape_at`), per direction: keep it.** Do not cut

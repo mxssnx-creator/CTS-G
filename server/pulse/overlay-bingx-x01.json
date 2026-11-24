@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 0.4,
+  "volumeFactor": 0.8,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
@@ -53,12 +53,7 @@
   "volWeight": 0.3,
   "minStep": 10,
   "maxStopLossRatio": 1.4,
-  "setSlRatios": [
-    0.5,
-    0.75,
-    1.0,
-    1.25
-  ],
+  "setSlRatios": [0.5, 0.75, 1.25],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
@@ -198,7 +193,7 @@
   "setScratchEnabled": false,
   "tpRanges": {
     "micro": true,
-    "minimal": true,
+    "minimal": false,
     "short": true,
     "normal": true,
     "long": true,
@@ -393,6 +388,9 @@
     }
   },
   "stratTrend": false,
+  "stratGeneral": false,
+  "tpStepsOff": [7, 9, 19],
+  "packSidesOff": ["reversion:L"],
   "stratReversion": true,
   "stratFlow": true,
   "stratMulti": false,
