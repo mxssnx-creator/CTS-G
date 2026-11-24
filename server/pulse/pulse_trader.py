@@ -505,6 +505,16 @@ def manual_rest_active(rest: Dict[str, float], symbol: str, side: str, now: floa
     return float(rest.get(manual_rest_key(symbol, side), 0.0) or 0.0) > now
 
 
+def manual_rest_set_key(symbol: str, side: str, set_id: str) -> str:
+    return f"{symbol}:{str(side).upper()}:{set_id}"
+
+
+def manual_rest_set_ids(rest: Dict[str, float], symbol: str, side: str, now: float) -> set:
+    """The Set ids that may not open (symbol, side) again: the Sets whose position was closed by hand. Memory only (a restart forgets them)."""
+    pre = manual_rest_key(symbol, side) + ":"
+    return {k[len(pre):] for k, until in rest.items() if k.startswith(pre) and float(until or 0.0) > now}
+
+
 def manual_rest_prune(rest: Dict[str, float], now: float) -> int:
     dead = [k for k, until in rest.items() if float(until or 0.0) <= now]
     for k in dead:
@@ -3880,6 +3890,15 @@ class Pulse:
         if symbol and isinstance(self.sets, SetBook) and not self.sets.symbol_allows(pack, symbol):
             return None, "", "symbol-lane"
         ax_sets = isinstance(self.sets, SetBook) and getattr(getattr(self.sets, "axis_sets", None), "enabled", False)
+        rested: set = set()
+        if symbol and side and getattr(self, "manual_rest_scope", "set") == "set":
+            rested = manual_rest_set_ids(getattr(self, "manual_rest", {}), symbol, "LONG" if side > 0 else "SHORT", time.time())
+        _pick_any = self.sets.pick_any
+        def pick_any(pack_, **kw):
+            if rested:   # a Set whose position on this symbol was closed by hand is skipped; the next-ranked Set may still open
+                inner = kw.get("predicate")
+                kw["predicate"] = (lambda st_: st_.id not in rested and (inner is None or inner(st_)))
+            return _pick_any(pack_, **kw)
         if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and (ax_sets or any(ax.enabled for ax in self.coord.axes.values())):
             blocked = []
             def allows(st, lane):
@@ -3924,13 +3943,13 @@ class Pulse:
                     return False
                 return True
             for lane in getattr(self.sets, "lane_order", ("pos", "neg")):
-                chosen = self.sets.pick_any(pack, allowed_lanes=(lane,), predicate=lambda st: allows(st, lane), side=side)
+                chosen = pick_any(pack, allowed_lanes=(lane,), predicate=lambda st: allows(st, lane), side=side)
                 if chosen is not None:
                     return chosen, lane, ""
             return None, "", blocked[0] if blocked else ""
         group_blocked = ""
         try:
-            chosen = self.sets.pick_any(pack, side=side)
+            chosen = pick_any(pack, side=side)
             if chosen is not None and (getattr(self.sets, "group_gate", False) or getattr(self.sets, "config_gate", False)):
                 # the profit group gate and the config gate: skip the Sets whose group (or own configuration) is losing, the next-ranked Set runs instead
                 now_g = time.time()
@@ -3944,7 +3963,7 @@ class Pulse:
                 first = exec_gates_allow(self.sets, rows_of, chosen.id, lane_c, now_g, paper=paper_of(chosen, lane_c))
                 if not first[0]:
                     group_blocked = first[1]
-                    chosen = self.sets.pick_any(pack, side=side, predicate=group_open)
+                    chosen = pick_any(pack, side=side, predicate=group_open)
         except Exception:
             return None, "", ""
         coord = getattr(self, "coord", None)
@@ -3964,7 +3983,7 @@ class Pulse:
                 # choice. Otherwise an approved alternate scope resurrects a
                 # losing executed group that the group gate already rejected.
                 filters = {"predicate": group_open} if getattr(self.sets, "group_gate", False) else {}
-                alternative = self.sets.pick_any(pack, allowed_lanes=allowed, side=side, **filters)
+                alternative = pick_any(pack, allowed_lanes=allowed, side=side, **filters)
                 # the lane the alternative was taken on: a Set open on both lanes is on the allowed one here, not on the lane lane_of names first
                 alt_lane = ""
                 if alternative is not None:
@@ -4034,8 +4053,8 @@ class Pulse:
             return
         if self.ignore_syms.get(sym, 0) > time.time():
             return
-        if manual_rest_active(getattr(self, "manual_rest", {}), sym, "LONG" if direction > 0 else "SHORT", time.time()):
-            return              # closed by hand a moment ago: not the exact same position again (every other symbol and direction trades on)
+        if getattr(self, "manual_rest_scope", "set") != "set" and manual_rest_active(getattr(self, "manual_rest", {}), sym, "LONG" if direction > 0 else "SHORT", time.time()):
+            return              # legacy scope "symbol": closed by hand a moment ago: no new position of that symbol and direction (scope "set": only that exact Set is skipped, in _scope_choice)
         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
             return
         pack = pack_of_reason(reason)
@@ -4752,6 +4771,12 @@ class Pulse:
             return
         now = time.time()
         book = self.__dict__.setdefault("manual_rest", {})
+        if getattr(self, "manual_rest_scope", "set") == "set" and getattr(pos, "set_id", ""):
+            # owner 2026-11-24: only the exact same Set on that symbol and direction is not opened again; the next-ranked Sets keep opening; memory only, a restart resets it
+            book[manual_rest_set_key(pos.symbol, pos.side, pos.set_id)] = now + 7 * 24 * 3600.0
+            manual_rest_prune(book, now)
+            log(f"MANUAL CLOSE {pos.symbol} {pos.side} ({why}): Set {pos.set_id} is not opened again on it until the next restart, every other Set keeps trading")
+            return
         book[manual_rest_key(pos.symbol, pos.side)] = now + rest_s
         manual_rest_prune(book, now)
         try:
@@ -5630,6 +5655,7 @@ class Pulse:
         self.slippage_allowance_pct = self.position_cost_pct * policy["slippageFeeRatio"] / (1 + policy["slippageFeeRatio"])
         self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", 0.0)))
         self.transfer_adjust = bool(ov.get("transferAdjust", True))
+        self.manual_rest_scope = "symbol" if str(ov.get("manualRestScope", "set")).lower() == "symbol" else "set"
         try:
             self.manual_rest_s = max(0.0, min(7 * 24 * 60.0, float(ov.get("manualCloseRestMin", MANUAL_REST_MIN_DEFAULT)))) * 60.0
         except (TypeError, ValueError):

@@ -398,6 +398,7 @@
   "stratMulti": false,
   "stratBreakout": true,
   "manualCloseRestMin": 240,
+  "manualRestScope": "set",
   "minPfStepAutoHigh": 1.27,
   "trailMinLockPct": 0,
   "makerFeeRate": 0.0002,

@@ -3170,6 +3170,33 @@ def max_leverage_is_the_default_everywhere():
     return all(on.values()) and engine_default and desk_default, f"overlays {on}, engine default {engine_default}, desk default {desk_default}"
 
 
+def a_manual_close_skips_only_the_exact_set_and_a_restart_forgets_it():
+    """Owner 2026-11-24 ("same orders not opened again, only the following ones"): with manualRestScope "set" (default) a position closed by hand blocks only the Set
+    it ran under, on that symbol and direction; the next-ranked Set of the pack still opens, the other direction and symbols are untouched, nothing is written to a file
+    (a restart forgets it); scope "symbol" keeps the earlier symbol + direction rest."""
+    import types, time as _t
+    old = pt.MANUAL_REST_PATH
+    with tempfile.TemporaryDirectory() as d:
+        pt.MANUAL_REST_PATH = os.path.join(d, "manual-rest.json")
+        try:
+            fake = types.SimpleNamespace(manual_rest={}, manual_rest_s=240 * 60.0, manual_rest_scope="set")
+            pt.Pulse.note_manual_close(fake, types.SimpleNamespace(symbol="AAA-USDT", side="LONG", set_id="reversion:L:1m:sl1.0:st5"), "ctrl-no-position")
+            now = _t.time()
+            ids = pt.manual_rest_set_ids(fake.manual_rest, "AAA-USDT", "LONG", now)
+            other = (pt.manual_rest_set_ids(fake.manual_rest, "AAA-USDT", "SHORT", now), pt.manual_rest_set_ids(fake.manual_rest, "BBB-USDT", "LONG", now))
+            written = os.path.exists(pt.MANUAL_REST_PATH)
+            legacy = types.SimpleNamespace(manual_rest={}, manual_rest_s=60.0, manual_rest_scope="symbol")
+            pt.Pulse.note_manual_close(legacy, types.SimpleNamespace(symbol="CCC-USDT", side="SHORT", set_id="x"), "ctrl-no-position")
+            sym_rest = pt.manual_rest_active(legacy.manual_rest, "CCC-USDT", "SHORT", now)
+        finally:
+            pt.MANUAL_REST_PATH = old
+    # the pick: the rested Set is skipped by _scope_choice, the next-ranked one is taken
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    wired = "st_.id not in rested" in src and src.count("pick_any(pack, ") >= 1 and "manual_rest_set_ids(getattr(self, \"manual_rest\", {}), symbol" in src
+    ok = ids == {"reversion:L:1m:sl1.0:st5"} and other == (set(), set()) and not written and sym_rest and wired
+    return ok, f"blocked Sets {sorted(ids)}, other side / symbol {other}, file written {written}, legacy symbol scope rests {sym_rest}, pick skips the Set {wired}"
+
+
 def a_manual_close_rests_only_that_symbol_and_direction():
     """Owner 2026-11-04: closing a position by hand must not make the engine reopen the exact same position, and must not stop trading. A position the venue no
     longer holds and that left no stop / target fill of ours (drop_ghost, a restored position gone) puts (symbol, side) to rest for manualCloseRestMin; the other
@@ -3200,6 +3227,7 @@ def a_manual_close_rests_only_that_symbol_and_direction():
         return any(isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr==name
                    for n in ast.walk(methods[method]))
     wired = ("manual_rest_active(getattr(self, \"manual_rest\", {}), sym, \"LONG\" if direction > 0 else \"SHORT\", time.time())" in src
+             and 'getattr(self, "manual_rest_scope", "set") != "set" and manual_rest_active' in src
              and calls('adopt_exchange_positions','drop_ghost')and calls('drop_ghost','note_manual_close')
              and calls('reconcile_restored_book','note_manual_close'))
     ok = active == [True, False, False] and not later and off and pruned == 1 and list(expired) == ["Y:LONG"] and list(saved) == ["AAA-USDT:LONG"] and wired
@@ -3810,6 +3838,7 @@ CHECKS = [
     ("trader.side-aware-group-gate-judges-long-and-short-groups-apart", the_side_aware_group_gate_judges_long_and_short_groups_apart),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
+    ("trader.a-manual-close-skips-only-the-exact-set-and-a-restart-forgets-it", a_manual_close_skips_only_the_exact_set_and_a_restart_forgets_it),
     ("trader.max-leverage-is-the-default-everywhere", max_leverage_is_the_default_everywhere),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),
     ("trader.volume-factor-is-bounded-and-defaults-to-the-minimum", volume_factor_is_bounded_and_defaults_to_the_minimum),
