@@ -13,6 +13,7 @@ each entry gives its packs their own TP-step range, SL ratios and Set types (the
 """
 from __future__ import annotations
 
+import bisect
 import math
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -71,8 +72,57 @@ def _blocks(rows: Sequence[Tuple[float, ...]], tf: int) -> List[List[float]]:
     return out
 
 
-def signal(bars: Sequence[Sequence[float]], i: int, close_ts: float, pack: str) -> Tuple[int, float, str]:
-    """The pack's signal on 1m bar i (rows [o, h, l, c, v]); close_ts = the close time of bar i in seconds."""
+class Series:
+    """The completed UTC-aligned timeframe bars of one replay's minute series, built once per call (2026-11-24).
+
+    Bar k opens at ``base - 60 + 60 k`` (the close time of bar i is ``base + 60 i``). A window's completed blocks are exactly the
+    blocks of this whole-series list that lie inside it (same alignment, same numbers in the same order), so ``signal`` reads a
+    slice instead of rebuilding every window's rows and blocks on each of the 1m bars. Only integral base times qualify (``ok``).
+    """
+
+    def __init__(self, bars: Sequence[Sequence[float]], base_ts: float):
+        self.bars = bars
+        self.base = float(base_ts)
+        self.ok = self.base == int(self.base) and len(bars) > 0
+        self._of: Dict[int, Tuple[List[int], List[int], List[List[float]]]] = {}
+
+    def of(self, tf: int) -> Tuple[List[int], List[int], List[List[float]]]:
+        """(start rows, end rows, aggregated bars) of timeframe tf, the same blocks _blocks would give on any window."""
+        got = self._of.get(tf)
+        if got is not None:
+            return got
+        starts: List[int] = []
+        ends: List[int] = []
+        aggs: List[List[float]] = []
+        if tf == 1:
+            for k, r in enumerate(self.bars):
+                starts.append(k)
+                ends.append(k)
+                aggs.append([int(round((self.base - 60.0 + 60.0 * k) * 1000.0)), float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])])
+        else:
+            width = tf * 60000
+            n = len(self.bars)
+            rows = [(int(round((self.base - 60.0 + 60.0 * k) * 1000.0)), float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]))
+                    for k, r in enumerate(self.bars)]
+            s = 0
+            while s < n and rows[s][0] % width:
+                s += 1
+            while s + tf <= n:
+                blk = rows[s:s + tf]
+                starts.append(s)
+                ends.append(s + tf - 1)
+                aggs.append([rows[s][0], blk[0][1], max(r[2] for r in blk), min(r[3] for r in blk), blk[-1][4], sum(r[5] for r in blk)])
+                s += tf
+        got = (starts, ends, aggs)
+        self._of[tf] = got
+        return got
+
+
+def signal(bars: Sequence[Sequence[float]], i: int, close_ts: float, pack: str,
+           series: Optional[Series] = None) -> Tuple[int, float, str]:
+    """The pack's signal on 1m bar i (rows [o, h, l, c, v]); close_ts = the close time of bar i in seconds.
+
+    series (optional, a Series of the same bars): the same answer read from the whole-series blocks instead of this window's rows."""
     p = parse(pack)
     if p is None or i < 1:
         return (0, 0.0, "")
@@ -81,6 +131,21 @@ def signal(bars: Sequence[Sequence[float]], i: int, close_ts: float, pack: str) 
         return (0, 0.0, "")                                  # bar i does not complete a timeframe bar
     w = window_minutes(pack)
     lo = max(0, i + 1 - w)
+    if series is not None and series.ok and close_ts == series.base + 60.0 * i:
+        starts, ends, aggs = series.of(tf)
+        k_hi = bisect.bisect_right(ends, i) - 1
+        if k_hi < 0 or ends[k_hi] != i:
+            return (0, 0.0, "")                              # bar i does not complete a timeframe bar in the series
+        agg = aggs[bisect.bisect_left(starts, lo):k_hi + 1]
+        if len(agg) < 2 or agg[-1][0] + tf * 60000 != int(round(close_ts * 1000.0)):
+            return (0, 0.0, "")
+        try:
+            st = states([b[4] for b in agg], source, rng, [b[2] for b in agg], [b[3] for b in agg], [b[5] for b in agg])
+        except ValueError:
+            return (0, 0.0, "")
+        if st[-1] and st[-1] != st[-2]:
+            return (int(st[-1]), CONF, f"{source}:{rng}:t{tf}")
+        return (0, 0.0, "")
     open0 = close_ts - 60.0 - (i - lo) * 60.0
     rows = [(int(round((open0 + 60.0 * k) * 1000.0)), float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]))
             for k, r in enumerate(bars[lo:i + 1])]

@@ -68,7 +68,7 @@ def _one_symbol(args: Tuple[str, List[List[float]], int, float, List[str], Dict[
     for i in range(WARM, n - 2, step):
         for nm in names:
             try:
-                sig = ix.INDICATORS[nm](bars[max(0, i + 1 - ix.window_of(nm)) : i + 1])
+                sig = ix.resolve(nm)(bars[max(0, i + 1 - ix.window_of(nm)) : i + 1])   # resolve: also composite names (name@relation)
             except Exception:
                 sig = None
             if not sig or sig[1] < ENTRY_CONF:
