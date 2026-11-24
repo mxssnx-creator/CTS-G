@@ -2,6 +2,9 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-24 (autonomous, after the owner set 3 h): x01 max hold back to 6 h (`timeStopS` 21600).** Counterfactual sim (48 h, 12 symbols, actual x01 overlay with the 2026-11-24 disables; executed PF / orders / net / time exits):
+  3 h 0.844 / 282 / -23.3 % / 93, **6 h 0.972 / 250 / -3.9 % / 18**; first 24 h 0.52 -> 0.80, last 24 h 2.00 -> 1.64 (mixed by half, clearly better overall). The disables themselves against the same Sets
+  before (8,532 Sets, 3 h): 0.831 / 260 -> 0.844 / 282 (first 24 h 0.49 -> 0.52, last 1.81 -> 2.00). Revert = `timeStopS` 10800.
 - **2026-11-24, owner: "Disable all non performing on live x01 Now and double vol factor. And list what was disabled."** x01 `volumeFactor` 0.4 -> **0.8**. Off, by the 2026-11-05
   rule (pooled PF < 0.8 on >= 35 orders AND every source with orders < 1; sources: live x01 closes, sim B2 5 days, sim qX 2 days): pack `general` (74 orders, PF 0.72; `stratGeneral`
   false), `reversion` LONG (135, 0.53; new key `packSidesOff` ["reversion:L"]), TP range `minimal` (154, 0.50; `tpRanges.minimal` false), SL ratio 1.0 (210, 0.62;
