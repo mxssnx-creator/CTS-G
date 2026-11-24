@@ -16,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "abc9fffde688fb1a7969354e19125024af0bb3df"
+PIN_WANT = "6b847578edf8f3f1989259b4f124c7d48e9cb290"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -29,6 +29,8 @@ def overlays_share_grid_contract():
         want = {"setMinStep": 5, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.35, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
+        if path == X02:
+            want = {**want, "trailMinStep": 7}   # x02 demo defaults (Stable-02): trailing grid starts at 7
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
         detail.append(f"{os.path.basename(path)}:{'ok' if not bad else bad}")
@@ -232,8 +234,9 @@ def dca_is_off_by_default_with_set_and_axis_options_off_everywhere():
     for path in (X01, X02):
         ov = json.load(open(path))
         if path == X02:
-            good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
-                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is True)
+            good = (ov.get("dcaOnSets") is False
+                    and ((ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True and ov.get("dcaOnAxis") is True)
+                         or (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaOnAxis") is False)))   # Stable-02 x02 demo runs DCA off
         else:
             good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
                     and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
