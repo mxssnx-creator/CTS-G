@@ -103,7 +103,7 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-current-symbol-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 80 and abs(float(x01.get("volumeFactor") or 0) - 0.05) < 1e-9,
+    rec("x01-current-symbol-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 120 and abs(float(x01.get("volumeFactor") or 0) - 0.4) < 1e-9,
         f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')} volumeFactor={x01.get('volumeFactor')}")
     rec("x01-owned-overall-controls", x01.get("overallFromOrderRanges") is True
         and x01.get("ownedQuantityControls") is True)
