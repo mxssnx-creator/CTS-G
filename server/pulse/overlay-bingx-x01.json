@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 0.05,
+  "volumeFactor": 0.2,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
@@ -11,12 +11,12 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 80,
+  "symbolCap": 120,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
   "trailGivePct": 0.1,
-  "timeStopS": 21600,
+  "timeStopS": 10800,
   "scratchS": 600,
   "scratchMinPct": 0.16,
   "scanS": 0.2,
@@ -138,7 +138,7 @@
     "exec.batch": true
   },
   "useMaxLeverage": true,
-  "setMinStep": 5,
+  "setMinStep": 3,
   "setStepMax": 32,
   "setStepAdapt": false,
   "trailMinStep": 3,
@@ -484,6 +484,6 @@
   ],
   "exitSets": false,
   "minPfAutoOrdersFactor": 0,
-  "tpStepMin": 5,
+  "tpStepMin": 3,
   "gateRecovery": true
 }

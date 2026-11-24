@@ -352,7 +352,7 @@ def long_and_wide_ranges_stop_at_sl_ratio_one_and_the_minimum_step_stays_two():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     ship = {_o.path.basename(f): (lambda d: (d.get("slMaxByRange"), d.get("setMinStep"), d.get("setStepAdapt")))(_j.load(open(f))) for f in files}
-    ship_ok = all(v[1:] == (5, False) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for name, v in ship.items())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
+    ship_ok = all(v[1:] == ((3 if name == 'overlay-bingx-x01.json' else 5), False) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for name, v in ship.items())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
     plain = SetBook()
     plain.load({"histEnabled": True})
     eng_ok = plain.step_adapt is False and plain.sl_max_by_range == {"long": 1.0, "wide": 1.0} and plain.min_step == 5
@@ -445,8 +445,8 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     # owner 2026-11-15 ("update min step defaults to make profit", live x02: TP Sets from 2.6 % PF 1.04 on 92 closes, all 0.77 on 264): the general packs' TP Sets start at
     # tpStepMin 26, then 5 (owner 2026-11-15 later, "set min step to 5"), and the trailing arms at trailStepMin 12 (1.2 %); every pack still runs, the trailing stops keep their reference step
     gen = [st.step for st in base if st.pack in ("general", "indications", "trend", "reversion", "flow", "multi", "breakout")]
-    ok = (all_packs <= {st.pack for st in b.by_idx} and not ({"trend", "multi"} & {st.pack for st in b.by_idx}) and gen and min(gen) == 5 and b.tp_step_min == 5 and b.trail_step_min == 12
-          and locks and b.trail_min_lock == 0.0 and b._trail_mid_step() == 19)   # setMinStep 5 (owner 2026-11-18): the middle of 5 .. 32 is 19, the trailing Sets stop at TRAIL_SL_RATIO x that TP (was 17 with setMinStep 2)
+    ok = (all_packs <= {st.pack for st in b.by_idx} and not ({"trend", "multi"} & {st.pack for st in b.by_idx}) and gen and min(gen) == 3 and b.tp_step_min == 3 and b.trail_step_min == 12
+          and locks and b.trail_min_lock == 0.0 and b._trail_mid_step() == 18)   # x01 setMinStep 3 (owner 2026-11-24): the middle of 3 .. 32 is 18 (19 with 5; setMinStep 5 owner 2026-11-18) (owner 2026-11-18): the middle of 5 .. 32 is 19, the trailing Sets stop at TRAIL_SL_RATIO x that TP (was 17 with setMinStep 2)
     return ok, f"x01 {len(b.by_idx)} Sets, lowest general TP step {min(gen) if gen else None}, trailing reference step {b._trail_mid_step()}, packs {sorted({st.pack for st in b.by_idx})[:8]}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
 

@@ -26,7 +26,7 @@ def overlays_share_grid_contract():
     detail = []
     for path in (X01, X02):
         ov = json.load(open(path))
-        want = {"setMinStep": 5, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
+        want = {"setMinStep": 3 if path == X01 else 5, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.35, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
         if path == X02:
@@ -102,6 +102,10 @@ def _ts_default(raw):
 
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
+    "setMinStep": "owner 2026-11-24, x01 only: grid minimum step 3; the desk default stays 5",
+    "tpStepMin": "owner 2026-11-24, x01 only: TP Sets from step 3; the desk default stays 5",
+    "timeStopS": "owner 2026-11-24, x01 only: max hold 3 h (10800 s); the desk default stays 6 h",
+    "volumeFactor": "owner 2026-11-24, x01 only: volume factor 0.2; the desk default stays the minimum 0.05",
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
     "symbolCap": "x01 uses 30 symbols by owner request; the shared desk default remains 50",
     # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
