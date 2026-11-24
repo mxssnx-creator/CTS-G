@@ -1137,6 +1137,7 @@ def bar_signal(
     ind_settings: Dict[str, Any],
     ts: float,
     ported_async: bool = False,
+    series: Optional[Any] = None,
 ) -> Dict[str, Tuple[int, float, str]]:
     """The signal of every pack on bar i, read from the closed bars up to and including i (each pack its own window).
     The one per-bar rule: the replay (pack_signals) and the live entries (SetBook.entry_signal) both call it, so a live
@@ -1169,7 +1170,7 @@ def bar_signal(
             source = extra[pk]
             row[pk] = thin[source] if source in thin else _variant_signal(hist, [source])
         elif pk.startswith(signal_packs.PREFIX):
-            row[pk] = signal_packs.signal(bars, i, ts, pk)
+            row[pk] = signal_packs.signal(bars, i, ts, pk, series)
     return row
 
 
@@ -1252,6 +1253,7 @@ def pack_signals(
     used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
     sig_w = signal_window(packs, ind_settings)      # the memo key covers every bar a pack reads
     pre: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    series = signal_packs.Series(bars, base_ts) if any(p.startswith(signal_packs.PREFIX) for p in packs) else None   # 2026-11-24: whole-series blocks, bit-identical
     if workers and n - warmup >= 96:
         # opt-in worker processes (overlay replayWorkers): the bars no memo entry covers are computed in parallel, window by window, exactly as bar_signal reads them
         # below; every other bar, and every bar the pool could not do, takes the loop's own path
@@ -1283,7 +1285,7 @@ def pack_signals(
                 if on_step and i % 50 == 0:
                     on_step()
                 continue
-        row = pre.get(i) or bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
+        row = pre.get(i) or bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S, series=series)
         for p in packs:
             signals[p][i] = row.get(p, _NO_SIGNAL)
         if key is not None:
