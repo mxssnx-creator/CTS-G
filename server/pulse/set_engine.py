@@ -138,6 +138,7 @@ WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = TP_STEP_MIN
+SET_MIN_STEP_DEFAULT = 5          # setMinStep absent: the grid minimum (owner 2026-11-18, x01 runs it); STEP_MIN (2) stays the lowest step a grid may ask for
 STEP_MAX = TP_STEP_MAX                       # the ceiling
 STEP_DEFAULT_MAX = TP_STEP_DEFAULT_MAX       # the shipped grid's last step
 HIST_CAP = 80
@@ -2765,7 +2766,7 @@ class SetBook:
         self.step_hold = parse_step_hold(ov.get("stepHoldOn"), ov.get("stepHoldMin")) if self.hold_on else {}
         opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
-        self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
+        self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or SET_MIN_STEP_DEFAULT)
         self.tp_step_min = int(max(0, min(STEP_MAX, finite(ov.get("tpStepMin"), 0.0))))      # the TP / Exit Sets' lowest step (0 = setMinStep)
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_DEFAULT_MAX, self.min_step_cfg, STEP_MAX)
         # owner 2026-11-03: the minimum TP step is 2 and stays there; step-adapt (raise it after losing live fills) is off by default -- on x02 it had

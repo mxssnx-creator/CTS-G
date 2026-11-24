@@ -783,7 +783,7 @@ function SettingsPage() {
                   min={2}
                   max={TP_STEP_MAX}
                   step={1}
-                  hint={`TP = k × ${TP_UNIT_PCT}% of price, whatever PositionCost is. Default 2 (grid start 0.2%). k = ${overlay.setMinStep} → TP ${tpPctOfStep(overlay.setMinStep).toFixed(1)}%. Losing live fills raise min step.`}
+                  hint={`TP = k × ${TP_UNIT_PCT}% of price, whatever PositionCost is. Default 5 (grid start 0.5%; it also sets the trailing Sets reference step). k = ${overlay.setMinStep} → TP ${tpPctOfStep(overlay.setMinStep).toFixed(1)}%. Losing live fills raise min step.`}
                   onChange={(v) => patch("setMinStep", Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(v))))}
                 />
                 <Slider

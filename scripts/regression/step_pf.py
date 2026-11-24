@@ -390,6 +390,10 @@ def shipped_micro_floor_is_positive_and_shared_by_every_stage():
     failures, checked = [], 0
     for path in Path(PULSE).glob('overlay-*.json'):
         raw = json.loads(path.read_text())
+        if int(raw.get('setMinStep') or 2) > 3:
+            # the grid starts above the Micro steps (2-3): no Micro Set exists, but the floor setting must still be shipped
+            if raw.get('minPfByRange', {}).get('micro') != 1.01: failures.append(path.name + ': micro floor not 1.01')
+            continue
         book = se.SetBook(); book.load({**raw, 'minPfByStep': True})   # the step table itself (the shipped overlays run one floor, 1.3)
         micro_sets = [st for st in book.by_idx if book.step_bucket(st) in (2, 3) and not se.is_signal_pack(st.pack)]
         if raw.get('minPfByRange', {}).get('micro') != 1.01 or not micro_sets:
@@ -399,7 +403,7 @@ def shipped_micro_floor_is_positive_and_shared_by_every_stage():
             got |= {book.stage_params(st.pack, st).floor_for(n) for n in (1,5,10,20,50)}
             if got != {1.01}: failures.append((path.name, st.id, got))
             checked += 1
-    return checked > 0 and not failures, f'{checked} Micro sets; all stage floors = 1.01; failures={failures[:3]}'
+    return not failures, f'{checked} Micro sets; all stage floors = 1.01; failures={failures[:3]}'
 
 
 def min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates():

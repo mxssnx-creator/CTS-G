@@ -196,11 +196,12 @@ def trail_limit_matches_replay_levels():
 
 
 def setstep_clamp():
-    lo = _book(setMinStep=0)
+    lo = _book(setMinStep=0)                               # 0 = absent: the default grid minimum 5 (owner 2026-11-18)
+    two = _book(setMinStep=2)                              # an explicit 2 still builds the grid from 0.2 %
     hi = _book(setStepMax=99)                              # Wide off (the default): the steps above 3.2 % belong to Wide, so the grid ends at 32
     hi_wide = _book(setStepMax=99, tpRanges={"wide": True})   # Wide on: up to the ceiling, 5.0 %
     small = _book(setMinStep=9, setStepMax=3)
-    ok = (lo.steps[0] == 2 and hi.steps[-1] == TP_STEP_DEFAULT_MAX == 32 and hi_wide.steps[-1] == TP_STEP_MAX == 50
+    ok = (lo.steps[0] == 5 and two.steps[0] == 2 and hi.steps[-1] == TP_STEP_DEFAULT_MAX == 32 and hi_wide.steps[-1] == TP_STEP_MAX == 50
           and small.steps and small.steps[0] <= small.steps[-1])
     return ok, f"min0->{lo.steps[0]} max99->{hi.steps[-1]} (Wide on {hi_wide.steps[-1]}) min9max3->{small.steps}"
 
@@ -351,10 +352,10 @@ def long_and_wide_ranges_stop_at_sl_ratio_one_and_the_minimum_step_stays_two():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     ship = {_o.path.basename(f): (lambda d: (d.get("slMaxByRange"), d.get("setMinStep"), d.get("setStepAdapt")))(_j.load(open(f))) for f in files}
-    ship_ok = all(v[1:] == ((5, False) if name == "overlay-bingx-x01.json" else (2, False)) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for name, v in ship.items())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
+    ship_ok = all(v[1:] == (5, False) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for name, v in ship.items())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
     plain = SetBook()
     plain.load({"histEnabled": True})
-    eng_ok = plain.step_adapt is False and plain.sl_max_by_range == {"long": 1.0, "wide": 1.0} and plain.min_step == 2
+    eng_ok = plain.step_adapt is False and plain.sl_max_by_range == {"long": 1.0, "wide": 1.0} and plain.min_step == 5
     ok = not over and gone_ok and kept_ok and ship_ok and eng_ok
     return ok, (f"capped grid: {len(over)} Long/Wide Sets over 1.0, {len(gone)} removed (all of them Long/Wide over 1.0 {gone_ok}), the rest unchanged {kept_ok}; "
                 f"shipped (slMaxByRange, setMinStep, setStepAdapt) {set(map(str, ship.values()))}; engine default adapt {plain.step_adapt} min step {plain.min_step}")

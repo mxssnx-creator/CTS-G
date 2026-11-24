@@ -532,7 +532,7 @@
     120
   ],
   "setMinSamples": 12,
-  "setMinStep": 2,
+  "setMinStep": 5,
   "setStepMax": 8,
   "setTrailingDistance": "dynamic",
   "setStepAdapt": false,

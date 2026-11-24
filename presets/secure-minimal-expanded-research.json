@@ -284,7 +284,7 @@
     120
   ],
   "setMinSamples": 12,
-  "setMinStep": 2,
+  "setMinStep": 5,
   "setStepMax": 8,
   "setStepAdapt": false,
   "trailMinStep": 3,

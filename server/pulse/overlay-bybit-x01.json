@@ -130,7 +130,7 @@
     "exec.batch": true
   },
   "useMaxLeverage": true,
-  "setMinStep": 2,
+  "setMinStep": 5,
   "setStepMax": 32,
   "setStepAdapt": false,
   "trailMinStep": 3,

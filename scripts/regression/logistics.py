@@ -26,7 +26,7 @@ def overlays_share_grid_contract():
     detail = []
     for path in (X01, X02):
         ov = json.load(open(path))
-        want = {"setMinStep": 5 if path == X01 else 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
+        want = {"setMinStep": 5, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.35, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
@@ -37,7 +37,7 @@ def overlays_share_grid_contract():
 
 def desk_defaults_match_engine():
     src = open(CONFIG_MODEL, encoding="utf-8").read()
-    need = [r"setMinStep: 2,", r"setStepMax: TP_STEP_DEFAULT_MAX,", r"export const TP_STEP_DEFAULT_MAX = 32;", r"export const TP_STEP_MAX = 50;", r"trailMinStep: 3,", r"histLookbackBars: 1920",
+    need = [r"setMinStep: 5,", r"setStepMax: TP_STEP_DEFAULT_MAX,", r"export const TP_STEP_DEFAULT_MAX = 32;", r"export const TP_STEP_MAX = 50;", r"trailMinStep: 3,", r"histLookbackBars: 1920",
             r"setMinPf: GATE_MIN_PF_DEFAULT,", r"export const SL_SET_RATIOS"]
     missing = [p for p in need if not re.search(p, src)]
     # the desk fallback and the engine gate default are one number kept in two files
@@ -106,7 +106,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     # balance-based size and the 18 % halt for every other connection
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
-    "volumeFactor": "owner 2026-11-15: x01 runs the volume factor 0.15 (3 x the minimum; earlier 5.0, 1.0, 0.4); the desk default stays the minimum 0.05",
+    "volumeFactor": "owner 2026-11-18: x01 runs the volume factor 0.225 (4.5 x the minimum; earlier 0.15, 5.0, 1.0, 0.4); the desk default stays the minimum 0.05",
     "minPfStepRatio": "owner 2026-11-04: x01 asks 1 + TP % x 0.1 (lower floors, more positions open); the shared desk default is 0.2",
     "minPfStepAutoHigh": "owner 2026-11-04: x01 caps every TP step's floor at 1.15; the shared desk default is uncapped (2.0)",
     "minPfStepAuto": "owner 2026-11-04: x01 runs the manual per-step floors (1 + TP % x ratio), Auto PF off; the shared desk default keeps Auto on",
@@ -114,7 +114,6 @@ DESK_DEFAULT_EXCEPTIONS = {
     "stratBreakout": "owner 2026-11-04: signals on at x01 and x02 (trend + breakout packs); the shared desk default keeps the extra packs off",
     "stratShortRange": "owner 2026-11-05: x01 switches Short Range off (live 0.26 on 5, replay 0.76 on 39 orders over C / B / A); the shared desk default keeps it on",
     "trailMinLockPct": "owner 2026-11-05: x01 builds no trailing pair that locks under 0.2 % (live 0.14 PF on 53 closes); the shared desk default is 0 (every pair)",
-    "setMinStep": "owner 2026-11-18: x01 runs the grid minimum 5 (it also moves the trailing Sets' reference step 17 -> 19); the shared desk and engine default stays 2",
     "ddHaltPct": "owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (x01 and x02); the Bybit overlays keep 18",
 }
 
