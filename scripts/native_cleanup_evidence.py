@@ -1,4 +1,5 @@
 """Bounded, read-only terminal evidence for exact journaled VST orders."""
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait
 import time
 
@@ -19,6 +20,10 @@ def resolve_bound_intents(api, intents, unresolved, deadline, order_bodies, bind
     receipt bound to this submission supplies an alternative lookup identity.
     """
     remaining = set(unresolved)
+    ids_by_client = defaultdict(set)
+    for (symbol, oid), submitted in bindings.items():
+        client = str(submitted.get('clientOrderID') or submitted.get('clientOrderId') or '').lower()
+        ids_by_client[symbol, client].add(str(oid))
     for intent in intents:
         if intent['method'] != 'POST' or definite_refusal(intent.get('response') or {}):
             continue
@@ -28,9 +33,7 @@ def resolve_bound_intents(api, intents, unresolved, deadline, order_bodies, bind
             cid = body['clientOrderID']
             if cid not in remaining or time.monotonic() >= deadline:
                 continue
-            ids = {str(oid) for (symbol, oid), submitted in bindings.items()
-                   if symbol == body['symbol'] and
-                   str(submitted.get('clientOrderID') or submitted.get('clientOrderId') or '').lower() == cid.lower()}
+            ids = set(ids_by_client.get((body['symbol'], cid.lower()), ()))
             ids.update(str(row['orderId']) for row in candidates if isinstance(row, dict) and row.get('orderId') and
                        row.get('symbol') == body['symbol'] and
                        str(row.get('clientOrderID') or row.get('clientOrderId') or '').lower() == cid.lower())
@@ -98,12 +101,17 @@ def terminal_intents(api, intents, deadline, order_bodies, remember=None, allow_
                 pass  # Missing terminal evidence remains unresolved, never an empty success.
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+    by_client = defaultdict(list)
+    for symbol, orders in histories.items():
+        for row in orders:
+            if isinstance(row, dict):
+                cid = str(row.get('clientOrderID') or row.get('clientOrderId') or '').lower()
+                by_client[symbol, cid].append(row)
     unresolved = []
     for body, oid in required:
         cid = body['clientOrderID']
-        rows = [row for row in histories.get(body['symbol'], []) if isinstance(row, dict) and
-                str(row.get('clientOrderID') or row.get('clientOrderId') or '').lower() == cid.lower() and
-                (not oid or str(row.get('orderId') or row.get('orderID') or '') == oid)]
+        rows = [row for row in by_client.get((body['symbol'], cid.lower()), ())
+                if not oid or str(row.get('orderId') or row.get('orderID') or '') == oid]
         row = rows[0] if len(rows) == 1 else None
         matched = row is not None and all(row.get(k) == body.get(k) for k in ('symbol', 'side', 'positionSide', 'type'))
         final = matched and (str(row.get('status')).upper() in TERMINAL or

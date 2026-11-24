@@ -3165,9 +3165,11 @@ class SetBook:
             pack_kinds = SET_KINDS
             if pr:
                 # an indicationConfigs entry: its own TP-step range, SL ratios and Set types for this indication
-                pack_steps = list(range(int(pr["lo"]), int(pr["hi"]) + 1))
+                pack_steps = list(range(max(int(pr["lo"]), self.tp_step_min), int(pr["hi"]) + 1))
                 pack_ratios = list(pr["ratios"])
                 pack_kinds = tuple(pr["kinds"])
+            elif pack == SHORT_PACK:
+                pack_steps = [step for step in pack_steps if step >= self.tp_step_min]
             if self.price_distance_grid:
                 pack_ratios = self.price_sl_distances
             pack_trails = trails if "trail" in pack_kinds else []

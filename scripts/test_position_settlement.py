@@ -23,6 +23,35 @@ def sample():
 
 
 class Settlement(unittest.TestCase):
+    def test_quantity_only_restart_does_not_adopt_inventory_from_tagged_control(self):
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.open, p.px = {}, {}
+        p.overlay = {"ownedQuantityControls": True}
+        p.api = SimpleNamespace(get=lambda path: {"code": 0, "data": [
+            {"symbol": "A-USDT", "positionSide": "LONG", "positionAmt": "10", "avgPrice": "100",
+             "leverage": "5"}]})
+        p.our_orders = lambda symbol: [{"positionSide": "LONG", "clientOrderId": pt.TAG + "uCase"}]
+        p.save_open_book = lambda: True
+        p.adopt_exchange_positions()
+        self.assertFalse(p.open)
+        self.assertEqual(p.unverified_venue_symbols, {"A-USDT"})
+        self.assertEqual(p.ignored_foreign, 1)
+        self.assertIn("owned inventory unverified", p.last_error)
+        self.assertFalse(p.flatten_untracked("A-USDT", "LONG", 10, 100))
+
+    def test_quantity_only_snapshot_cannot_increase_confirmed_owned_volume(self):
+        p = pt.Pulse.__new__(pt.Pulse)
+        pos = pt.Position("A-USDT", "LONG", 2, 100, 1000, 99, 102, 100, client_id=pt.TAG + "oCase")
+        p.open, p.px = {pos.symbol: pos}, {}
+        p.overlay = {"ownedQuantityControls": True}
+        p.api = SimpleNamespace(get=lambda path: {"code": 0, "data": [
+            {"symbol": pos.symbol, "positionSide": pos.side, "positionAmt": "9", "avgPrice": "90"}]})
+        p.our_orders = lambda symbol: []
+        p.save_open_book = lambda: True
+        p.adopt_exchange_positions()
+        self.assertEqual((pos.qty, pos.entry, pos.notional), (2, 100, 200))
+        self.assertEqual(p.unverified_venue_symbols, {pos.symbol})
+
     def test_position_snapshot_cannot_round_an_owned_fill_entry(self):
         sys.path.insert(0,str(Path(__file__).resolve().parent/'regression'))
         from trader import _isolated,_StubExchange,_enter

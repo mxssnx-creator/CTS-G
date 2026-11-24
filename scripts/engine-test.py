@@ -103,13 +103,22 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-current-symbol-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 120 and abs(float(x01.get("volumeFactor") or 0) - 0.15) < 1e-9,
+    rec("x01-current-symbol-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 130 and abs(float(x01.get("volumeFactor") or 0) - 0.15) < 1e-9,
         f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')} volumeFactor={x01.get('volumeFactor')}")
+    rec("x01-owned-overall-controls", x01.get("overallFromOrderRanges") is True
+        and x01.get("ownedQuantityControls") is True)
     rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-cap", int(x01.get("blockMaxStack") or 0) == 6, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 0, str(x01.get("dcaMaxSteps")))
     rec("x01-set-unlim", "setMaxActive" not in x01, "the set count is never limited (setMaxActive removed)")
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 150, f"cap={x02.get('symbolCap')} (owner 2026-11-15: x02 reruns with 150 symbols; configuration is not evidence of a running account)")
+    rec("x02-all", x02.get("symbolsAll") is True and x02.get("symbolCap") == 100, f"cap={x02.get('symbolCap')}")
+    rec("x02-step-defaults", x02.get("setMinStep") == x02.get("tpStepMin") == 5
+        and x02.get("trailMinStep") == x02.get("trailStepMin") == 7)
+    rec("x02-strategy-defaults", x02.get("exitSets") is False and x02.get("stratDca") is False
+        and x02.get("dcaEnabled") is False and x02.get("tpRanges", {}).get("wide") is False
+        and x02.get("trailRanges", {}).get("wide") is False)
+    rec("x02-owned-overall-controls", x02.get("overallFromOrderRanges") is True
+        and x02.get("ownedQuantityControls") is True)
     rec("unlimited-position-cap", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-block-cap-and-unlimited-dca", int(x02.get("blockMaxStack") or 0) == 6 and int(x02.get("dcaMaxSteps") or 0) == 0)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
