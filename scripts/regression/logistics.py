@@ -108,7 +108,6 @@ DESK_DEFAULT_EXCEPTIONS = {
     # balance-based size and the 18 % halt for every other connection
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
-    "volumeFactor": "owner 2026-11-18: x01 runs the volume factor 0.225 (4.5 x the minimum; earlier 0.15, 5.0, 1.0, 0.4); the desk default stays the minimum 0.05",
     "minPfStepRatio": "owner 2026-11-04: x01 asks 1 + TP % x 0.1 (lower floors, more positions open); the shared desk default is 0.2",
     "minPfStepAutoHigh": "owner 2026-11-04: x01 caps every TP step's floor at 1.15; the shared desk default is uncapped (2.0)",
     "minPfStepAuto": "owner 2026-11-04: x01 runs the manual per-step floors (1 + TP % x ratio), Auto PF off; the shared desk default keeps Auto on",
