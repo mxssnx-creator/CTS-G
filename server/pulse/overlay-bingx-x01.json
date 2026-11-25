@@ -458,6 +458,12 @@
       "types": [
         "base",
         "trail"
+      ],
+      "sources": [
+        "macd-cross",
+        "bb-bounce",
+        "ema-cross",
+        "ema-trend"
       ]
     },
     {
@@ -475,6 +481,12 @@
       ],
       "types": [
         "trail"
+      ],
+      "sources": [
+        "macd-cross",
+        "bb-bounce",
+        "ema-cross",
+        "ema-trend"
       ]
     }
   ],
