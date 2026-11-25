@@ -14,7 +14,7 @@ import math
 import os
 from typing import Any
 
-SOURCES = ('config', 'overall', 'symbol', 'direction', 'indication', 'strategy', 'coordination', 'range')
+SOURCES = ('config', 'configAll', 'overall', 'symbol', 'direction', 'indication', 'strategy', 'coordination', 'range')
 MAX_STACK = 8.0
 DEFAULT = {'id': 'relate-12', 'enabled': False, 'steps': 12, 'ratio': .2,
            'mode': 'shared', 'sources': ['config', 'symbol'], 'lastN': 250,
@@ -38,12 +38,12 @@ def clean_configs(raw):
             raise ValueError('Relate policy IDs must be unique nonempty strings')
         ids.add(c['id'])
         if not isinstance(c['enabled'], bool): raise ValueError('Relate enabled must be boolean')
-        for key, lo, hi in [('steps', 2, 15), ('lastN', 60, 250), ('minTrades', 60, 250)]:
+        for key, lo, hi in [('steps', 2, 15), ('lastN', 10, 250), ('minTrades', 5, 250)]:
             x=c[key]
             if not finite(x) or x != int(x) or not lo <= x <= hi: raise ValueError('Invalid Relate '+key)
             c[key]=int(x)
         if c['minTrades'] > c['lastN']: raise ValueError('Relate minTrades exceeds lastN')
-        for key, lo, hi in [('ratio', .2, 6), ('minPf', 1.000001, 100), ('maxStack', 1, MAX_STACK), ('maxSlRatio', .01, .5)]:
+        for key, lo, hi in [('ratio', .2, 6), ('minPf', 1.000001, 100), ('maxStack', 1, MAX_STACK), ('maxSlRatio', .01, 1.25)]:
             if not finite(c[key]) or not lo <= c[key] <= hi: raise ValueError('Invalid Relate '+key)
         if abs(c['ratio']*5-round(c['ratio']*5)) > 1e-9: raise ValueError('Relate ratios use 0.2 increments')
         if c['mode'] not in ('shared','additive'): raise ValueError('Invalid Relate mode')
@@ -65,6 +65,8 @@ def identity_keys(x):
     lane=x['lane']
     return {
         'config': json.dumps([x[k] for k in required],separators=(',',':')),
+        # owner 2026-11-25: the same Set (config id, side, lane) over ALL symbols: the config-wide scope ("use own configs scope")
+        'configAll': json.dumps(['configAll',x['config'],x['side'],lane],separators=(',',':')),
         'overall': json.dumps(['overall',lane]),
         'symbol': json.dumps([x['symbol'],x['side'],lane]),
         'direction': json.dumps([x['side'],lane]),

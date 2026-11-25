@@ -1,4 +1,4 @@
-export const RELATE_SOURCES = ["config", "overall", "symbol", "direction", "indication", "strategy", "coordination", "range"] as const;
+export const RELATE_SOURCES = ["config", "configAll", "overall", "symbol", "direction", "indication", "strategy", "coordination", "range"] as const;
 export type RelateSource = (typeof RELATE_SOURCES)[number];
 export type RelateConfig = {
   id: string; enabled: boolean; steps: number; ratio: number; mode: "shared" | "additive";
@@ -19,8 +19,8 @@ export function relateConfigs(raw: unknown): RelateConfig[] {
     ids.add(c.id);
     if (typeof c.enabled !== "boolean" || !["shared", "additive"].includes(c.mode)) throw new Error("Invalid Relate mode");
     for (const [key, lo, hi, integer] of [
-      ["steps",2,15,true], ["lastN",60,250,true], ["minTrades",60,250,true],
-      ["ratio",.2,6,false], ["minPf",1.000001,100,false], ["maxStack",1,8,false], ["maxSlRatio",.01,.5,false],
+      ["steps",2,15,true], ["lastN",10,250,true], ["minTrades",5,250,true],
+      ["ratio",.2,6,false], ["minPf",1.000001,100,false], ["maxStack",1,8,false], ["maxSlRatio",.01,1.25,false],
     ] as const) {
       const n = c[key];
       if (typeof n !== "number" || !Number.isFinite(n) || n < lo || n > hi || (integer && !Number.isInteger(n))) throw new Error(`Invalid Relate ${key}`);

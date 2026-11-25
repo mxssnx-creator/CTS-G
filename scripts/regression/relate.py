@@ -89,14 +89,47 @@ def persistence_and_loss_basis():
         return not b2.error and b2.closed==61 and result['total']==1 and v['loss']>0 and not b2.close(d,'tiny-loss',203,.1,accepted=True,final=True), str(v)
 
 def config_bounds():
-    bad=[{'ratio':.3},{'steps':16},{'minPf':1},{'maxSlRatio':.5001},{'lastN':20},{'minTrades':61,'lastN':60},{'maxStack':9},{'sources':['unknown']},{'id':''}]
+    bad=[{'ratio':.3},{'steps':16},{'minPf':1},{'maxSlRatio':1.2501},{'lastN':9},{'minTrades':4},{'minTrades':61,'lastN':60},{'maxStack':9},{'sources':['unknown']},{'id':''}]
     n=0
     for patch in bad:
         try:clean_configs([config(**patch)])
         except ValueError:n+=1
     return n==len(bad),f'refused={n}/{len(bad)}'
 
-CHECKS=[('relate.twelve-step-growth-loss-reset',progression_twelve_steps),('relate.exact-context-isolation',independent_contexts),
+def config_wide_source_pools_symbols():
+    """Owner 2026-11-25: source `configAll` is the same Set (config id, side, lane) over ALL symbols. Ten closes spread over two symbols qualify it, while the per-symbol
+    `config` source of either symbol (5 closes each) does not reach minTrades 10."""
+    cfg=config(sources=['config','configAll'],lastN=20,minTrades=10,minPf=1.05,maxStack=2.)
+    b=RelateBook([cfg]);a=dict(ID);c=dict(ID,symbol='ETH-USDT')
+    for i in range(10):
+        ident=a if i%2==0 else c
+        d=b.decide(ident,i*2,.003,.01,qualified=True)
+        b.close(d,'w%d'%i,i*2+1,.01,accepted=True,final=True)
+    d=b.decide(a,100,.003,.01,qualified=True);parts=next(iter(d['policies'].values()))['parts']
+    only=RelateBook([config(sources=['config'],lastN=20,minTrades=10)])
+    for i in range(10):
+        ident=a if i%2==0 else c
+        e=only.decide(ident,i*2,.003,.01,qualified=True);only.close(e,'o%d'%i,i*2+1,.01,accepted=True,final=True)
+    e=only.decide(a,100,.003,.01,qualified=True)
+    return parts['configAll']['level']>0 and parts['config']['level']==0 and e['total']==1.,f"configAll level {parts['configAll']['level']}, per-symbol config level {parts['config']['level']}, config-only total {e['total']}"
+
+def lowered_minimum_and_stop_ceiling():
+    """minTrades 10 qualifies at 10 closes and not at 9; maxSlRatio 1.25 admits a stop of 1.2 x TP and refuses 1.3 x TP."""
+    def run(n,sl):
+        b=RelateBook([config(sources=['config'],lastN=20,minTrades=10,maxSlRatio=1.25)]);warm(b,n=n)
+        d=b.decide(ID,500,sl,.01,qualified=True);return next(iter(d['policies'].values()))['parts']['config']['level']
+    ok10,ok9=run(10,.003),run(9,.003)
+    near,far=run(10,.012),run(10,.013)
+    return ok10>0 and ok9==0 and near>0 and far==0,f'level at 10 closes {ok10}, at 9 {ok9}; stop 1.2 x TP {near}, 1.3 x TP {far}'
+
+def default_policy_is_unchanged_by_the_new_source():
+    """A policy without configAll builds the same receipt parts and keys as before the source existed."""
+    b=RelateBook([config()]);warm(b);d=b.decide(ID,200,.003,.01,qualified=True)
+    p=next(iter(d['policies'].values()))
+    return set(p['parts'])=={'config'} and p['parts']['config']['level']==1 and d['total']>1,f"sources {sorted(p['parts'])}, level {p['parts']['config']['level']}, total {d['total']}"
+
+CHECKS=[('relate.config-wide-source-pools-symbols',config_wide_source_pools_symbols),('relate.lowered-minimum-and-stop-ceiling',lowered_minimum_and_stop_ceiling),('relate.default-policy-unchanged-by-the-new-source',default_policy_is_unchanged_by_the_new_source),
+ ('relate.twelve-step-growth-loss-reset',progression_twelve_steps),('relate.exact-context-isolation',independent_contexts),
  ('relate.effective-stop-cost-floor-half-target',stop_and_cost_floor),('relate.parent-partials-unknown-idempotence',partials_unknown_duplicates),
  ('relate.future-exclusion-immutable-policy',future_and_policy_edit),('relate.parallel-portions-total-cap',parallel_shared_additive_cap),
  ('relate.restart-tiny-loss-preservation',persistence_and_loss_basis),('relate.settings-boundaries',config_bounds)]

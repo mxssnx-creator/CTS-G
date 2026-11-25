@@ -1408,11 +1408,11 @@ function SettingsPage() {
                     <Toggle label="Enable policy" on={cfg.enabled} onChange={enabled => update({ enabled })} />
                     <Num label="Winning steps" value={cfg.steps} min={2} max={15} step={1} onChange={steps => update({ steps })} />
                     <Num label="Increase ratio" value={cfg.ratio} min={.2} max={6} step={.2} onChange={ratio => update({ ratio })} />
-                    <Num label="Maximum SL / TP" value={cfg.maxSlRatio} min={.01} max={.5} step={.01} onChange={maxSlRatio => update({ maxSlRatio })} />
+                    <Num label="Maximum SL / TP" value={cfg.maxSlRatio} min={.01} max={1.25} step={.01} hint="Only entries whose stop is within this share of their target may be raised (default 0.5; x01 runs 0.75 / 1.25 stops)." onChange={maxSlRatio => update({ maxSlRatio })} />
                     <Num label="Policy stack ceiling" value={cfg.maxStack} min={1} max={8} step={.25} hint="Parallel policies share a total 8× ceiling, including Block and DCA." onChange={maxStack => update({ maxStack })} />
                     <Num label="Minimum return PF" value={cfg.minPf} min={1.01} max={10} step={.01} onChange={minPf => update({ minPf })} />
-                    <Num label="Last-N parent closes" value={cfg.lastN} min={cfg.minTrades} max={250} step={1} onChange={lastN => update({ lastN })} />
-                    <Num label="Minimum parent closes" value={cfg.minTrades} min={60} max={cfg.lastN} step={1} onChange={minTrades => update({ minTrades })} />
+                    <Num label="Last-N parent closes" value={cfg.lastN} min={Math.max(10, cfg.minTrades)} max={250} step={1} onChange={lastN => update({ lastN })} />
+                    <Num label="Minimum parent closes" value={cfg.minTrades} min={5} max={cfg.lastN} hint="Each source qualifies on its own closes. configAll = the same Set over all symbols (config-wide scope)." step={1} onChange={minTrades => update({ minTrades })} />
                     <label className="text-sm">Relation combination<select className="mt-1 block w-full rounded border p-2" value={cfg.mode} onChange={e => update({ mode: e.target.value === "additive" ? "additive" : "shared" })}><option value="shared">Shared average</option><option value="additive">Additive</option></select></label>
                     {RELATE_SOURCES.map(source => <Toggle key={source} label={source} on={cfg.sources.includes(source)} onChange={on => {
                       const sources = on ? [...cfg.sources, source] : cfg.sources.filter(s => s !== source);
