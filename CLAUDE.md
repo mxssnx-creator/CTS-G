@@ -2,6 +2,12 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-25, owner: Relate on x01 ("von 60 auf 12", all relations, last-N by samples, loss in a row).** Engine: sources `configAll` (the same Set over all symbols) and `step` (TP step), `maxLossRun` (longest losing streak inside the last-N window,
+  0 = off; policy identity unchanged when 0), minimum closes 5 and last-N 10 lower bounds, stop ceiling 1.25, identity `step` from `Pulse.place`; desk settings, 20 `relate.*` checks, `trader.relate-identity-carries-the-tp-step`, `src/lib/relate-config.test.ts`,
+  `scripts/relate_x01_study.py`. **Measured (RelateBook driven over stored executed parents, weighted PF with / without Relate, minTrades 12, maxStack <= 2): 8 settings passed development (3 windows incl. the Micro + Minimal + Low-Range sim `qM`),
+  0 held on both confirmation windows; at minTrades 5 and maxStack 3 two settings held (sources direction + step + range, lastN 120, maxLossRun 3: dev 1.196 / 1.170, confirm 1.183 / 1.145 and 0.908 / 0.882) but they raise entries to x3 and read 0.510 / 0.509 on live.**
+  Relate sizes entries, it does not create an edge. **Shipped by the owner's instruction, conservative and unproven:** policy `relate-x01` (sources configAll + step, steps 4, ratio 0.2, shared, lastN 24, minTrades 12, minPf 1.2, maxStack 1.5, maxSlRatio 0.8, maxLossRun 3). Revert = `enabled` false.
+  **Micro + Minimal + shortrange back on (`qM`, 48 h, 12 symbols): executed PF 1.067 / 269 orders / +8.95 % against the current x01 1.145 / 223 / +16.14 %** (first 24 h 0.98 vs 0.87, last 24 h 1.48 vs 1.78; micro 0.24 on 10, minimal 0.98 on 55): the ship rule (better on both halves) is not met, so minimal / micro stay off.
 - **2026-11-25, owner: "Double x01 vol factor."** x01 `volumeFactor` 0.8 -> **1.6** (80 symbols, hot reload). One position is balance x 5 % x 1.6 notional; a stop costs twice what it cost at 0.8. Revert = 0.8.
 - **2026-11-25, owner: "Disable non performing TP on x01 now."** `tpStepsOff` [5, 6, 7, 9, 19, 30, 31] on x01 (7 / 9 / 19 were already off; new: 5, 6, 30, 31). Rule = 2026-11-05 (pooled PF < 0.8 on >= 35 orders,
   live PF < 1 or no live orders, at least half of the replay windows < 1; sources live x01, B2, qX, qF): step 5 100 orders PF 0.57, 6 76 / 0.54, 30 37 / 0.71, 31 35 / 0.59 (5 / 6 survive only in the Short Range and Signal packs).
