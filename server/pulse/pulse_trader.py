@@ -4372,6 +4372,7 @@ class Pulse:
                         qty, notional, margin = retry_qty, retry_notional, retry_margin
                         rel_mult, rel_why = 1.0, []          # the venue's minimum lot sized this entry, not a relation raise
                         rounds_mult, rounds_why = 1.0, []
+                        relate_receipt = None                # the lot may exceed the receipt's total: this entry teaches Relate nothing (the first reservation was released above)
                         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
                         r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
                         self.did_io = True
