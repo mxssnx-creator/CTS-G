@@ -2,6 +2,9 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-25, owner: "Disable non performing TP on x01 now."** `tpStepsOff` [5, 6, 7, 9, 19, 30, 31] on x01 (7 / 9 / 19 were already off; new: 5, 6, 30, 31). Rule = 2026-11-05 (pooled PF < 0.8 on >= 35 orders,
+  live PF < 1 or no live orders, at least half of the replay windows < 1; sources live x01, B2, qX, qF): step 5 100 orders PF 0.57, 6 76 / 0.54, 30 37 / 0.71, 31 35 / 0.59 (5 / 6 survive only in the Short Range and Signal packs).
+  Mixed or thin, kept: 8 (0.81 on 83), 20 / 21 / 27 / 32 (20-26 orders). Same caveat as 2026-11-06 (isolated-PF removal needs its own counterfactual). Revert = the old list [7, 9, 19].
 - **2026-11-24 (later), owner: "On x01 live: disable non performing SL ratios."** SL ratio 0.5 off everywhere on x01 (pooled over live + sims B2 / X / F: 105 orders, PF 0.62; live 0.41, B2 0.79,
   F 0.47, X 1.25): `setSlRatios` [0.75, 1.25], `slRatiosByRange` long / wide without 0.5, `signalConfigs` slRatios [0.75] (their 0.5 and 1.0 were the weak ratios: 1.0 pooled 0.65 on 284 orders, off since the earlier
   disable). Kept: 0.8 (pooled 0.80 on 90, mixed), 1.25 (0.89 on 364, mixed). Counterfactual arm G (also without 0.8) is measured separately. Revert = the old lists.
