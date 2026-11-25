@@ -28,6 +28,7 @@ const files = [
   "src/lib/app-data/app-data.test.ts",
   "src/lib/auth/gate-identity.test.ts",
   "src/lib/analytics.test.ts",
+  "src/lib/relate-config.test.ts",
   "src/lib/relation-lanes.test.ts",
   "src/lib/block-rounds.test.ts",
   "src/lib/settings-menu.test.ts",

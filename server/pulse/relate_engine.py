@@ -14,11 +14,11 @@ import math
 import os
 from typing import Any
 
-SOURCES = ('config', 'configAll', 'overall', 'symbol', 'direction', 'indication', 'strategy', 'coordination', 'range')
+SOURCES = ('config', 'configAll', 'overall', 'symbol', 'direction', 'indication', 'strategy', 'coordination', 'range', 'step')
 MAX_STACK = 8.0
 DEFAULT = {'id': 'relate-12', 'enabled': False, 'steps': 12, 'ratio': .2,
            'mode': 'shared', 'sources': ['config', 'symbol'], 'lastN': 250,
-           'minTrades': 60, 'minPf': 1.1, 'maxStack': 2., 'maxSlRatio': .5}
+           'minTrades': 60, 'minPf': 1.1, 'maxStack': 2., 'maxSlRatio': .5, 'maxLossRun': 0}
 
 
 def finite(x):
@@ -45,6 +45,8 @@ def clean_configs(raw):
         if c['minTrades'] > c['lastN']: raise ValueError('Relate minTrades exceeds lastN')
         for key, lo, hi in [('ratio', .2, 6), ('minPf', 1.000001, 100), ('maxStack', 1, MAX_STACK), ('maxSlRatio', .01, 1.25)]:
             if not finite(c[key]) or not lo <= c[key] <= hi: raise ValueError('Invalid Relate '+key)
+        x=c['maxLossRun']
+        if type(x) is not int or not 0 <= x <= 12: raise ValueError('Invalid Relate maxLossRun')
         if abs(c['ratio']*5-round(c['ratio']*5)) > 1e-9: raise ValueError('Relate ratios use 0.2 increments')
         if c['mode'] not in ('shared','additive'): raise ValueError('Invalid Relate mode')
         if not isinstance(c['sources'],list) or not c['sources'] or any(s not in SOURCES for s in c['sources']):
@@ -55,6 +57,8 @@ def clean_configs(raw):
 
 
 def policy_key(c):
+    # maxLossRun 0 (off) is hashed as absent: every policy and saved receipt from before the key existed keeps its identity
+    if not c.get('maxLossRun'): c={k:v for k,v in c.items() if k!='maxLossRun'}
     return c['id']+':'+hashlib.sha256(json.dumps(c,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:20]
 
 
@@ -74,24 +78,32 @@ def identity_keys(x):
         'strategy': json.dumps([x['strategy'],x['side'],lane]),
         'coordination': json.dumps([x['coordination'],x['side'],lane]),
         'range': json.dumps([x['range'],x['side'],lane]),
+        # owner 2026-11-25: the TP step (any pack) per direction and lane; an identity without a step reads as 'none'
+        'step': json.dumps(['step',str(x.get('step','none')),x['side'],lane]),
     }
 
 
 def stats(values):
-    if not values: return {'n':0,'pf':None,'state':'empty','unknown':0,'gain':0.,'loss':0.}
+    if not values: return {'n':0,'pf':None,'state':'empty','unknown':0,'gain':0.,'loss':0.,'lossRun':0}
     unknown=sum(not finite(v) for v in values)
-    if unknown: return {'n':len(values),'pf':None,'state':'unknown','unknown':unknown,'gain':None,'loss':None}
+    if unknown: return {'n':len(values),'pf':None,'state':'unknown','unknown':unknown,'gain':None,'loss':None,'lossRun':0}
     try:
         gp=math.fsum(v for v in values if v>0);gl=-math.fsum(v for v in values if v<0)
         pf=gp/gl if gl>0 else None
         if not math.isfinite(gp) or not math.isfinite(gl) or (pf is not None and not math.isfinite(pf)): raise OverflowError()
     except OverflowError:
-        return {'n':len(values),'pf':None,'state':'unknown','unknown':len(values),'gain':None,'loss':None}
+        return {'n':len(values),'pf':None,'state':'unknown','unknown':len(values),'gain':None,'loss':None,'lossRun':0}
+    run=cur=0   # the longest losing streak inside the window
+    for v in values:
+        cur=cur+1 if v<0 else 0
+        run=max(run,cur)
     state='finite' if gl>0 else 'no-loss' if gp>0 else 'flat'
-    return {'n':len(values),'pf':pf,'state':state,'unknown':0,'gain':gp,'loss':gl}
+    return {'n':len(values),'pf':pf,'state':state,'unknown':0,'gain':gp,'loss':gl,'lossRun':run}
 
 
 def qualifies(s,c):
+    cap=c.get('maxLossRun') or 0   # owner 2026-11-25: the longest losing streak inside the last-N window may not exceed `cap` (0 = off)
+    if cap and s.get('lossRun',0)>cap: return False
     return s['n']>=c['minTrades'] and not s['unknown'] and (s['state']=='no-loss' or (s['pf'] is not None and s['pf']>=c['minPf']))
 
 

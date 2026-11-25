@@ -3197,6 +3197,16 @@ def a_manual_close_skips_only_the_exact_set_and_a_restart_forgets_it():
     return ok, f"blocked Sets {sorted(ids)}, other side / symbol {other}, file written {written}, legacy symbol scope rests {sym_rest}, pick skips the Set {wired}"
 
 
+def relate_identity_carries_the_tp_step():
+    """2026-11-25: Pulse.place() hands RelateBook the Set's TP step (`step`), so the `step` relation has an identity to pool on; the relation key exists in the engine."""
+    src=open(os.path.join(PULSE,"pulse_trader.py"),encoding="utf-8").read()
+    from relate_engine import SOURCES, identity_keys
+    ident={"config":"a:L:1m:sl1:st6","symbol":"AAA-USDT","side":"LONG","indication":"a:1m","strategy":"base","coordination":"Main-Real","range":"minimal","lane":"pos","step":6}
+    k=identity_keys(ident)["step"];k2=identity_keys({**ident,"symbol":"BBB-USDT","config":"b:L:1m:sl2:st6"})["step"]
+    ok='"step": int(self.sets.step_of(chosen))' in src and "step" in SOURCES and k==k2
+    return ok,f"place() passes the step {'\"step\": int(self.sets.step_of(chosen))' in src}, relation key shared across symbols and Sets {k==k2}"
+
+
 def a_close_during_an_outage_is_not_a_manual_close():
     """2026-11-25: positions the venue closed on their own stop / target while the engine was down came back as verified external closes and rested their Sets until the next
     restart. A close inside a recorded outage interval rests nothing; one outside it still rests its exact Set."""
@@ -3858,6 +3868,7 @@ CHECKS = [
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
     ("trader.a-close-during-an-outage-is-not-a-manual-close", a_close_during_an_outage_is_not_a_manual_close),
+    ("trader.relate-identity-carries-the-tp-step", relate_identity_carries_the_tp_step),
     ("trader.a-manual-close-skips-only-the-exact-set-and-a-restart-forgets-it", a_manual_close_skips_only_the_exact_set_and_a_restart_forgets_it),
     ("trader.max-leverage-is-the-default-everywhere", max_leverage_is_the_default_everywhere),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),

@@ -4256,7 +4256,8 @@ class Pulse:
             identity = {"config": chosen.id, "symbol": sym, "side": side,
                         "indication": str(chosen.pack) + ":" + str(chosen.tf),
                         "strategy": str(chosen.kind), "coordination": "Main-Real",
-                        "range": tp_range_of(self.sets.step_bucket(chosen)), "lane": lane}
+                        "range": tp_range_of(self.sets.step_bucket(chosen)), "lane": lane,
+                        "step": int(self.sets.step_of(chosen))}
             relate_receipt = relate.decide(identity, time.time(), sl_r, tp_r,
                 qualified=True, base=qty / relate_origin_qty)
             requested = relate_origin_qty * relate_receipt["total"]

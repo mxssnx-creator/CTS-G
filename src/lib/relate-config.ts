@@ -1,11 +1,11 @@
-export const RELATE_SOURCES = ["config", "configAll", "overall", "symbol", "direction", "indication", "strategy", "coordination", "range"] as const;
+export const RELATE_SOURCES = ["config", "configAll", "overall", "symbol", "direction", "indication", "strategy", "coordination", "range", "step"] as const;
 export type RelateSource = (typeof RELATE_SOURCES)[number];
 export type RelateConfig = {
   id: string; enabled: boolean; steps: number; ratio: number; mode: "shared" | "additive";
-  sources: RelateSource[]; lastN: number; minTrades: number; minPf: number; maxStack: number; maxSlRatio: number;
+  sources: RelateSource[]; lastN: number; minTrades: number; minPf: number; maxStack: number; maxSlRatio: number; maxLossRun: number;
 };
 export const DEFAULT_RELATE_CONFIG: RelateConfig = { id: "relate-12", enabled: false, steps: 12, ratio: .2,
-  mode: "shared", sources: ["config", "symbol"], lastN: 250, minTrades: 60, minPf: 1.1, maxStack: 2, maxSlRatio: .5 };
+  mode: "shared", sources: ["config", "symbol"], lastN: 250, minTrades: 60, minPf: 1.1, maxStack: 2, maxSlRatio: .5, maxLossRun: 0 };
 
 /** Invalid policies are refused whole; silently changing a sizing policy would reuse the wrong evidence. */
 export function relateConfigs(raw: unknown): RelateConfig[] {
@@ -20,7 +20,7 @@ export function relateConfigs(raw: unknown): RelateConfig[] {
     if (typeof c.enabled !== "boolean" || !["shared", "additive"].includes(c.mode)) throw new Error("Invalid Relate mode");
     for (const [key, lo, hi, integer] of [
       ["steps",2,15,true], ["lastN",10,250,true], ["minTrades",5,250,true],
-      ["ratio",.2,6,false], ["minPf",1.000001,100,false], ["maxStack",1,8,false], ["maxSlRatio",.01,1.25,false],
+      ["maxLossRun",0,12,true], ["ratio",.2,6,false], ["minPf",1.000001,100,false], ["maxStack",1,8,false], ["maxSlRatio",.01,1.25,false],
     ] as const) {
       const n = c[key];
       if (typeof n !== "number" || !Number.isFinite(n) || n < lo || n > hi || (integer && !Number.isInteger(n))) throw new Error(`Invalid Relate ${key}`);

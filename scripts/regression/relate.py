@@ -128,7 +128,40 @@ def default_policy_is_unchanged_by_the_new_source():
     p=next(iter(d['policies'].values()))
     return set(p['parts'])=={'config'} and p['parts']['config']['level']==1 and d['total']>1,f"sources {sorted(p['parts'])}, level {p['parts']['config']['level']}, total {d['total']}"
 
-CHECKS=[('relate.config-wide-source-pools-symbols',config_wide_source_pools_symbols),('relate.lowered-minimum-and-stop-ceiling',lowered_minimum_and_stop_ceiling),('relate.default-policy-unchanged-by-the-new-source',default_policy_is_unchanged_by_the_new_source),
+def step_relation_pools_symbols_and_packs():
+    """Owner 2026-11-25: source `step` is the TP step (any pack, any symbol) per direction and lane. Closes of two different Sets of one step qualify it for a third Set of
+    that step; another step or direction stays unqualified; an identity without a step reads as 'none'."""
+    cfg=config(sources=['step'],lastN=20,minTrades=10,minPf=1.05,maxStack=2.)
+    b=RelateBook([cfg]);s1=dict(ID,step=6);s2=dict(ID,config='other:set',symbol='ETH-USDT',step=6)
+    for i in range(10):
+        ident=s1 if i%2==0 else s2
+        d=b.decide(ident,i*2,.003,.01,qualified=True);b.close(d,'s%d'%i,i*2+1,.01,accepted=True,final=True)
+    lvl=lambda ident:next(iter(b.decide(ident,100,.003,.01,qualified=True)['policies'].values()))['parts']['step']['level']
+    third=lvl(dict(ID,config='third:set',symbol='SOL-USDT',step=6));other=lvl(dict(ID,step=7));short=lvl(dict(ID,side='SHORT',step=6));none=lvl(dict(ID))
+    return third>0 and other==0 and short==0 and none==0,f'same step other Set {third}, other step {other}, other direction {short}, no step {none}'
+
+def loss_in_a_row_cap():
+    """maxLossRun k: a source qualifies only while the longest losing streak inside its last-N window is at most k (0 = off). 30 wins, 3 losses in a row, then 6 wins:
+    k=3 qualifies, k=2 does not, off qualifies."""
+    def level(k):
+        b=RelateBook([config(maxLossRun=k,lastN=60,minTrades=10,minPf=1.01)])
+        seq=[.02]*30+[-.001]*3+[.02]*6
+        for i,r in enumerate(seq):
+            d=b.decide(ID,i*2,.003,.01,qualified=True);b.close(d,'g%d'%i,i*2+1,r,accepted=True,final=True)
+        return next(iter(b.decide(ID,300,.003,.01,qualified=True)['policies'].values()))['parts']['config']['level']
+    st=stats([.1,-.1,-.1,.1,-.1,-.1,-.1,.1])
+    return level(3)>0 and level(2)==0 and level(0)>0 and level(12)>0 and st['lossRun']==3,f'k=3 {level(3)}, k=2 {level(2)}, off {level(0)}, k=12 {level(12)}, longest streak of the sample {st["lossRun"]}'
+
+def default_policy_identity_is_unchanged():
+    """A policy with maxLossRun 0 hashes exactly like one from before the key existed, so saved receipts and pending intents stay valid; maxLossRun > 0 is a different policy."""
+    import hashlib
+    c=clean_configs([config()])[0];old={k:v for k,v in c.items() if k!='maxLossRun'}
+    want=c['id']+':'+hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:20]
+    d=clean_configs([config(maxLossRun=2)])[0]
+    return policy_key(c)==want and policy_key(d)!=want and c['maxLossRun']==0,f'default {policy_key(c)==want}, loss-run policy differs {policy_key(d)!=want}'
+
+CHECKS=[('relate.step-relation-pools-symbols-and-packs',step_relation_pools_symbols_and_packs),('relate.loss-in-a-row-cap',loss_in_a_row_cap),('relate.default-policy-identity-unchanged',default_policy_identity_is_unchanged),
+ ('relate.config-wide-source-pools-symbols',config_wide_source_pools_symbols),('relate.lowered-minimum-and-stop-ceiling',lowered_minimum_and_stop_ceiling),('relate.default-policy-unchanged-by-the-new-source',default_policy_is_unchanged_by_the_new_source),
  ('relate.twelve-step-growth-loss-reset',progression_twelve_steps),('relate.exact-context-isolation',independent_contexts),
  ('relate.effective-stop-cost-floor-half-target',stop_and_cost_floor),('relate.parent-partials-unknown-idempotence',partials_unknown_duplicates),
  ('relate.future-exclusion-immutable-policy',future_and_policy_edit),('relate.parallel-portions-total-cap',parallel_shared_additive_cap),

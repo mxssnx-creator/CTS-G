@@ -46,7 +46,7 @@ def parents_from_sim(path: str, book) -> List[Dict[str, Any]]:
             continue
         sl, tp = book.lane_fracs(st)
         out.append({"id": f"{os.path.basename(path)}:{len(out)}", "set": t["set"], "symbol": t["symbol"], "side": "LONG" if ":L:" in t["set"] else "SHORT",
-                    "pack": t["pack"], "tf": "1m", "kind": st.kind, "range": tp_range_of(book.step_bucket(st)), "lane": t.get("lane") or "pos",
+                    "pack": t["pack"], "tf": "1m", "kind": st.kind, "range": tp_range_of(book.step_bucket(st)), "step": int(book.step_of(st)), "lane": t.get("lane") or "pos",
                     "t_in": float(t["t_in"]), "t": float(t["t_out"]), "net": float(t["net_pct"]) / 100.0, "sl": float(sl), "tp": float(tp)})
     return sorted(out, key=lambda r: r["t_in"])
 
@@ -61,7 +61,7 @@ def parents_from_live(path: str, book) -> List[Dict[str, Any]]:
         kind = st.kind if st is not None else ("trail" if r.get("trail_set_id") else "base")
         rng = tp_range_of(book.step_bucket(st)) if st is not None else "short"
         out.append({"id": f"live:{len(out)}", "set": r["set_id"], "symbol": r["symbol"], "side": r["side"], "pack": r["pack"], "tf": "1m", "kind": kind, "range": rng,
-                    "lane": r.get("lane") or "pos", "t_in": float(r["t"]) - float(r.get("hold_s") or 0), "t": float(r["t"]), "net": float(r["net_pnl_pct"]),
+                    "step": int(book.step_of(st)) if st is not None else 0, "lane": r.get("lane") or "pos", "t_in": float(r["t"]) - float(r.get("hold_s") or 0), "t": float(r["t"]), "net": float(r["net_pnl_pct"]),
                     "sl": float(r["sl_pct"]), "tp": float(r["tp_pct"])})
     return sorted(out, key=lambda r: r["t_in"])
 
@@ -78,7 +78,7 @@ def simulate(ps: List[Dict[str, Any]], book: "relate_engine.RelateBook") -> Dict
         r = ps[i]
         if what == 0:
             ident = {"config": r["set"], "symbol": r["symbol"], "side": r["side"], "indication": f"{r['pack']}:{r['tf']}", "strategy": r["kind"],
-                     "coordination": "Main-Real", "range": r["range"], "lane": r["lane"]}
+                     "coordination": "Main-Real", "range": r["range"], "step": r["step"], "lane": r["lane"]}
             rc = book.decide(ident, r["t_in"], r["sl"], r["tp"], qualified=True, base=1.0)
             receipts[i] = rc
             mult[i] = rc["total"]
@@ -109,12 +109,12 @@ def run(windows: List[List[Dict[str, Any]]], cfg: Dict[str, Any], carry: bool) -
 
 def draw(rng: random.Random) -> Dict[str, Any]:
     min_trades = rng.choice([5, 12, 12, 20])
-    last_n = rng.choice([12, 12, 24, 40, 60])
+    last_n = rng.choice([12, 12, 24, 40, 60, 120, 250])
     last_n = max(last_n, min_trades)
     return {"id": "study", "enabled": True, "steps": rng.choice([2, 4, 8, 12]), "ratio": rng.choice([0.2, 0.4, 0.6, 1.0]), "mode": rng.choice(["shared", "additive"]),
-            "sources": rng.choice([["configAll"], ["configAll", "config"], ["configAll", "symbol"], ["configAll", "range"], ["configAll", "strategy"], ["configAll", "direction"], ["coordination"], ["coordination", "configAll"], ["coordination", "range"], ["configAll", "range", "coordination"], ["range"]]),
+            "sources": rng.choice([["configAll"], ["configAll", "config"], ["configAll", "symbol"], ["configAll", "range"], ["configAll", "strategy"], ["configAll", "direction"], ["coordination"], ["coordination", "configAll"], ["coordination", "range"], ["configAll", "range", "coordination"], ["range"], ["step"], ["step", "configAll"], ["step", "direction"], ["indication"], ["indication", "direction"], ["overall"], ["symbol"], ["direction", "step", "range"]]),
             "lastN": last_n, "minTrades": min_trades, "minPf": rng.choice([1.05, 1.1, 1.2, 1.3, 1.5]), "maxStack": rng.choice([1.5, 2.0, 3.0]),
-            "maxSlRatio": rng.choice([0.5, 0.8, 1.25])}
+            "maxSlRatio": rng.choice([0.5, 0.8, 1.25]), "maxLossRun": rng.choice([0, 2, 3, 4, 6])}
 
 
 def main() -> int:
@@ -158,7 +158,7 @@ def main() -> int:
         held.append(passes)
         print(f"dev PF {r['pfWith']}/{r['pfWithout']} net {r['netWith']:.1f}/{r['netWithout']:.1f} raised {r['raised']} max x{r['maxMult']:.2f} | confirm "
               + " ".join(f"{x['pfWith']}/{x['pfWithout']} r{x['raised']}" for x in cc) + (f" | live {lv['pfWith']}/{lv['pfWithout']} r{lv['raised']}" if lv else "")
-              + f" {'HOLDS' if passes else 'fails'} | {json.dumps({k: c[k] for k in ('steps', 'ratio', 'mode', 'sources', 'lastN', 'minTrades', 'minPf', 'maxStack', 'maxSlRatio')})}")
+              + f" {'HOLDS' if passes else 'fails'} | {json.dumps({k: c[k] for k in ('steps', 'ratio', 'mode', 'sources', 'lastN', 'minTrades', 'minPf', 'maxStack', 'maxSlRatio', 'maxLossRun')})}")
     print("held on confirmation:", sum(held), "of", len(held))
     if a.out:
         json.dump([{"cfg": c, "dev": r} for c, r in ok[:50]], open(a.out, "w"), default=str)
