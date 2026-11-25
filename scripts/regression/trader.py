@@ -3197,6 +3197,25 @@ def a_manual_close_skips_only_the_exact_set_and_a_restart_forgets_it():
     return ok, f"blocked Sets {sorted(ids)}, other side / symbol {other}, file written {written}, legacy symbol scope rests {sym_rest}, pick skips the Set {wired}"
 
 
+def a_close_during_an_outage_is_not_a_manual_close():
+    """2026-11-25: positions the venue closed on their own stop / target while the engine was down came back as verified external closes and rested their Sets until the next
+    restart. A close inside a recorded outage interval rests nothing; one outside it still rests its exact Set."""
+    import types, time as _t
+    old_dt, old_path = pt.downtime_intervals, pt.MANUAL_REST_PATH
+    now = _t.time()
+    try:
+        pt.downtime_intervals = lambda path=None: [(now - 3600, now - 600)]
+        fake = types.SimpleNamespace(manual_rest={}, manual_rest_s=240 * 60.0, manual_rest_scope="set")
+        pt.Pulse.note_manual_close(fake, types.SimpleNamespace(symbol="AAA-USDT", side="LONG", set_id="x:L:1m:sl1:st5", exit_confirmed_at=now - 1800), "verified external position close")
+        inside = dict(fake.manual_rest)
+        pt.Pulse.note_manual_close(fake, types.SimpleNamespace(symbol="BBB-USDT", side="LONG", set_id="y:L:1m:sl1:st5", exit_confirmed_at=now - 60), "verified external position close")
+        outside = sorted(fake.manual_rest)
+    finally:
+        pt.downtime_intervals, pt.MANUAL_REST_PATH = old_dt, old_path
+    ok = not inside and outside == ["BBB-USDT:LONG:y:L:1m:sl1:st5"]
+    return ok, f"close inside the outage rests {sorted(inside)}, close after it rests {outside}"
+
+
 def a_manual_close_rests_only_that_symbol_and_direction():
     """Owner 2026-11-04: closing a position by hand must not make the engine reopen the exact same position, and must not stop trading. A position the venue no
     longer holds and that left no stop / target fill of ours (drop_ghost, a restored position gone) puts (symbol, side) to rest for manualCloseRestMin; the other
@@ -3838,6 +3857,7 @@ CHECKS = [
     ("trader.side-aware-group-gate-judges-long-and-short-groups-apart", the_side_aware_group_gate_judges_long_and_short_groups_apart),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
+    ("trader.a-close-during-an-outage-is-not-a-manual-close", a_close_during_an_outage_is_not_a_manual_close),
     ("trader.a-manual-close-skips-only-the-exact-set-and-a-restart-forgets-it", a_manual_close_skips_only_the_exact_set_and_a_restart_forgets_it),
     ("trader.max-leverage-is-the-default-everywhere", max_leverage_is_the_default_everywhere),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),

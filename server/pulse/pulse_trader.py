@@ -4770,6 +4770,12 @@ class Pulse:
         if rest_s <= 0:
             return
         now = time.time()
+        try:
+            closed_at = float(getattr(pos, "exit_confirmed_at", 0) or 0) or now
+            if any(a_ < closed_at <= b_ for a_, b_ in downtime_intervals()):
+                return          # the venue's own stop / target filled while the engine was down: not a manual close, no Set is rested
+        except Exception:
+            pass
         book = self.__dict__.setdefault("manual_rest", {})
         if getattr(self, "manual_rest_scope", "set") == "set" and getattr(pos, "set_id", ""):
             # owner 2026-11-24: only the exact same Set on that symbol and direction is not opened again; the next-ranked Sets keep opening; memory only, a restart resets it
