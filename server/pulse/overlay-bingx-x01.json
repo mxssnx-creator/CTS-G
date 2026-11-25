@@ -53,10 +53,7 @@
   "volWeight": 0.3,
   "minStep": 10,
   "maxStopLossRatio": 1.4,
-  "setSlRatios": [
-    0.75,
-    1.25
-  ],
+  "setSlRatios": [0.1, 0.15, 0.2, 0.25, 0.75, 1.25],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
@@ -419,7 +416,7 @@
   "minPfByRange": {
     "micro": 1.01
   },
-  "setSlMinRatio": 0.5,
+  "setSlMinRatio": 0.1,
   "exitSetHoldBars": 720,
   "slRatiosByRange": {
     "long": [

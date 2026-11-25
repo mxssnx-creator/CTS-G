@@ -110,8 +110,12 @@ export const PF_TYPE_DEFAULTS = {
 export const SL_TP_RATIOS: readonly number[] = protectionPolicy.slTpRatios;
 /** Set grid: SL = TP x ratio, 0.25..2.5 step 0.25 (10 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
 export const SL_SET_RATIOS = SL_TP_RATIOS;
+/** A thin SL ratio: snapped to the policy's own grid (slSnapMin .. the default grid's top, slSnapStep), so 0.1 stays 0.1 and 0.25-grid values are unchanged. */
+export function snapSlRatio(v: number): number {
+  return snapSlToTp(v, protectionPolicy.slSnapMin, SL_TP_RATIOS.at(-1)!, protectionPolicy.slSnapStep);
+}
 export function setSlRatiosOf(value: unknown): number[] {
-  const rows = Array.isArray(value) ? value.filter((r): r is number => typeof r === "number" && Number.isFinite(r)).map(r => snapSlToTp(r)) : [];
+  const rows = Array.isArray(value) ? value.filter((r): r is number => typeof r === "number" && Number.isFinite(r)).map(r => snapSlRatio(r)) : [];
   return rows.length ? [...new Set(rows)].sort((a, b) => a - b) : [...SL_SET_RATIOS];
 }
 export const TRAIL_VARIANTS = ["0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5"] as const;
@@ -902,7 +906,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
-  setSlMinRatio: 0.5,
+  setSlMinRatio: 0.1,
   trailStepMin: 12,
   tpStepMin: 5,
   slAutoRange: true,

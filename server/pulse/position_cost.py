@@ -30,6 +30,10 @@ SL_TP_RATIOS = tuple(_PROTECTION_POLICY["slTpRatios"])
 SL_TP_MIN, SL_TP_MAX = SL_TP_RATIOS[0], SL_TP_RATIOS[-1]
 SL_TP_STEP = SL_TP_RATIOS[1] - SL_TP_RATIOS[0]
 SL_RATIO_MIN, SL_RATIO_MAX, SL_RATIO_STEP = SL_TP_MIN, SL_TP_MAX, SL_TP_STEP
+# Thin SL ratios (overlay / desk setSlRatios, owner 2026-11-24): snapped on their own 0.05 grid from SL_SNAP_MIN. The default grid above is
+# unchanged; a 0.25-grid value snaps to itself, so only a value below 0.25 (e.g. 0.1, 0.15, 0.2) is new.
+SL_SNAP_MIN = float(_PROTECTION_POLICY.get("slSnapMin", SL_TP_MIN))
+SL_SNAP_STEP = float(_PROTECTION_POLICY.get("slSnapStep", SL_TP_STEP))
 SL_RATIOS = SL_TP_RATIOS
 SL_RATIOS_LOW = ()  # legacy setSlLow adds no duplicate grid
 SL_RATIO_FLOOR = SL_RATIO_MIN
@@ -134,8 +138,8 @@ def snap_ratio(value: Any, lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: f
 
 
 def snap_sl_ratio(value: Any) -> float:
-    """Snap every strategy to the same 0.25..2.5 by 0.25 grid."""
-    return snap_ratio(value)
+    """Snap a configured SL ratio to the thin grid: SL_SNAP_MIN..SL_TP_MAX in SL_SNAP_STEP (0.1 .. 2.5 by 0.05). Values on the 0.25 grid are unchanged."""
+    return snap_ratio(value, SL_SNAP_MIN, SL_TP_MAX, SL_SNAP_STEP)
 
 
 GATE_MIN_PF_DEFAULT = 1.35   # base gate: net PF must stay above this (every module reads this one constant)
