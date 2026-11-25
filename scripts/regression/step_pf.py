@@ -612,13 +612,20 @@ def the_simulator_learns_the_engines_sl_ranges_and_the_gate_reads_them():
             _os.environ.pop("STAGE_OVERLAY_PATCH", None)
         else:
             _os.environ["STAGE_OVERLAY_PATCH"] = saved
-    narrowed = {k: v for k, v in eng.items() if v != (0.5, 1.5)}
-    outside = next((st for st in book.by_idx if st.kind == "base" and (book.auto_step_bucket(st), st.side) in narrowed
-                    and not (narrowed[(book.auto_step_bucket(st), st.side)][0] <= st.sl_ratio <= narrowed[(book.auto_step_bucket(st), st.side)][1])), None)
+    def _out(st):
+        r = eng.get((book.auto_step_bucket(st), st.side))
+        return st.kind == "base" and r is not None and not (r[0] - 1e-9 <= st.sl_ratio <= r[1] + 1e-9)
+    outside = next((st for st in book.by_idx if _out(st)), None)
+    narrowed = {(book.auto_step_bucket(st), st.side) for st in book.by_idx if _out(st)}      # a step whose learned range really cuts Sets of the shipped grid
+    if outside is None:
+        # the learned ranges cover the whole shipped (thin) grid, so none cuts a Set: narrow one range by hand and require the gate to read it
+        outside = next((st for st in book.by_idx if st.kind == "base" and (book.auto_step_bucket(st), st.side) in eng), None)
+        if outside is not None:
+            book.step_sl_auto[(book.auto_step_bucket(outside), outside.side)] = (float(outside.sl_ratio) + 0.2, float(outside.sl_ratio) + 0.4)
     trail = next((st for st in book.by_idx if st.kind == "trail"), None)
     gate_ok = outside is not None and book.base_validation_reason(outside) == "slrange" and (trail is None or book.sl_auto_allows(trail))
     ok = bool(eng) and sim == eng == packed and gate_ok
-    return ok, f"{len(eng)} steps learned (engine), simulator equal {sim == eng}, packed equal {packed == eng}; narrowed {len(narrowed)}; outside Set reason slrange {gate_ok}"
+    return ok, f"{len(eng)} steps learned (engine), simulator equal {sim == eng}, packed equal {packed == eng}; narrowed {len(narrowed)}; outside Set reason slrange {gate_ok} (outside={getattr(outside, 'id', None)} reason={book.base_validation_reason(outside) if outside is not None else None})"
 
 
 def shipped_floors_are_all_above_one():

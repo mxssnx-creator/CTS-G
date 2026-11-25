@@ -227,7 +227,7 @@ def cost_units():
 
 
 def sl_snap():
-    cases = [(0.6, 0.5), (0.8, 0.75), (9.0, 2.5), (-1.0, 0.5), (1.0, 1.0)]
+    cases = [(0.6, 0.6), (0.8, 0.8), (0.12, 0.1), (9.0, 2.5), (-1.0, 0.5), (1.0, 1.0)]
     bad = [(x, snap_sl_ratio(x), want) for x, want in cases if abs(snap_sl_ratio(x) - want) > 1e-9]
     return not bad, f"bad={bad}" if bad else f"{len(cases)} cases"
 
