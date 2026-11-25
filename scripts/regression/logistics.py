@@ -106,7 +106,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     "setMinStep": "owner 2026-11-24, x01 only: grid minimum step 3; the desk default stays 5",
     "tpStepMin": "owner 2026-11-24, x01 only: TP Sets from step 3; the desk default stays 5",
     "timeStopS": "owner 2026-11-24, x01 only: max hold 3 h (10800 s); the desk default stays 6 h",
-    "volumeFactor": "owner 2026-11-24, x01 only: volume factor 0.4; the desk default stays the minimum 0.05",
+    "volumeFactor": "owner 2026-11-24, x01 only: volume factor 1.6; the desk default stays the minimum 0.05",
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
     "symbolCap": "x01 uses 30 symbols by owner request; the shared desk default remains 50",
     # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
