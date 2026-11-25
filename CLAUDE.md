@@ -2,6 +2,14 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-25 (latest), owner: "Relate fuer jede Relation, 12 Steigerungen", "12 Stufen pro Lane bis Gewinn, Ratio 2+", "weniger Positionen, hoeheres Auto PF", "100 Symbole, Mindest-Volumenfaktor".**
+  x01: `volumeFactor` **0.05**, `symbolCap` **100**; `minPfStepAutoTol` 5 -> **2** (measured better: C 1.751 / 194 against 1.631 / 188), `minPfStepAutoLow` 1.02 -> **1.15** (unmeasured, owner);
+  Relate: **one policy per source (10), each 12 steps x 1.2 per winning close, ceiling 8 total**, minTrades 12, PF 1.2, maxLossRun 3, stop <= 1.25 TP (x01 and x02; check
+  `relate.shipped-overlays-run-one-independent-policy-per-relation`); Block rounds engine bounds 6 levels / x5 -> **12 / x10** (desk too), x01 count 1 ratio 2.0 to level 12, relations
+  step + set, ceiling x10 (`block_structure.block-rounds-step-to-twelve-levels-under-the-ceiling`); the live multiple stays bounded by `VOLUME_MULT_MAX` 5 for Block and 8 for Relate.
+  Fixed: a minimum-lot retry made the fill exceed the Relate receipt and disabled every raise. **Measured:** `qN` (live overlay, lookback 1920, 48 h, 12 symbols) executed PF 0.871 / 217 orders / -16.0 %
+  against `qT` (lookback 2880) 1.145 / 223 / +16.1 %; `qO` (qN with 2880) decides the lookback. The Relate / Block step-ups are sizing, unmeasured at these levels: they enlarge a winning or losing run, they create no edge.
+  Revert = the previous overlay values (`relateConfigs` relate-x01, blockRounds count 1 ratio 1.0 level 3 ceiling 4, tolerance 5, low 1.02).
 - **2026-11-25, owner: Relate on x01 ("von 60 auf 12", all relations, last-N by samples, loss in a row).** Engine: sources `configAll` (the same Set over all symbols) and `step` (TP step), `maxLossRun` (longest losing streak inside the last-N window,
   0 = off; policy identity unchanged when 0), minimum closes 5 and last-N 10 lower bounds, stop ceiling 1.25, identity `step` from `Pulse.place`; desk settings, 20 `relate.*` checks, `trader.relate-identity-carries-the-tp-step`, `src/lib/relate-config.test.ts`,
   `scripts/relate_x01_study.py`. **Measured (RelateBook driven over stored executed parents, weighted PF with / without Relate, minTrades 12, maxStack <= 2): 8 settings passed development (3 windows incl. the Micro + Minimal + Low-Range sim `qM`),

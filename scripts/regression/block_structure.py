@@ -492,7 +492,11 @@ def block_rounds_ship_the_procedure_measured_at_or_above_without():
     want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 4, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 1.0,
                              "counts": {"1": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0},
                                         "2": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0}}}).to_json()
-    same = {name: (isinstance(v, dict) and rounds.config_of(v).to_json() == want and v == want) for name, v in carried.items()}
+    # owner 2026-11-25, x01 only ("12 Steigerungen fuer jede Lane bis Gewinn"): count 1 ratio 2.0 to level 12, relations step + set, ceiling x 10
+    want_x01 = rounds.config_of({"enabled": True, "relations": ["step", "set"], "maxMult": 10, "auto": True, "autoN": 30, "autoMin": 15, "autoPf": 1.0, "autoRatio": 1.0,
+                                 "counts": {"1": {"on": True, "ratio": 2.0, "step": True, "maxLevel": 12, "pause": 0},
+                                            "2": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 3, "pause": 0}}}).to_json()
+    same = {name: (isinstance(v, dict) and rounds.config_of(v).to_json() == (want_x01 if name == "overlay-bingx-x01.json" else want)) for name, v in carried.items()}
     desk = open(os.path.join(ROOT, "src", "lib", "block-rounds.ts")).read()
     desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 4,\s*auto: true,\s*autoN: 30,\s*autoMin: 15,\s*autoPf: 1,\s*autoRatio: 1,', desk)) and '"2": { on: true, ratio: 1, step: true, maxLevel: 3, pause: 0 }' in desk
     off = rounds.config_of(None)
