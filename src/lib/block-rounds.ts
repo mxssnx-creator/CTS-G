@@ -14,9 +14,9 @@ export const ROUND_RELATION_LABEL: Record<RoundRelation, string> = {
 };
 export const ROUND_COUNTS = [1, 2, 3, 4, 5, 6] as const;
 export const ROUND_RATIO_MAX = 2;
-export const ROUND_LEVEL_MAX = 6;
+export const ROUND_LEVEL_MAX = 12;
 export const ROUND_PAUSE_MAX = 6;
-export const ROUND_MULT_MAX = 5;
+export const ROUND_MULT_MAX = 10;
 export type RoundCount = { on: boolean; ratio: number; step: boolean; maxLevel: number; pause: number };
 export type BlockRoundsConfig = {
   enabled: boolean;

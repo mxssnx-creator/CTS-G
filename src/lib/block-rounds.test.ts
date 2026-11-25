@@ -8,8 +8,8 @@ test("block rounds: an absent key is the shipped default, an object follows the 
   const c = blockRoundsOf({ enabled: "yes", relations: ["nope", "symbol"], maxMult: 99, counts: { "2": { on: true, ratio: 9, step: true, maxLevel: 40, pause: -3 }, "3": { ratio: 1 } } });
   assert.equal(c.enabled, false);
   assert.deepEqual(c.relations, ["symbol"]);
-  assert.equal(c.maxMult, 5);
-  assert.deepEqual(c.counts["2"], { on: true, ratio: 2, step: true, maxLevel: 6, pause: 0 });
+  assert.equal(c.maxMult, 10);
+  assert.deepEqual(c.counts["2"], { on: true, ratio: 2, step: true, maxLevel: 12, pause: 0 });
   assert.equal(c.counts["3"].on, false);
   assert.equal(c.counts["1"].ratio, 0);
 });

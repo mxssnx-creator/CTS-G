@@ -44,7 +44,7 @@ test("Set Block add evaluation uses cumulative defaults and bounds a saved rolli
 test("SL grids normalize legacy ratios once and empty grids retain the ten defaults", () => {
   const all = Array.from({length:10},(_,i)=>(i+1)/4);
   for (const v of [undefined, [], [NaN, Infinity, "wrong"]]) assert.deepEqual(overlayFromCts(cts({setSlRatios:v})).setSlRatios, all);
-  assert.deepEqual(overlayFromCts(cts({setSlRatios:[.1,.3,.6,1,3,5,1]})).setSlRatios,[.25,.5,1,2.5]);
+  assert.deepEqual(overlayFromCts(cts({setSlRatios:[.1,.3,.6,1,3,5,1]})).setSlRatios,[.1,.3,.6,1,2.5]);  // thin grid (floor 0.1, step 0.05)
 });
 
 test("absolute protection grids preserve their own valid stops and gaps across reload", () => {
