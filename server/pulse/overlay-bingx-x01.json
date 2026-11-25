@@ -219,7 +219,7 @@
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
-  "minPfStepAutoTol": 5,
+  "minPfStepAutoTol": 2,
   "pauseMode": "auto",
   "pauseFixedMin": 10,
   "pauseCandidates": [
@@ -446,7 +446,7 @@
   },
   "minPfStepAutoScope": "set",
   "minPfSetAutoMin": 10,
-  "minPfStepAutoLow": 1.02,
+  "minPfStepAutoLow": 1.15,
   "slAutoRange": true,
   "slAutoMin": 20,
   "slAutoTol": 5,
