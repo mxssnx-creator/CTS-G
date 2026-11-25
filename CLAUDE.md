@@ -2,6 +2,23 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-25, owner: "Double x01 vol factor."** x01 `volumeFactor` 0.8 -> **1.6** (80 symbols, hot reload). One position is balance x 5 % x 1.6 notional; a stop costs twice what it cost at 0.8. Revert = 0.8.
+- **2026-11-25, owner: "Disable non performing TP on x01 now."** `tpStepsOff` [5, 6, 7, 9, 19, 30, 31] on x01 (7 / 9 / 19 were already off; new: 5, 6, 30, 31). Rule = 2026-11-05 (pooled PF < 0.8 on >= 35 orders,
+  live PF < 1 or no live orders, at least half of the replay windows < 1; sources live x01, B2, qX, qF): step 5 100 orders PF 0.57, 6 76 / 0.54, 30 37 / 0.71, 31 35 / 0.59 (5 / 6 survive only in the Short Range and Signal packs).
+  Mixed or thin, kept: 8 (0.81 on 83), 20 / 21 / 27 / 32 (20-26 orders). Same caveat as 2026-11-06 (isolated-PF removal needs its own counterfactual). Revert = the old list [7, 9, 19].
+- **2026-11-24 (later), owner: "On x01 live: disable non performing SL ratios."** SL ratio 0.5 off everywhere on x01 (pooled over live + sims B2 / X / F: 105 orders, PF 0.62; live 0.41, B2 0.79,
+  F 0.47, X 1.25): `setSlRatios` [0.75, 1.25], `slRatiosByRange` long / wide without 0.5, `signalConfigs` slRatios [0.75] (their 0.5 and 1.0 were the weak ratios: 1.0 pooled 0.65 on 284 orders, off since the earlier
+  disable). Kept: 0.8 (pooled 0.80 on 90, mixed), 1.25 (0.89 on 364, mixed). Counterfactual arm G (also without 0.8) is measured separately. Revert = the old lists.
+- **2026-11-24 (autonomous, after the owner set 3 h): x01 max hold back to 6 h (`timeStopS` 21600).** Counterfactual sim (48 h, 12 symbols, actual x01 overlay with the 2026-11-24 disables; executed PF / orders / net / time exits):
+  3 h 0.844 / 282 / -23.3 % / 93, **6 h 0.972 / 250 / -3.9 % / 18**; first 24 h 0.52 -> 0.80, last 24 h 2.00 -> 1.64 (mixed by half, clearly better overall). The disables themselves against the same Sets
+  before (8,532 Sets, 3 h): 0.831 / 260 -> 0.844 / 282 (first 24 h 0.49 -> 0.52, last 1.81 -> 2.00). Revert = `timeStopS` 10800.
+- **2026-11-24, owner: "Disable all non performing on live x01 Now and double vol factor. And list what was disabled."** x01 `volumeFactor` 0.4 -> **0.8**. Off, by the 2026-11-05
+  rule (pooled PF < 0.8 on >= 35 orders AND every source with orders < 1; sources: live x01 closes, sim B2 5 days, sim qX 2 days): pack `general` (74 orders, PF 0.72; `stratGeneral`
+  false), `reversion` LONG (135, 0.53; new key `packSidesOff` ["reversion:L"]), TP range `minimal` (154, 0.50; `tpRanges.minimal` false), SL ratio 1.0 (210, 0.62;
+  `setSlRatios` [0.5, 0.75, 1.25]), TP steps 7 / 9 / 19 (73 / 37 / 37 orders, 0.73 / 0.66 / 0.36; new key `tpStepsOff` [7, 9, 19]; steps 5 / 6 are inside the minimal range).
+  Not off (mixed signs): flow LONG, reversion as a whole, trailing, SL 1.25, signal packs. Caveat (2026-11-06): removing groups by isolated PF lowered the counterfactual replay then;
+  the removal still needs its own counterfactual sim. Revert = the old values of those keys. Fixtures pin the keys back (`common.overlay`); check
+  `grid.steps-off-and-pack-sides-off-remove-only-those-sets`. Live x01: 8,532 -> 6,910 configured Sets; open positions under removed Sets keep running on their own lane.
 - **2026-11-17, owner (from CTS-A-O): "use own configs scope" — config-wide last-N windows.** CTS-A-O measured config-wide windows (a configuration's own
   last N results across all symbols) against windows per symbol × side on the same data: executed PF 0.56 -> **1.33**, General / Long executing again (PF 2.79 / 1.82),
   Micro better per symbol (so judged on both there). **CTS-G already judges every Set on one tape of all symbols (`SetBook._tape_at`), per direction: keep it.** Do not cut

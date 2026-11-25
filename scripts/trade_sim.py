@@ -192,12 +192,21 @@ def tp_range_name(st):
     return tp_range_of(st.step)
 
 
+_GATE_FN = None
+
+
+def _run_gate_chunk(i):
+    """One forked worker of the gate pass: the parent's frozen tapes and book are inherited, nothing is re-sent."""
+    return _GATE_FN(i)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--cache", required=True)
     ap.add_argument("--symbols", type=int, default=20)
     ap.add_argument("--jobs", type=int, default=3)
+    ap.add_argument("--gate-jobs", type=int, default=min(3, max(1, (os.cpu_count() or 2) - 1)), help="forked workers of the gate pass (slots in contiguous chunks; 1 = serial)")
     ap.add_argument("--out", default="")
     ap.add_argument("--sealed", action="store_true", help="read the sealed window (finalists only, once)")
     ap.add_argument("--patch", default="", help="overlay patch: JSON object or a path to a JSON file")
@@ -314,89 +323,122 @@ def main() -> int:
     evals = []
     stage_evals = []
     auto = sg.AutoFloors(book, tapes)            # Auto floors per TP step, re-learned every hour from the orders closed before it (as the engine)
-    for now in slots:
-        auto.apply(book, now)
-        hv = collections.defaultdict(float)
-        stage_rows = collections.defaultdict(lambda: collections.defaultdict(float))
-        for st in book.by_idx:
-            # Effective Base PF must describe Base-passing Sets, independently
-            # of whether their later Main/Real windows already pass.
-            ok, key, n, gpf = sg.gate_base(book, tapes, st, now, coordinate=False)
-            keys = by_set_group[st.idx]
-            for k in keys:
-                groups[k]["set_evals"] += 1
-            if a.stage_details:
-                readiness = {}
-                figures = sg.window_figures(book, tapes, st, now, samples=readiness)
-                for key in keys:
-                    groups[key]['full_base_evals'] += bool(readiness.get('baseLong', {}).get('full'))
-                for stage, value in figures.items():
-                    if value is None:
-                        continue
-                    passed, gain, loss, count = value
-                    for dimension, group in keys:
-                        if dimension not in ("all", "indication", "type", "tprange", "side"):
+    def gate_slots(slot_list, evals, stage_evals, progress=True):
+        for now in slot_list:
+            auto.apply(book, now)
+            hv = collections.defaultdict(float)
+            stage_rows = collections.defaultdict(lambda: collections.defaultdict(float))
+            for st in book.by_idx:
+                # Effective Base PF must describe Base-passing Sets, independently
+                # of whether their later Main/Real windows already pass.
+                ok, key, n, gpf = sg.gate_base(book, tapes, st, now, coordinate=False)
+                keys = by_set_group[st.idx]
+                for k in keys:
+                    groups[k]["set_evals"] += 1
+                if a.stage_details:
+                    readiness = {}
+                    figures = sg.window_figures(book, tapes, st, now, samples=readiness)
+                    for key in keys:
+                        groups[key]['full_base_evals'] += bool(readiness.get('baseLong', {}).get('full'))
+                    for stage, value in figures.items():
+                        if value is None:
                             continue
-                        sr = stage_rows[(dimension, group, stage)]
-                        sr["evaluated"] += 1
-                        sr["passed"] += bool(passed)
-                        sample = readiness.get(stage)
-                        if sample:
-                            sr["samples_full"] += sample["full"]
-                            sr["samples_insufficient"] += not sample["full"]
-                            sr["requested_orders"] += sample["requested"]
-                            sr["available_orders"] += min(sample["available"], sample["requested"])
-                        if passed:
-                            sr["gp"] += gain
-                            sr["gl"] += loss
-                            sr["orders"] += count
-            if not ok:
-                continue
-            executable = bool(sg.gate_metrics(book, tapes, st, now)[0])
-            hv["executable"] += executable
-            tx, te, pp = tapes.window(st.idx, now, sg.evidence_s(book), book.win(st).base_long)
-            gp = sum(x - cf for x in pp if x - cf > 0)
-            gl = -sum(x - cf for x in pp if x - cf < 0)
-            # A trade already open at validation was not admitted by that
-            # decision. Select the earliest later entries rather than the
-            # first closes, with stable symbol order when entries share a minute.
-            future = future_tapes.window(st.idx, now, max(nxt_ns))
-            nxt = {m: future[:m] for m in nxt_ns}
-            for k in keys:
-                g = groups[k]
-                g["valid_evals"] += 1
-                g["executable_evals"] += executable
-                g["in_gp"] += gp
-                g["in_gl"] += gl
-                g["in_n"] += len(pp)
+                        passed, gain, loss, count = value
+                        for dimension, group in keys:
+                            if dimension not in ("all", "indication", "type", "tprange", "side"):
+                                continue
+                            sr = stage_rows[(dimension, group, stage)]
+                            sr["evaluated"] += 1
+                            sr["passed"] += bool(passed)
+                            sample = readiness.get(stage)
+                            if sample:
+                                sr["samples_full"] += sample["full"]
+                                sr["samples_insufficient"] += not sample["full"]
+                                sr["requested_orders"] += sample["requested"]
+                                sr["available_orders"] += min(sample["available"], sample["requested"])
+                            if passed:
+                                sr["gp"] += gain
+                                sr["gl"] += loss
+                                sr["orders"] += count
+                if not ok:
+                    continue
+                executable = bool(sg.gate_metrics(book, tapes, st, now)[0])
+                hv["executable"] += executable
+                tx, te, pp = tapes.window(st.idx, now, sg.evidence_s(book), book.win(st).base_long)
+                gp = sum(x - cf for x in pp if x - cf > 0)
+                gl = -sum(x - cf for x in pp if x - cf < 0)
+                # A trade already open at validation was not admitted by that
+                # decision. Select the earliest later entries rather than the
+                # first closes, with stable symbol order when entries share a minute.
+                future = future_tapes.window(st.idx, now, max(nxt_ns))
+                nxt = {m: future[:m] for m in nxt_ns}
+                for k in keys:
+                    g = groups[k]
+                    g["valid_evals"] += 1
+                    g["executable_evals"] += executable
+                    g["in_gp"] += gp
+                    g["in_gl"] += gl
+                    g["in_n"] += len(pp)
+                    for m, v in nxt.items():
+                        g[f"n{m}_gp"] += sum(x for x in v if x > 0)
+                        g[f"n{m}_gl"] += -sum(x for x in v if x < 0)
+                        g[f"n{m}_n"] += len(v)
+                    g["min_n"] = min(g["min_n"], n)
+                hv["valid"] += 1
                 for m, v in nxt.items():
-                    g[f"n{m}_gp"] += sum(x for x in v if x > 0)
-                    g[f"n{m}_gl"] += -sum(x for x in v if x < 0)
-                    g[f"n{m}_n"] += len(v)
-                g["min_n"] = min(g["min_n"], n)
-            hv["valid"] += 1
-            for m, v in nxt.items():
-                hv[f"n{m}_gp"] += sum(x for x in v if x > 0)
-                hv[f"n{m}_gl"] += -sum(x for x in v if x < 0)
-            hv["in_gp"] += gp
-            hv["in_gl"] += gl
-            hv["min_n"] = n if not hv.get("min_n") else min(hv["min_n"], n)
-        evals.append({"t": now, "valid": int(hv["valid"]), "valid_pct": round(100.0 * hv["valid"] / len(book.by_idx), 2),
-                      "executable": int(hv["executable"]), "executable_pct": round(100.0 * hv["executable"] / len(book.by_idx), 2),
-                      "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0),
-                      "next": {str(m): pf(hv[f"n{m}_gp"], hv[f"n{m}_gl"]) for m in nxt_ns}})
-        for (dimension, group, stage), sr in sorted(stage_rows.items()):
-            stage_evals.append({"t": now, "dimension": dimension, "group": group, "stage": stage,
-                                "evaluated": int(sr["evaluated"]), "passed": int(sr["passed"]),
-                                "passed_pct": round(100 * sr["passed"] / sr["evaluated"], 3),
-                                "selection_pf": pf(sr["gp"], sr["gl"]), "orders": int(sr["orders"]),
-                                "samples_full": int(sr["samples_full"]),
-                                "samples_insufficient": int(sr["samples_insufficient"]),
-                                "enough_samples_pct": round(100 * sr["samples_full"] / sr["evaluated"], 3),
-                                "requested_orders": int(sr["requested_orders"]),
-                                "available_orders": int(sr["available_orders"]),
-                                "gain": sr["gp"], "loss": sr["gl"]})
-        print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} Real={int(hv['executable'])}", flush=True)
+                    hv[f"n{m}_gp"] += sum(x for x in v if x > 0)
+                    hv[f"n{m}_gl"] += -sum(x for x in v if x < 0)
+                hv["in_gp"] += gp
+                hv["in_gl"] += gl
+                hv["min_n"] = n if not hv.get("min_n") else min(hv["min_n"], n)
+            evals.append({"t": now, "valid": int(hv["valid"]), "valid_pct": round(100.0 * hv["valid"] / len(book.by_idx), 2),
+                          "executable": int(hv["executable"]), "executable_pct": round(100.0 * hv["executable"] / len(book.by_idx), 2),
+                          "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0),
+                          "next": {str(m): pf(hv[f"n{m}_gp"], hv[f"n{m}_gl"]) for m in nxt_ns}})
+            for (dimension, group, stage), sr in sorted(stage_rows.items()):
+                stage_evals.append({"t": now, "dimension": dimension, "group": group, "stage": stage,
+                                    "evaluated": int(sr["evaluated"]), "passed": int(sr["passed"]),
+                                    "passed_pct": round(100 * sr["passed"] / sr["evaluated"], 3),
+                                    "selection_pf": pf(sr["gp"], sr["gl"]), "orders": int(sr["orders"]),
+                                    "samples_full": int(sr["samples_full"]),
+                                    "samples_insufficient": int(sr["samples_insufficient"]),
+                                    "enough_samples_pct": round(100 * sr["samples_full"] / sr["evaluated"], 3),
+                                    "requested_orders": int(sr["requested_orders"]),
+                                    "available_orders": int(sr["available_orders"]),
+                                    "gain": sr["gp"], "loss": sr["gl"]})
+            if progress:
+                print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} Real={int(hv['executable'])}", flush=True)
+
+    gate_jobs = max(1, int(a.gate_jobs))
+    base_groups = {k: dict(v) for k, v in groups.items()}
+    if gate_jobs > 1 and len(slots) >= 2 * gate_jobs:
+        import concurrent.futures as _cf, multiprocessing as _mp
+        size = -(-len(slots) // gate_jobs)
+        chunks = [slots[i:i + size] for i in range(0, len(slots), size)]
+        def _chunk(i):
+            ev, se_ = [], []
+            auto_c = sg.AutoFloors(book, tapes)
+            nonlocal auto
+            auto = auto_c
+            gate_slots(chunks[i], ev, se_, progress=False)
+            delta = {k: {f: v - base_groups[k].get(f, 0.0) for f, v in g.items() if f != "min_n"} for k, g in groups.items()}
+            mins = {k: g["min_n"] for k, g in groups.items()}
+            return ev, se_, delta, mins
+        globals()["_GATE_FN"] = _chunk
+        with _cf.ProcessPoolExecutor(max_workers=len(chunks), mp_context=_mp.get_context("fork")) as pool:
+            parts = list(pool.map(_run_gate_chunk, range(len(chunks))))
+        for ev, se_, delta, mins in parts:
+            evals.extend(ev); stage_evals.extend(se_)
+            for k, d in delta.items():
+                g = groups[k]
+                for f, v in d.items():
+                    g[f] += v
+            for k, m in mins.items():
+                groups[k]["min_n"] = min(groups[k]["min_n"], m)
+        auto.apply(book, slots[-1])
+        print(f"evaluation {len(evals)}/{len(slots)} (gate pass in {gate_jobs} workers)", flush=True)
+    else:
+        gate_slots(slots, evals, stage_evals)
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
     del auto  # release the completed reporting learner before execution creates its own
 

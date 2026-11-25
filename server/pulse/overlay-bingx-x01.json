@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 0.05,
+  "volumeFactor": 1.6,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
@@ -53,7 +53,7 @@
   "volWeight": 0.3,
   "minStep": 10,
   "maxStopLossRatio": 1.4,
-  "setSlRatios": [0.1, 0.15, 0.2, 0.25, 0.5, 0.75, 1.0, 1.25],
+  "setSlRatios": [0.1, 0.15, 0.2, 0.25, 0.75, 1.25],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
@@ -133,7 +133,7 @@
     "exec.batch": true
   },
   "useMaxLeverage": true,
-  "setMinStep": 5,
+  "setMinStep": 3,
   "setStepMax": 32,
   "setStepAdapt": false,
   "trailMinStep": 3,
@@ -188,12 +188,12 @@
   "holdAutoMax": 50,
   "holdAutoMin": 10,
   "directionMode": "split",
-  "minPfByStep": false,
+  "minPfByStep": true,
   "rankByLane": true,
   "setScratchEnabled": false,
   "tpRanges": {
     "micro": true,
-    "minimal": true,
+    "minimal": false,
     "short": true,
     "normal": true,
     "long": true,
@@ -388,13 +388,26 @@
     }
   },
   "stratTrend": false,
+  "stratGeneral": false,
+  "tpStepsOff": [
+    5,
+    6,
+    7,
+    9,
+    19,
+    30,
+    31
+  ],
+  "packSidesOff": [
+    "reversion:L"
+  ],
   "stratReversion": true,
   "stratFlow": true,
   "stratMulti": false,
   "stratBreakout": true,
   "manualCloseRestMin": 240,
   "manualRestScope": "set",
-  "minPfStepAutoHigh": 1.27,
+  "minPfStepAutoHigh": 1.6,
   "trailMinLockPct": 0,
   "makerFeeRate": 0.0002,
   "takerFeeRate": 0.0005,
@@ -410,7 +423,6 @@
       0.2,
       0.3,
       0.4,
-      0.5,
       0.6,
       0.7,
       0.8
@@ -419,7 +431,6 @@
       0.2,
       0.3,
       0.4,
-      0.5,
       0.6,
       0.7,
       0.8
@@ -450,9 +461,7 @@
       "stepMin": 5,
       "stepMax": 12,
       "slRatios": [
-        0.5,
-        0.75,
-        1.0
+        0.75
       ],
       "types": [
         "base",
@@ -468,9 +477,7 @@
       "stepMin": 6,
       "stepMax": 15,
       "slRatios": [
-        0.5,
-        0.75,
-        1.0
+        0.75
       ],
       "types": [
         "trail"
@@ -479,6 +486,6 @@
   ],
   "exitSets": false,
   "minPfAutoOrdersFactor": 0,
-  "tpStepMin": 5,
+  "tpStepMin": 3,
   "gateRecovery": true
 }

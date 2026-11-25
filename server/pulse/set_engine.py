@@ -2768,6 +2768,19 @@ class SetBook:
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or SET_MIN_STEP_DEFAULT)
         self.tp_step_min = int(max(0, min(STEP_MAX, finite(ov.get("tpStepMin"), 0.0))))      # the TP / Exit Sets' lowest step (0 = setMinStep)
+        # owner 2026-11-24 (disable non-performing configs): single TP steps and pack x side pairs taken off the grid; empty = the grid is unchanged
+        self.tp_steps_off = set()
+        for x in (ov.get("tpStepsOff") or []):
+            try:
+                self.tp_steps_off.add(int(x))
+            except (TypeError, ValueError):
+                pass
+        self.pack_sides_off = set()
+        for x in (ov.get("packSidesOff") or []):
+            name, _, sd = str(x).partition(":")
+            sd = sd.strip().upper()
+            for want in ((1,) if sd in ("L", "LONG") else (-1,) if sd in ("S", "SHORT") else (1, -1, 0)):
+                self.pack_sides_off.add((name.strip(), want))
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_DEFAULT_MAX, self.min_step_cfg, STEP_MAX)
         # owner 2026-11-03: the minimum TP step is 2 and stays there; step-adapt (raise it after losing live fills) is off by default -- on x02 it had
         # raised the minimum to 11 and removed every Set from 0.2 % to 1.0 %
@@ -3146,6 +3159,8 @@ class SetBook:
         idx = 0
         def _put(st: SetState) -> None:
             nonlocal idx
+            if (st.kind != "trail" and st.step in self.tp_steps_off) or (st.pack, st.side) in self.pack_sides_off:
+                return          # tpStepsOff / packSidesOff: this configuration is not built
             if not st.active and st.deact_reason.startswith("out of grid"):
                 st.active = True        # back on the grid: eligible again once it is re-scored
                 st.deact_reason = ""

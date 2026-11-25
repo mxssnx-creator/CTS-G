@@ -16,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "9e3aeec86852459c1e824e35b32ec0d69e6154ab"
+PIN_WANT = "7b05214a282d1be887226b59124a56497275ccb4"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -26,7 +26,7 @@ def overlays_share_grid_contract():
     detail = []
     for path in (X01, X02):
         ov = json.load(open(path))
-        want = {"setMinStep": 5, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
+        want = {"setMinStep": 3 if path == X01 else 5, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.35, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
         if path == X02:
@@ -102,6 +102,11 @@ def _ts_default(raw):
 
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
+    "stratGeneral": "owner 2026-11-24, x01 only: the general pack is off (pooled PF 0.72 on 74 orders); the desk default keeps it on",
+    "setMinStep": "owner 2026-11-24, x01 only: grid minimum step 3; the desk default stays 5",
+    "tpStepMin": "owner 2026-11-24, x01 only: TP Sets from step 3; the desk default stays 5",
+    "timeStopS": "owner 2026-11-24, x01 only: max hold 3 h (10800 s); the desk default stays 6 h",
+    "volumeFactor": "owner 2026-11-24, x01 only: volume factor 1.6; the desk default stays the minimum 0.05",
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
     "symbolCap": "x01 uses 30 symbols by owner request; the shared desk default remains 50",
     # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
