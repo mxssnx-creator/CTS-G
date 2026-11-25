@@ -498,20 +498,163 @@
   "gateRecovery": true,
   "relateConfigs": [
     {
-      "id": "relate-x01",
+      "id": "relate-config",
       "enabled": true,
-      "steps": 4,
+      "steps": 12,
       "ratio": 0.2,
       "mode": "shared",
       "sources": [
-        "configAll",
+        "config"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-configAll",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "configAll"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-overall",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "overall"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-symbol",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "symbol"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-direction",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "direction"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-indication",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "indication"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-strategy",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "strategy"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-coordination",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "coordination"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-range",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "range"
+      ],
+      "lastN": 24,
+      "minTrades": 12,
+      "minPf": 1.2,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
+      "maxLossRun": 3
+    },
+    {
+      "id": "relate-step",
+      "enabled": true,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
         "step"
       ],
       "lastN": 24,
       "minTrades": 12,
       "minPf": 1.2,
-      "maxStack": 1.5,
-      "maxSlRatio": 0.8,
+      "maxStack": 8.0,
+      "maxSlRatio": 1.25,
       "maxLossRun": 3
     }
   ]

@@ -340,3 +340,38 @@ def recovered_relate_fee_evidence_survives_restart():
 
 CHECKS += [('relate.recovered-intent-requires-exact-fill', recovered_relate_requires_exact_reported_fill),
            ('relate.recovered-intent-retains-fee-evidence', recovered_relate_fee_evidence_survives_restart)]
+
+
+def shipped_overlays_run_one_independent_policy_per_relation():
+    """Owner 2026-11-25 ("Relate fuer jede Relation, Steigerung bis zu 12 Orders, standardmaessig aktiv"): x01 and x02 ship one enabled policy per source,
+    12 steps each, every policy with its own history; a winning run of 12 closes in one relation compounds that relation's portion by 1.2 per close up to
+    the policy ceiling, a loss resets only that relation, and the total multiple never exceeds MAX_STACK."""
+    import json, os
+    from relate_engine import RelateBook, SOURCES, MAX_STACK, clean_configs
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "server", "pulse")
+    ok, notes = True, []
+    for conn in ("x01", "x02"):
+        pol = clean_configs(json.load(open(os.path.join(here, f"overlay-bingx-{conn}.json")))["relateConfigs"])
+        per = {p["sources"][0] for p in pol if p["enabled"] and len(p["sources"]) == 1 and p["steps"] == 12}
+        ok = ok and per == set(SOURCES)
+        notes.append(f"{conn} {len(per)}/{len(SOURCES)}")
+    # one relation's winning run raises only that relation's policy; a loss resets it
+    pol = [{"id": "a", "enabled": True, "steps": 12, "ratio": .2, "sources": ["symbol"], "lastN": 24, "minTrades": 5, "minPf": 1.2, "maxStack": 8.0, "maxSlRatio": 1.25},
+           {"id": "b", "enabled": True, "steps": 12, "ratio": .2, "sources": ["direction"], "lastN": 24, "minTrades": 5, "minPf": 1.2, "maxStack": 8.0, "maxSlRatio": 1.25}]
+    b = RelateBook(pol)
+    ident = lambda sym, side: {"config": "c", "symbol": sym, "side": side, "indication": "i:1m", "strategy": "base", "coordination": "Main-Real", "range": "short", "step": 5, "lane": "pos"}
+    totals = []
+    t = 1000.0
+    for i in range(16):
+        rc = b.decide(ident("A-USDT", "LONG"), t, 0.004, 0.005, qualified=True)
+        totals.append(round(rc["total"], 4))
+        b.close(rc, f"p{i}", t + 1, 0.01, accepted=True, final=True)
+        t += 10
+    other = b.decide(ident("B-USDT", "SHORT"), t, 0.004, 0.005, qualified=True)["total"]
+    rc = b.decide(ident("A-USDT", "LONG"), t, 0.004, 0.005, qualified=True); b.close(rc, "loss", t + 1, -0.01, accepted=True, final=True)
+    after = b.decide(ident("A-USDT", "LONG"), t + 10, 0.004, 0.005, qualified=True)["total"]
+    ok = ok and max(totals) <= MAX_STACK + 1e-9 and totals[5] > totals[4] >= 1.0 and totals[-1] > totals[5] and abs(other - 1.0) < 1e-9 and abs(after - 1.0) < 1e-9
+    return ok, f"{', '.join(notes)} policies; winning run totals {totals}; other symbol/side {other}; after a loss {after}"
+
+
+CHECKS.append(('relate.shipped-overlays-run-one-independent-policy-per-relation', shipped_overlays_run_one_independent_policy_per_relation))
