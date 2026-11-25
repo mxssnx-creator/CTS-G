@@ -555,6 +555,34 @@ def block_rounds_auto_judges_every_count_on_its_own_newest_results():
             f"verdict rows {len(rows)}")
 
 
+
+def block_rounds_step_to_twelve_levels_under_the_ceiling():
+    """Owner 2026-11-25 ("12 Steigerungen fuer jede Lane bis Gewinn"): a count steps one level per further losing block up to level 12 and stays there until
+    the group's volume-weighted net is back at zero; the multiple is 1 + ratio x level of the ORIGINAL volume, at most maxMult; the bounds are 12 levels and x 10."""
+    import block_rounds as rounds
+    k = rounds.keys_of("A-USDT", 1, "general", "base", 5, "pos", "s1")
+    cfg = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 99, "counts": {"1": {"on": True, "ratio": 0.5, "step": True, "maxLevel": 40}}})
+    b = rounds.RoundsBook(cfg=cfg)
+    nets = [-1.0] * 14 + [100.0, -1.0]
+    out = []
+    for i, net in enumerate(nets):
+        m = b.ask(k)[0]
+        b.opened(f"p{i}", k, m)
+        b.closed(f"p{i}", net)
+        out.append(round(m, 6))
+    want = [1.0] + [1.0 + 0.5 * lv for lv in range(1, 13)] + [7.0, 7.0, 1.0]
+    ok = (cfg.max_mult == rounds.MULT_MAX == 10.0 and cfg.counts[1].max_level == rounds.LEVEL_MAX == 12 and out == want)
+    # the ceiling binds: ratio 2.0 reaches x 10 at level 5 (1 + 2 x 5 = 11 -> 10) and holds it
+    b2 = rounds.RoundsBook(cfg=rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 10, "counts": {"1": {"on": True, "ratio": 2.0, "step": True, "maxLevel": 12}}}))
+    out2 = []
+    for i in range(8):
+        m = b2.ask(k)[0]
+        b2.opened(f"q{i}", k, m)
+        b2.closed(f"q{i}", -1.0)
+        out2.append(round(m, 6))
+    ok = ok and out2 == [1.0, 3.0, 5.0, 7.0, 9.0, 10.0, 10.0, 10.0]
+    return ok, f"ratio 0.5: {out}; ratio 2.0 under x 10: {out2}; bounds maxMult {cfg.max_mult} level {cfg.counts[1].max_level}"
+
 CHECKS = [
     ("block_structure.every-count-is-independent-and-stacks-from-the-original-volume", every_count_is_independent_and_stacks_from_the_original_volume),
     ("block_structure.six-counts-one-step-apart-run-six-independent-procedures", six_counts_one_step_apart_run_six_independent_procedures),
@@ -566,4 +594,5 @@ CHECKS = [
     ("block_structure.block-rounds-hold-step-pause-and-stack-by-the-rule-on-overlapping-positions", block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions),
     ("block_structure.block-rounds-ship-the-procedure-measured-at-or-above-without", block_rounds_ship_the_procedure_measured_at_or_above_without),
     ("block_structure.block-rounds-auto-judges-every-count-on-its-own-newest-results", block_rounds_auto_judges_every_count_on_its_own_newest_results),
+    ("block_structure.block-rounds-step-to-twelve-levels-under-the-ceiling", block_rounds_step_to_twelve_levels_under_the_ceiling),
 ]

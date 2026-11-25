@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 RELATIONS = ("overall", "direction", "symbol", "indication", "type", "set", "step", "symbol+direction")
 COUNTS = (1, 2, 3, 4, 5, 6)
-RATIO_MAX, LEVEL_MAX, PAUSE_MAX, MULT_MAX = 2.0, 6, 6, 5.0
+RATIO_MAX, LEVEL_MAX, PAUSE_MAX, MULT_MAX = 2.0, 12, 6, 10.0
 KEEP_BLOCKS = 12          # completed blocks kept per procedure for the statistics
 AUTO_N, AUTO_MIN, AUTO_PF, AUTO_RATIO = 30, 15, 1.0, 1.0
 AUTO_N_MAX = 200

@@ -341,9 +341,10 @@
   "blockRounds": {
     "enabled": true,
     "relations": [
-      "step"
+      "step",
+      "set"
     ],
-    "maxMult": 4.0,
+    "maxMult": 10.0,
     "auto": true,
     "autoN": 30,
     "autoMin": 15,
@@ -352,9 +353,9 @@
     "counts": {
       "1": {
         "on": true,
-        "ratio": 1.0,
+        "ratio": 2.0,
         "step": true,
-        "maxLevel": 3,
+        "maxLevel": 12,
         "pause": 0
       },
       "2": {
