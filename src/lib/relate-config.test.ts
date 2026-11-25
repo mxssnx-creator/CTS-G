@@ -22,3 +22,9 @@ test("relate: bounds equal the server's (minimum closes 5, last-N 10, stop ceili
   for (const bad of [{ minTrades: 4 }, { lastN: 9, minTrades: 5 }, { maxSlRatio: 1.2501 }, { maxLossRun: 13 }, { maxLossRun: 1.5 }, { ratio: 0.3 }, { minTrades: 61, lastN: 60 }, { sources: ["nope"] }])
     assert.throws(() => ok(bad), undefined, JSON.stringify(bad));
 });
+
+test("Relate trigger: every subsequent order or only after a win, refused otherwise", () => {
+  assert.equal(relateConfigs(undefined)[0].trigger, "win");
+  assert.equal(relateConfigs([{ id: "e", trigger: "every" }])[0].trigger, "every");
+  assert.throws(() => relateConfigs([{ id: "x", trigger: "loss" }]));
+});

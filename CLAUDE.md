@@ -9,6 +9,8 @@
   step + set, ceiling x10 (`block_structure.block-rounds-step-to-twelve-levels-under-the-ceiling`); the live multiple stays bounded by `VOLUME_MULT_MAX` 5 for Block and 8 for Relate.
   Fixed: a minimum-lot retry made the fill exceed the Relate receipt and disabled every raise. **Measured:** `qN` (live overlay, lookback 1920, 48 h, 12 symbols) executed PF 0.871 / 217 orders / -16.0 %
   against `qT` (lookback 2880) 1.145 / 223 / +16.1 %; `qO` (qN with 2880) decides the lookback. The Relate / Block step-ups are sizing, unmeasured at these levels: they enlarge a winning or losing run, they create no edge.
+  **Relate trigger (owner, same day: "erhoeht JEDE nachfolgende in spezifischen Relation bis N max mit vol Factor X"):** new key `trigger` "win" (earlier rule, a level per winning close, a loss resets; hashed as absent) / "every"
+  (every subsequent order of a qualified relation one level more, whatever the result, up to `steps`, x (1 + ratio) each); x01 / x02 ship "every"; desk select; check `relate.every-trigger-steps-each-subsequent-order-up-to-n`.
   Revert = the previous overlay values (`relateConfigs` relate-x01, blockRounds count 1 ratio 1.0 level 3 ceiling 4, tolerance 5, low 1.02).
 - **2026-11-25, owner: Relate on x01 ("von 60 auf 12", all relations, last-N by samples, loss in a row).** Engine: sources `configAll` (the same Set over all symbols) and `step` (TP step), `maxLossRun` (longest losing streak inside the last-N window,
   0 = off; policy identity unchanged when 0), minimum closes 5 and last-N 10 lower bounds, stop ceiling 1.25, identity `step` from `Pulse.place`; desk settings, 20 `relate.*` checks, `trader.relate-identity-carries-the-tp-step`, `src/lib/relate-config.test.ts`,

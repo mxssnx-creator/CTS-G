@@ -18,7 +18,7 @@ SOURCES = ('config', 'configAll', 'overall', 'symbol', 'direction', 'indication'
 MAX_STACK = 8.0
 DEFAULT = {'id': 'relate-12', 'enabled': False, 'steps': 12, 'ratio': .2,
            'mode': 'shared', 'sources': ['config', 'symbol'], 'lastN': 250,
-           'minTrades': 60, 'minPf': 1.1, 'maxStack': 2., 'maxSlRatio': .5, 'maxLossRun': 0}
+           'minTrades': 60, 'minPf': 1.1, 'maxStack': 2., 'maxSlRatio': .5, 'maxLossRun': 0, 'trigger': 'win'}
 
 
 def finite(x):
@@ -49,6 +49,8 @@ def clean_configs(raw):
         if type(x) is not int or not 0 <= x <= 12: raise ValueError('Invalid Relate maxLossRun')
         if abs(c['ratio']*5-round(c['ratio']*5)) > 1e-9: raise ValueError('Relate ratios use 0.2 increments')
         if c['mode'] not in ('shared','additive'): raise ValueError('Invalid Relate mode')
+        # owner 2026-11-25: 'win' = a level per winning close (a loss resets); 'every' = every subsequent order of the relation one level more, up to steps
+        if c['trigger'] not in ('win','every'): raise ValueError('Invalid Relate trigger')
         if not isinstance(c['sources'],list) or not c['sources'] or any(s not in SOURCES for s in c['sources']):
             raise ValueError('Invalid Relate sources')
         c['sources']=[s for s in SOURCES if s in c['sources']]
@@ -59,6 +61,7 @@ def clean_configs(raw):
 def policy_key(c):
     # maxLossRun 0 (off) is hashed as absent: every policy and saved receipt from before the key existed keeps its identity
     if not c.get('maxLossRun'): c={k:v for k,v in c.items() if k!='maxLossRun'}
+    if c.get('trigger','win')=='win': c={k:v for k,v in c.items() if k!='trigger'}   # the earlier rule keeps its identity
     return c['id']+':'+hashlib.sha256(json.dumps(c,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:20]
 
 
@@ -191,7 +194,8 @@ class RelateBook:
                 s=stats([r[1] for r in rows]);diagnostics[source]=s
                 prev=rows[-1] if rows else None
                 known=prev and len(prev)>=4 and finite(prev[2]) and prev[2]>0 and isinstance(prev[3],int)
-                level=min(c['steps'],prev[3]+1) if eligible and qualifies(s,c) and known and prev[1]>0 else 0
+                won=c.get('trigger','win')=='every' or (known and prev[1] is not None and prev[1]>0)
+                level=min(c['steps'],prev[3]+1) if eligible and qualifies(s,c) and known and won else 0
                 vol=min(local_cap,prev[2]*(1+c['ratio']) if prev[3]<c['steps'] else prev[2]) if level else base
                 parts[source]={'level':level,'extra':max(0.,vol-base)}
             active=[p for p in parts.values() if p['level']>0]

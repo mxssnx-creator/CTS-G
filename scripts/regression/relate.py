@@ -155,7 +155,7 @@ def loss_in_a_row_cap():
 def default_policy_identity_is_unchanged():
     """A policy with maxLossRun 0 hashes exactly like one from before the key existed, so saved receipts and pending intents stay valid; maxLossRun > 0 is a different policy."""
     import hashlib
-    c=clean_configs([config()])[0];old={k:v for k,v in c.items() if k!='maxLossRun'}
+    c=clean_configs([config()])[0];old={k:v for k,v in c.items() if k not in ('maxLossRun','trigger')}   # neither key existed before; 0 / 'win' hash as absent
     want=c['id']+':'+hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:20]
     d=clean_configs([config(maxLossRun=2)])[0]
     return policy_key(c)==want and policy_key(d)!=want and c['maxLossRun']==0,f'default {policy_key(c)==want}, loss-run policy differs {policy_key(d)!=want}'
@@ -375,3 +375,31 @@ def shipped_overlays_run_one_independent_policy_per_relation():
 
 
 CHECKS.append(('relate.shipped-overlays-run-one-independent-policy-per-relation', shipped_overlays_run_one_independent_policy_per_relation))
+
+
+def every_trigger_steps_each_subsequent_order_up_to_n():
+    """Owner 2026-11-25 ("Relate erhoeht JEDE nachfolgende in spezifischen Relation bis N max mit vol Factor X"): with trigger 'every', every subsequent order of a
+    qualified relation is one level more than the order before, whatever that order's result, up to `steps`, each level x (1 + ratio) of the previous volume;
+    another relation is untouched; with trigger 'win' a loss resets; the 'win' policy identity is the earlier one (saved receipts stay valid)."""
+    from relate_engine import RelateBook, clean_configs, policy_key, DEFAULT
+    base = {"id": "e", "enabled": True, "steps": 4, "ratio": 1.0, "sources": ["symbol"], "lastN": 24, "minTrades": 5, "minPf": 1.01, "maxStack": 8.0, "maxSlRatio": 1.25}
+    ident = lambda sym: {"config": "c", "symbol": sym, "side": "LONG", "indication": "i:1m", "strategy": "base", "coordination": "Main-Real", "range": "short", "step": 5, "lane": "pos"}
+
+    def run(trigger, nets):
+        b = RelateBook([{**base, "trigger": trigger}]); t = 1000.0; out = []
+        for i, net in enumerate(nets):
+            rc = b.decide(ident("A-USDT"), t, 0.004, 0.005, qualified=True); out.append(round(rc["total"], 4))
+            b.close(rc, f"p{i}", t + 1, net, accepted=True, final=True); t += 10
+        return out, b.decide(ident("B-USDT"), t, 0.004, 0.005, qualified=True)["total"]
+    # five wins qualify the relation (PF no-loss), then mixed results: 'every' keeps stepping through a loss, 'win' resets after it
+    nets = [0.02] * 5 + [-0.005, 0.02, -0.005, 0.02, 0.02]
+    ev, other = run("every", nets)
+    wi, _ = run("win", nets)
+    want_ev = [1.0] * 5 + [2.0, 4.0, 8.0, 8.0, 8.0]
+    want_wi = [1.0] * 5 + [2.0, 1.0, 2.0, 1.0, 2.0]
+    same_id = policy_key(clean_configs([dict(base)])[0]) == policy_key(clean_configs([{**base, "trigger": "win"}])[0]) != policy_key(clean_configs([{**base, "trigger": "every"}])[0])
+    ok = ev == want_ev and wi == want_wi and abs(other - 1.0) < 1e-9 and same_id and DEFAULT["trigger"] == "win"
+    return ok, f"every {ev}; win {wi}; other relation {other}; win identity unchanged {same_id}"
+
+
+CHECKS.append(('relate.every-trigger-steps-each-subsequent-order-up-to-n', every_trigger_steps_each_subsequent_order_up_to_n))

@@ -511,7 +511,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-configAll",
@@ -527,7 +528,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-overall",
@@ -543,7 +545,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-symbol",
@@ -559,7 +562,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-direction",
@@ -575,7 +579,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-indication",
@@ -591,7 +596,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-strategy",
@@ -607,7 +613,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-coordination",
@@ -623,7 +630,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-range",
@@ -639,7 +647,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     },
     {
       "id": "relate-step",
@@ -655,7 +664,8 @@
       "minPf": 1.2,
       "maxStack": 8.0,
       "maxSlRatio": 1.25,
-      "maxLossRun": 3
+      "maxLossRun": 3,
+      "trigger": "every"
     }
   ]
 }

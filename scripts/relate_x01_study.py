@@ -114,7 +114,7 @@ def draw(rng: random.Random) -> Dict[str, Any]:
     return {"id": "study", "enabled": True, "steps": rng.choice([2, 4, 8, 12]), "ratio": rng.choice([0.2, 0.4, 0.6, 1.0]), "mode": rng.choice(["shared", "additive"]),
             "sources": rng.choice([["configAll"], ["configAll", "config"], ["configAll", "symbol"], ["configAll", "range"], ["configAll", "strategy"], ["configAll", "direction"], ["coordination"], ["coordination", "configAll"], ["coordination", "range"], ["configAll", "range", "coordination"], ["range"], ["step"], ["step", "configAll"], ["step", "direction"], ["indication"], ["indication", "direction"], ["overall"], ["symbol"], ["direction", "step", "range"]]),
             "lastN": last_n, "minTrades": min_trades, "minPf": rng.choice([1.05, 1.1, 1.2, 1.3, 1.5]), "maxStack": rng.choice([1.5, 2.0, 3.0]),
-            "maxSlRatio": rng.choice([0.5, 0.8, 1.25]), "maxLossRun": rng.choice([0, 2, 3, 4, 6])}
+            "maxSlRatio": rng.choice([0.5, 0.8, 1.25]), "maxLossRun": rng.choice([0, 2, 3, 4, 6]), "trigger": rng.choice(["win", "every"])}
 
 
 def main() -> int:
@@ -158,7 +158,7 @@ def main() -> int:
         held.append(passes)
         print(f"dev PF {r['pfWith']}/{r['pfWithout']} net {r['netWith']:.1f}/{r['netWithout']:.1f} raised {r['raised']} max x{r['maxMult']:.2f} | confirm "
               + " ".join(f"{x['pfWith']}/{x['pfWithout']} r{x['raised']}" for x in cc) + (f" | live {lv['pfWith']}/{lv['pfWithout']} r{lv['raised']}" if lv else "")
-              + f" {'HOLDS' if passes else 'fails'} | {json.dumps({k: c[k] for k in ('steps', 'ratio', 'mode', 'sources', 'lastN', 'minTrades', 'minPf', 'maxStack', 'maxSlRatio', 'maxLossRun')})}")
+              + f" {'HOLDS' if passes else 'fails'} | {json.dumps({k: c[k] for k in ('steps', 'ratio', 'mode', 'sources', 'lastN', 'minTrades', 'minPf', 'maxStack', 'maxSlRatio', 'maxLossRun', 'trigger')})}")
     print("held on confirmation:", sum(held), "of", len(held))
     if a.out:
         json.dump([{"cfg": c, "dev": r} for c, r in ok[:50]], open(a.out, "w"), default=str)

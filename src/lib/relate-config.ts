@@ -3,9 +3,11 @@ export type RelateSource = (typeof RELATE_SOURCES)[number];
 export type RelateConfig = {
   id: string; enabled: boolean; steps: number; ratio: number; mode: "shared" | "additive";
   sources: RelateSource[]; lastN: number; minTrades: number; minPf: number; maxStack: number; maxSlRatio: number; maxLossRun: number;
+  /** "win": one level per winning close, a loss resets; "every": every subsequent order of the relation one level more, up to steps (owner 2026-11-25). */
+  trigger: "win" | "every";
 };
 export const DEFAULT_RELATE_CONFIG: RelateConfig = { id: "relate-12", enabled: false, steps: 12, ratio: .2,
-  mode: "shared", sources: ["config", "symbol"], lastN: 250, minTrades: 60, minPf: 1.1, maxStack: 2, maxSlRatio: .5, maxLossRun: 0 };
+  mode: "shared", sources: ["config", "symbol"], lastN: 250, minTrades: 60, minPf: 1.1, maxStack: 2, maxSlRatio: .5, maxLossRun: 0, trigger: "win" };
 
 /** Invalid policies are refused whole; silently changing a sizing policy would reuse the wrong evidence. */
 export function relateConfigs(raw: unknown): RelateConfig[] {
@@ -18,6 +20,7 @@ export function relateConfigs(raw: unknown): RelateConfig[] {
     if (typeof c.id !== "string" || !c.id || c.id.length > 64 || ids.has(c.id)) throw new Error("Relate IDs must be unique");
     ids.add(c.id);
     if (typeof c.enabled !== "boolean" || !["shared", "additive"].includes(c.mode)) throw new Error("Invalid Relate mode");
+    if (!["win", "every"].includes(c.trigger)) throw new Error("Invalid Relate trigger");
     for (const [key, lo, hi, integer] of [
       ["steps",2,15,true], ["lastN",10,250,true], ["minTrades",5,250,true],
       ["maxLossRun",0,12,true], ["ratio",.2,6,false], ["minPf",1.000001,100,false], ["maxStack",1,8,false], ["maxSlRatio",.01,1.25,false],
