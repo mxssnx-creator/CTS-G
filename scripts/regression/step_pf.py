@@ -392,8 +392,9 @@ def shipped_micro_floor_is_positive_and_shared_by_every_stage():
         raw = json.loads(path.read_text())
         book = se.SetBook(); book.load(raw)
         micro_sets = [st for st in book.by_idx if book.step_bucket(st) in (2, 3) and not se.is_signal_pack(st.pack)]
-        if raw.get('minPfByRange', {}).get('micro') != 1.01 or not micro_sets:
-            failures.append(path.name + ': missing Micro')
+        # tpStepMin 5 (owner) builds no Micro Set on x01 / x02: their Micro floor key must still be 1.01, the Sets are read where they exist
+        if raw.get('minPfByRange', {}).get('micro') != 1.01:
+            failures.append(path.name + ': missing Micro floor')
         for st in micro_sets:
             got = {book.floor_for(n, st.pack, st) for n in (1,5,10,20,50)}
             got |= {book.stage_params(st.pack, st).floor_for(n) for n in (1,5,10,20,50)}

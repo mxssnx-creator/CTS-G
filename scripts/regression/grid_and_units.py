@@ -351,7 +351,7 @@ def long_and_wide_ranges_stop_at_sl_ratio_one_and_the_minimum_step_stays_two():
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
             [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     ship = {_o.path.basename(f): (lambda d: (d.get("slMaxByRange"), d.get("setMinStep"), d.get("setStepAdapt")))(_j.load(open(f))) for f in files}
-    ship_ok = all(v[1:] == (2, False) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for v in ship.values())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
+    ship_ok = all(v[1:] in ((2, False), (5, False) if n == "overlay-bingx-x02.json" else (2, False)) and v[0] in ({"long": 1.0, "wide": 1.0}, {"long": 0.8, "wide": 0.8}, {"long": 1.4, "wide": 1.4}) for n, v in ship.items())   # x01 / x02: the 0.8 SL ceiling (owner 2026-11-13), 1.4 (owner 2026-11-14)
     plain = SetBook()
     plain.load({"histEnabled": True})
     eng_ok = plain.step_adapt is False and plain.sl_max_by_range == {"long": 1.0, "wide": 1.0} and plain.min_step == 2

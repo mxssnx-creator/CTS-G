@@ -16,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "abc9fffde688fb1a7969354e19125024af0bb3df"
+PIN_WANT = "e6d6065f1eca6aad8d1719d392395ca1ac5790da"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -29,6 +29,8 @@ def overlays_share_grid_contract():
         want = {"setMinStep": 2, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 1920,
                 "setMinPf": 1.25, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
+        if path == X02:            # x02 demo defaults (commit 182bab8): minimum TP step 5, minimum trailing arm 7
+            want = {**want, "setMinStep": 5, "trailMinStep": 7}
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
         detail.append(f"{os.path.basename(path)}:{'ok' if not bad else bad}")
@@ -225,13 +227,13 @@ def dca_is_off_by_default_with_set_and_axis_options_off_everywhere():
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
     hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
     ok_all, detail = hard, [f"kill_switch_not_thrown={hard}"]
-    # owner 2026-11-14 ("run always all ... the evals decide"): the x02 demo runs DCA behind its own Axis gate (dcaOnAxis), never unconditionally on Sets;
-    # x01 keeps it off
+    # x02 demo defaults (commit 182bab8, after the owner's 2026-11-14 "run always all"): DCA is off on x02 as well, with its auto plan off;
+    # x01 keeps the auto plan on (switched off by dcaEnabled / stratDca)
     for path in (X01, X02):
         ov = json.load(open(path))
         if path == X02:
-            good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
-                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is True)
+            good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is False
+                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
         else:
             good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
                     and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
