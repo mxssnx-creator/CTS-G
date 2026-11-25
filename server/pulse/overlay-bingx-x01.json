@@ -53,7 +53,10 @@
   "volWeight": 0.3,
   "minStep": 10,
   "maxStopLossRatio": 1.4,
-  "setSlRatios": [0.5, 0.75, 1.25],
+  "setSlRatios": [
+    0.75,
+    1.25
+  ],
   "trailingMinStep": 6,
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
@@ -389,8 +392,14 @@
   },
   "stratTrend": false,
   "stratGeneral": false,
-  "tpStepsOff": [7, 9, 19],
-  "packSidesOff": ["reversion:L"],
+  "tpStepsOff": [
+    7,
+    9,
+    19
+  ],
+  "packSidesOff": [
+    "reversion:L"
+  ],
   "stratReversion": true,
   "stratFlow": true,
   "stratMulti": false,
@@ -413,7 +422,6 @@
       0.2,
       0.3,
       0.4,
-      0.5,
       0.6,
       0.7,
       0.8
@@ -422,7 +430,6 @@
       0.2,
       0.3,
       0.4,
-      0.5,
       0.6,
       0.7,
       0.8
@@ -453,9 +460,7 @@
       "stepMin": 5,
       "stepMax": 12,
       "slRatios": [
-        0.5,
-        0.75,
-        1.0
+        0.75
       ],
       "types": [
         "base",
@@ -471,9 +476,7 @@
       "stepMin": 6,
       "stepMax": 15,
       "slRatios": [
-        0.5,
-        0.75,
-        1.0
+        0.75
       ],
       "types": [
         "trail"

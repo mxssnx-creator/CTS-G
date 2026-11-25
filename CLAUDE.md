@@ -2,6 +2,9 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-24 (later), owner: "On x01 live: disable non performing SL ratios."** SL ratio 0.5 off everywhere on x01 (pooled over live + sims B2 / X / F: 105 orders, PF 0.62; live 0.41, B2 0.79,
+  F 0.47, X 1.25): `setSlRatios` [0.75, 1.25], `slRatiosByRange` long / wide without 0.5, `signalConfigs` slRatios [0.75] (their 0.5 and 1.0 were the weak ratios: 1.0 pooled 0.65 on 284 orders, off since the earlier
+  disable). Kept: 0.8 (pooled 0.80 on 90, mixed), 1.25 (0.89 on 364, mixed). Counterfactual arm G (also without 0.8) is measured separately. Revert = the old lists.
 - **2026-11-24 (autonomous, after the owner set 3 h): x01 max hold back to 6 h (`timeStopS` 21600).** Counterfactual sim (48 h, 12 symbols, actual x01 overlay with the 2026-11-24 disables; executed PF / orders / net / time exits):
   3 h 0.844 / 282 / -23.3 % / 93, **6 h 0.972 / 250 / -3.9 % / 18**; first 24 h 0.52 -> 0.80, last 24 h 2.00 -> 1.64 (mixed by half, clearly better overall). The disables themselves against the same Sets
   before (8,532 Sets, 3 h): 0.831 / 260 -> 0.844 / 282 (first 24 h 0.49 -> 0.52, last 1.81 -> 2.00). Revert = `timeStopS` 10800.
