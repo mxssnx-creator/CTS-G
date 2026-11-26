@@ -2,6 +2,13 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-27, owner: "Freigabe ... optimal minstep und mintrailstep, check live x01 history and disable non performing configs", "decrease symbols on live x01 to 30 and enable the working Relate".**
+  Live x01 closes since 11-26 11:14 (148 engine closes, USDT PF / closes): **trailing 0.26 / 73 (-2.22 USDT)** (trail lock 0.0 0.00 / 8, 0.6 0.30 / 10), flow 0.32 / 64, indications 0.37 / 35, reversion 0.46 / 24,
+  SL 0.20 0.33 / 13 (0.30 0.84, 0.75 0.76), TP step 22 0.18 / 10, step 28 3.63 / 8. Shipped on x01: `symbolCap` 30; `volumeByKind` trail 2.0 -> **1.0** (the x2 doubled the worst group's size);
+  `trailMinLockPct` 0 -> **0.2** (no trailing pair that locks under 0.2 %); SL ratio 0.2 off in the Long / Wide ranges; **Block rounds back to the measured setting** (counts 1 + 2, ratio 1.0, level 3, ceiling x4: the 12-level x10 / ratio 2.0
+  setting raised live entries x2.5 after losses while the account fell 4.96 -> 2.34 USDT); Relate (10 policies, trigger every) stays on and raised nothing live yet (rel_mult 1.0). `setMinStep` / `tpStepMin` 2 and `trailStepMin` 12 / `trailMinStep` 3 are kept:
+  the sim (arm C 1.379 / 293 against 1.171 / 284) supports 2, and live has no closes at steps 2-6 to say more. Other defects: another engine closed x01 positions ("external-position-close", 31 in 2 h) - the CTS-A-O desk and the older CTS-G session
+  were told to stop; `ensure_x01.sh` leaked its flock fd into the watchdog, engine and redis it started (the lock stayed held forever): fd 9 is closed for each. Revert = the earlier overlay values.
 - **2026-11-26 (later), owner: "Low-Range indications and strategies ... high freq and success ... test with 12, 12 h trade sims and 25 symbols".** Sim (trade_sim, top 25 symbols fetched, 20 loaded,
   last 24 h after 48 h pre-history, executed PF / orders / net, halves of 12 h): A current x01 1.171 / 284 / +23.6 % (1.34 / 223, 0.77 / 61); B steps 2 - 6 incl. 5 / 6 + Minimal range 1.210 / 296 / +32.0 %
   (1.45 / 226, 0.66 / 70); **C = B + SL ratios 0.5 / 0.75 / 1.0 / 1.25: 1.379 / 293 / +47.5 % (1.68 / 219, 0.82 / 74)** - better on both halves with more orders, **shipped on x01** (`tpStepsOff`

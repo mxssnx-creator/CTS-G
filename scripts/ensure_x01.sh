@@ -23,7 +23,7 @@ watchdog() {
   if [ -n "$w" ] && tr '\0' ' ' < "/proc/$w/cmdline" 2>/dev/null | grep -q "x01_watchdog.sh"; then
     echo "x01 watchdog running (pid $w)"
   else
-    nohup bash "$REPO/scripts/x01_watchdog.sh" >> "$DIR/x01_watchdog.log" 2>&1 &
+    nohup bash "$REPO/scripts/x01_watchdog.sh" >> "$DIR/x01_watchdog.log" 2>&1 9>&- &
     echo "x01 watchdog started"
   fi
 }
@@ -48,7 +48,7 @@ CRED_FILE="${CRED_FILE:-/var/lib/cts-g/cred-bingx-x01.json}"
 if command -v redis-cli >/dev/null 2>&1; then
   if ! redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1 && command -v redis-server >/dev/null 2>&1; then
     mkdir -p /var/lib/cts-g/redis /var/log/cts-g
-    redis-server --daemonize yes --bind 127.0.0.1 --port 6379 --dir /var/lib/cts-g/redis --save "" --appendonly no --logfile /var/log/cts-g/redis.log >/dev/null 2>&1
+    redis-server --daemonize yes --bind 127.0.0.1 --port 6379 --dir /var/lib/cts-g/redis --save "" --appendonly no --logfile /var/log/cts-g/redis.log >/dev/null 2>&1 9>&-
     sleep 1
   fi
   if [ -r "$CRED_FILE" ] && [ -z "$(redis-cli -h 127.0.0.1 -p 6379 HGET connection:bingx-x01 api_key 2>/dev/null)" ]; then
@@ -61,6 +61,6 @@ PY
   fi
 fi
 python3 -c "import websocket, httpx, orjson" 2>/dev/null || python3 -m pip install --quiet --break-system-packages -r "$REPO/requirements.txt"
-PULSE_CONN=bingx-x01 PYTHONUNBUFFERED=1 nohup python3 -B server/pulse/pulse_trader.py >> "$DIR/x01_live.log" 2>&1 &
+PULSE_CONN=bingx-x01 PYTHONUNBUFFERED=1 nohup python3 -B server/pulse/pulse_trader.py >> "$DIR/x01_live.log" 2>&1 9>&- &
 echo "x01 engine started (pid $!)"
 watchdog

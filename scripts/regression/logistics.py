@@ -103,6 +103,7 @@ def _ts_default(raw):
 
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
+    "trailMinLockPct": "owner 2026-11-26, x01 only: trailing pairs locking under 0.2 % build no Set (live x01: lock 0.0 PF 0.00 on 8, lock 0.6 PF 0.30 on 10; trailing 0.26 on 73 closes); the desk default keeps 0",
     "axisLastEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
     "axisContEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
     "axisPauseEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
