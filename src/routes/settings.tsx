@@ -1409,14 +1409,17 @@ function SettingsPage() {
           )}
 
           {section === "block" && (
-            <Card title="Relate strategy" hint="Independent post-Base sizing policies. Twelve winning steps by default; a loss resets its relation. Stops must stay at or below half the TP distance after costs and minimum-distance adjustments.">
+            <Card title="Relate strategy" hint="Each settled loss adds one step to its relation. A win or flat close resets it. The exact Set and the relation both need a qualifying return window.">
               {overlay.relateConfigs.map((cfg, index) => {
                 const update = (change: Partial<RelateConfig>) => patch("relateConfigs", overlay.relateConfigs.map((c, i) => i === index ? { ...c, ...change } : c));
                 return <fieldset key={cfg.id} className="mb-5 rounded-xl border border-white/10 p-4">
                   <legend className="px-2 text-sm font-medium">{cfg.id}</legend>
                   <Grid>
                     <Toggle label="Enable policy" on={cfg.enabled} onChange={enabled => update({ enabled })} />
-                    <Num label="Winning steps" value={cfg.steps} min={2} max={15} step={1} onChange={steps => update({ steps })} />
+                    <Num label="Maximum loss steps" value={cfg.steps} min={2} max={15} step={1} onChange={steps => update({ steps, activeStep: Math.min(steps, cfg.activeStep) })} />
+                    <Num label="Relate Active positions to skip" value={cfg.activeStep} min={0} max={Math.min(cfg.steps, 6)} step={1}
+                      hint="The relation keeps tracking settled closes and starts allocating after this many losses."
+                      onChange={activeStep => update({ activeStep })} />
                     <Num label="Increase ratio" value={cfg.ratio} min={.2} max={6} step={.2} onChange={ratio => update({ ratio })} />
                     <Num label="Maximum SL / TP" value={cfg.maxSlRatio} min={.01} max={.5} step={.01} onChange={maxSlRatio => update({ maxSlRatio })} />
                     <Num label="Policy stack ceiling" value={cfg.maxStack} min={1} max={8} step={.25} hint="Parallel policies share a total 8× ceiling, including Block and DCA." onChange={maxStack => update({ maxStack })} />
@@ -1424,10 +1427,16 @@ function SettingsPage() {
                     <Num label="Last-N parent closes" value={cfg.lastN} min={cfg.minTrades} max={250} step={1} onChange={lastN => update({ lastN })} />
                     <Num label="Minimum parent closes" value={cfg.minTrades} min={60} max={cfg.lastN} step={1} onChange={minTrades => update({ minTrades })} />
                     <label className="text-sm">Relation combination<select className="mt-1 block w-full rounded border p-2" value={cfg.mode} onChange={e => update({ mode: e.target.value === "additive" ? "additive" : "shared" })}><option value="shared">Shared average</option><option value="additive">Additive</option></select></label>
-                    {RELATE_SOURCES.map(source => <Toggle key={source} label={source} on={cfg.sources.includes(source)} onChange={on => {
+                    <label className="text-sm">Relation scope<select className="mt-1 block w-full rounded border p-2" value={cfg.scope} onChange={e => update({ scope: e.target.value === "overall" ? "overall" : "selected" })}><option value="selected">Selected relations</option><option value="overall">Overall · all relations</option></select></label>
+                    {cfg.scope === "selected" && RELATE_SOURCES.map(source => <Toggle key={source} label={source === "overall" ? "All symbols" : source === "symbol" ? "Single symbol" : source} on={cfg.sources.includes(source)} onChange={on => {
                       const sources = on ? [...cfg.sources, source] : cfg.sources.filter(s => s !== source);
                       if (sources.length) update({ sources });
                     }} />)}
+                    {RELATE_SOURCES.filter(source => cfg.scope === "overall" || cfg.sources.includes(source)).map(source => (
+                      <Num key={source} label={`${source === "overall" ? "All symbols" : source === "symbol" ? "Single symbol" : source} volume factor`}
+                        value={cfg.volumeFactors[source] ?? 1} min={0} max={8} step={.1}
+                        onChange={factor => update({ volumeFactors: { ...cfg.volumeFactors, [source]: factor } })} />
+                    ))}
                   </Grid>
                   {overlay.relateConfigs.length > 1 && <button className="mt-3 text-sm underline" onClick={() => patch("relateConfigs", overlay.relateConfigs.filter((_, i) => i !== index))}>Remove policy</button>}
                 </fieldset>;

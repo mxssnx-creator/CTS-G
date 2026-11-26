@@ -1,24 +1,22 @@
 """Causal post-Base Relate sizing, shared by Pulse and offline execution studies.
 
-Ported from CTS-A-O's RelateBook contract: a qualified winning parent can grow
-its next recorded portion; losses reset it. Sizing never improves unit-return PF
-by itself. Only confirmed owned final parents teach this live book. Parallel
+Each consecutive, settled loss adds a step in the applicable relation. A known
+non-loss resets its progression. Only confirmed owned final parents teach this live book. Parallel
 policies and relations keep independent histories and immutable entry receipts.
 """
 from __future__ import annotations
-from collections import deque
-from dataclasses import asdict, dataclass
+from bisect import bisect_left, bisect_right
 import hashlib
 import json
 import math
 import os
-from typing import Any
 
 SOURCES = ('config', 'overall', 'symbol', 'direction', 'indication', 'strategy', 'coordination', 'range')
 MAX_STACK = 8.0
 DEFAULT = {'id': 'relate-12', 'enabled': False, 'steps': 12, 'ratio': .2,
            'mode': 'shared', 'sources': ['config', 'symbol'], 'lastN': 250,
-           'minTrades': 60, 'minPf': 1.1, 'maxStack': 2., 'maxSlRatio': .5}
+           'minTrades': 60, 'minPf': 1.1, 'maxStack': 2., 'maxSlRatio': .5,
+           'scope': 'selected', 'volumeFactors': {}, 'activeStep': 0}
 
 
 def finite(x):
@@ -27,7 +25,7 @@ def finite(x):
 
 def clean_configs(raw):
     if raw is None:
-        return [dict(DEFAULT)]
+        raw = [{}]
     if not isinstance(raw, list) or not 1 <= len(raw) <= 12:
         raise ValueError('Relate requires 1..12 independent policies')
     result, ids = [], set()
@@ -43,10 +41,19 @@ def clean_configs(raw):
             if not finite(x) or x != int(x) or not lo <= x <= hi: raise ValueError('Invalid Relate '+key)
             c[key]=int(x)
         if c['minTrades'] > c['lastN']: raise ValueError('Relate minTrades exceeds lastN')
+        threshold=c['activeStep']
+        if not finite(threshold) or threshold != int(threshold) or not 0 <= threshold <= min(6, c['steps']):
+            raise ValueError('Invalid Relate Active skip count')
+        c['activeStep']=int(threshold)
         for key, lo, hi in [('ratio', .2, 6), ('minPf', 1.000001, 100), ('maxStack', 1, MAX_STACK), ('maxSlRatio', .01, .5)]:
             if not finite(c[key]) or not lo <= c[key] <= hi: raise ValueError('Invalid Relate '+key)
         if abs(c['ratio']*5-round(c['ratio']*5)) > 1e-9: raise ValueError('Relate ratios use 0.2 increments')
         if c['mode'] not in ('shared','additive'): raise ValueError('Invalid Relate mode')
+        if c['scope'] not in ('selected','overall'): raise ValueError('Invalid Relate scope')
+        factors=c['volumeFactors']
+        if not isinstance(factors,dict) or any(s not in SOURCES or not finite(v) or not 0 <= v <= MAX_STACK for s,v in factors.items()):
+            raise ValueError('Invalid Relate volume factors')
+        c['volumeFactors']=dict(factors)
         if not isinstance(c['sources'],list) or not c['sources'] or any(s not in SOURCES for s in c['sources']):
             raise ValueError('Invalid Relate sources')
         c['sources']=[s for s in SOURCES if s in c['sources']]
@@ -58,11 +65,19 @@ def policy_key(c):
     return c['id']+':'+hashlib.sha256(json.dumps(c,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:20]
 
 
+def selected_sources(c):
+    return SOURCES if c['scope']=='overall' else c['sources']
+
+
+def recorded_sources(c):
+    return tuple(s for s in SOURCES if s=='config' or s in selected_sources(c))
+
+
 def identity_keys(x):
     required=('config','symbol','side','indication','strategy','coordination','range','lane')
     if not all(isinstance(x.get(k),str) and x[k] for k in required): raise ValueError('Incomplete Relate lane identity')
     # Broader relations are intentional sizing contexts, never substitutes for exact config qualification.
-    lane=x['lane']
+    lane=(x['lane'], x['coordination'])
     return {
         'config': json.dumps([x[k] for k in required],separators=(',',':')),
         'overall': json.dumps(['overall',lane]),
@@ -110,13 +125,18 @@ def receipt_parts(receipt):
     updates=[];extra=0.
     for pk,p in policies.items():
         c=clean_configs([p['policy']])[0]
-        if pk!=policy_key(c) or set(p['parts'])!=set(c['sources']): raise ValueError('Relate receipt policy changed')
-        for source in c['sources']:
+        legacy='progression' not in p['policy']
+        sources=c['sources'] if legacy else recorded_sources(c)
+        if pk!=policy_key(p['policy']) or set(p['parts'])!=set(sources): raise ValueError('Relate receipt policy changed')
+        if not legacy and (c.get('progression')!='losses' or c!=p['policy']): raise ValueError('Relate receipt policy changed')
+        # Legacy receipts can finish settling without supplying old winning levels to the new policy.
+        for source in sources:
             part=p['parts'][source];volume=part.get('volume');level=part.get('level');addition=part.get('extra')
             if not finite(volume) or not 0<volume<=MAX_STACK or not finite(addition) or addition<0 or abs(volume-base-addition)>1e-9:
                 raise ValueError('Invalid Relate funded portion')
             if type(level) is not int or not 0<=level<=c['steps']: raise ValueError('Invalid Relate level')
-            extra+=addition;updates.append((pk,source+':'+keys[source],volume,level,c['lastN']))
+            extra+=addition
+            if not legacy: updates.append((pk,source+':'+keys[source],volume,level,c['lastN']))
     if abs(base+extra-total)>1e-9: raise ValueError('Relate funded portions do not reconcile')
     return updates
 
@@ -147,6 +167,7 @@ def validate_saved(saved):
 class RelateBook:
     def __init__(self, configs=None, path=None):
         self.configs=clean_configs(configs);self.path=path;self.books={};self.seen={};self.pending={};self.error='';self.closed=0
+        self._windows={}
         if path and os.path.exists(path):
             try:
                 with open(path) as f: saved=json.load(f)
@@ -160,6 +181,15 @@ class RelateBook:
     def configure(self, configs):
         self.configs=clean_configs(configs)
 
+    def _window(self, policy, key, rows, now):
+        end=bisect_left(rows,now,key=lambda row: row[0])
+        cache_key=(policy,key)
+        if end==len(rows) and cache_key in self._windows:
+            return rows, end, self._windows[cache_key]
+        summary=stats([r[1] for r in rows[:end]])
+        if end and end==len(rows): self._windows[cache_key]=summary
+        return rows,end,summary
+
     def decide(self, identity, now, sl, tp, *, qualified=False, base=1., total_cap=MAX_STACK):
         if not finite(now) or not finite(base) or base<=0 or not finite(total_cap) or total_cap<=0:
             raise ValueError('Invalid Relate decision inputs')
@@ -167,22 +197,24 @@ class RelateBook:
         receipt={'identity':dict(identity),'at':now,'base':base,'total':base,'policies':{},'qualified':qualified is True}
         if not qualified or self.error: return receipt
         requests=[]
-        for c in self.configs:
-            if not c['enabled']: continue
+        for settings in self.configs:
+            if not settings['enabled']: continue
+            c={**settings,'progression':'losses'}
             pk=policy_key(c);book=self.books.get(pk,{})
             parts={};diagnostics={};local_cap=min(cap,c['maxStack']);eligible=stop_within_ratio(sl,tp,c['maxSlRatio'])
-            for source in c['sources']:
-                state=book.get(source+':'+keys[source],{})
-                rows=[r for r in state.get('rows',[]) if r[0]<now][-c['lastN']:]
-                s=stats([r[1] for r in rows]);diagnostics[source]=s
-                prev=rows[-1] if rows else None
-                known=prev and len(prev)>=4 and finite(prev[2]) and prev[2]>0 and isinstance(prev[3],int)
-                level=min(c['steps'],prev[3]+1) if eligible and qualifies(s,c) and known and prev[1]>0 else 0
-                vol=min(local_cap,prev[2]*(1+c['ratio']) if prev[3]<c['steps'] else prev[2]) if level else base
-                parts[source]={'level':level,'extra':max(0.,vol-base)}
-            active=[p for p in parts.values() if p['level']>0]
-            divisor=max(1,len(active)) if c['mode']=='shared' else 1
-            for p in parts.values(): p['extra']/=divisor
+            selected=selected_sources(c)
+            weights={s: c['volumeFactors'].get(s,1.) for s in selected}
+            divisor=sum(weights.values()) if c['mode']=='shared' else 1.
+            for source in recorded_sources(c):
+                key=source+':'+keys[source]
+                rows,end,s=self._window(pk,key,book.get(key,{}).get('rows',[]),now)
+                diagnostics[source]=s
+                level=0
+                if eligible and qualifies(s,c) and qualifies(diagnostics['config'],c):
+                    while level<min(end,c['steps']) and rows[end-level-1][1] < 0: level+=1
+                vol=min(local_cap,base*(1+c['ratio'])**level) if level and level>=c['activeStep'] else base
+                weight=weights.get(source,0.) / divisor if divisor else 0.
+                parts[source]={'level':level,'extra':max(0.,vol-base)*weight}
             wanted=sum(p['extra'] for p in parts.values());room=max(0.,local_cap-base)
             scale=min(1.,room/wanted) if wanted else 0.
             for p in parts.values(): p['extra']*=scale
@@ -220,8 +252,8 @@ class RelateBook:
         for pk,key,volume,level,last_n in updates:
             book=self.books.setdefault(pk,{})
             state=book.setdefault(key,{'rows':[]});rows=state['rows']
-            rows.append([at,r,volume,level])
-            rows.sort(key=lambda x:x[0]);del rows[:-last_n]
+            rows.insert(bisect_right(rows,at,key=lambda row: row[0]),[at,r,volume,level]);del rows[:-last_n]
+            self._windows.pop((pk,key),None)
         self.seen[event]=at;self.closed+=1
         # Never prune deduplication evidence and then re-admit an old parent as a new observation.
         if len(self.seen)>100000:

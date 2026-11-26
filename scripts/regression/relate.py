@@ -14,27 +14,27 @@ def config(**patch):
     return {'id':'test','enabled':True,'steps':12,'ratio':.2,'mode':'shared','sources':['config'],
             'lastN':60,'minTrades':60,'minPf':1.05,'maxStack':8.,'maxSlRatio':.5,**patch}
 
-def warm(book,identity=ID,n=60,ret=.01):
+def warm(book,identity=ID,n=60,ret=.01,last_loss=False):
     for i in range(n):
         d=book.decide(identity,i*2,.003,.01,qualified=True)
-        book.close(d,str(identity)+str(i),i*2+1,ret,accepted=True,final=True)
+        book.close(d,str(identity)+str(i),i*2+1,-.001 if last_loss and i==n-1 else ret,accepted=True,final=True)
 
 def progression_twelve_steps():
-    b=RelateBook([config()]);warm(b)
+    b=RelateBook([config()]);warm(b,last_loss=True)
     levels=[];sizes=[]
     for i in range(15):
         d=b.decide(ID,200+i*2,.003,.01,qualified=True)
         p=next(iter(d['policies'].values()))['parts']['config']
         levels.append(p['level']);sizes.append(d['total'])
-        b.close(d,'progress'+str(i),201+i*2,.01,accepted=True,final=True)
+        b.close(d,'progress'+str(i),201+i*2,-.001,accepted=True,final=True)
     want=[min(12,i+1) for i in range(15)]
     reset=b.decide(ID,240,.003,.01,qualified=True)
-    b.close(reset,'loss',241,-.001,accepted=True,final=True)
+    b.close(reset,'flat',241,0,accepted=True,final=True)
     d=b.decide(ID,242,.003,.01,qualified=True)
-    return levels==want and sizes==sorted(sizes) and max(sizes)<=8 and d['total']==1, f'levels={levels}; capped={max(sizes)}; loss reset={d["total"]}'
+    return levels==want and sizes==sorted(sizes) and max(sizes)<=8 and d['total']==1, f'levels={levels}; capped={max(sizes)}; flat reset={d["total"]}'
 
 def independent_contexts():
-    b=RelateBook([config()]);warm(b)
+    b=RelateBook([config()]);warm(b,last_loss=True)
     changed=[]
     for key in ID:
         x={**ID,key:ID[key]+'-other'}
@@ -44,7 +44,7 @@ def independent_contexts():
     return all(v==1 for v in changed) and qualified>1 and rejected==1, f'isolated={len(changed)}; own={qualified}; unqualified={rejected}'
 
 def stop_and_cost_floor():
-    b=RelateBook([config()]);warm(b)
+    b=RelateBook([config()]);warm(b,last_loss=True)
     cases=[(.005,.01,1.2),(.005001,.01,1),(.0021,.002,1),(0,.01,1),(.002,0,1),(float('nan'),.01,1)]
     got=[b.decide(ID,200,sl,tp,qualified=True)['total'] for sl,tp,_ in cases]
     return all(abs(g-w)<1e-10 for g,(_,_,w) in zip(got,cases)), str(got)
@@ -62,7 +62,7 @@ def partials_unknown_duplicates():
     return not a and mid==59 and accepted and not duplicate and b.closed==60 and s['unknown']==1 and d2['total']==1, str(s)
 
 def future_and_policy_edit():
-    b=RelateBook([config()]);warm(b)
+    b=RelateBook([config()]);warm(b,last_loss=True)
     now=b.decide(ID,30,.003,.01,qualified=True)['total']
     old=b.decide(ID,200,.003,.01,qualified=True)
     b.configure([config(ratio=.4)])
@@ -72,7 +72,7 @@ def future_and_policy_edit():
 
 def parallel_shared_additive_cap():
     cfgs=[config(id='shared',sources=['config','symbol'],maxStack=2),config(id='additive',mode='additive',sources=['config','symbol'],maxStack=2)]
-    b=RelateBook(cfgs);warm(b)
+    b=RelateBook(cfgs);warm(b,last_loss=True)
     d=b.decide(ID,200,.003,.01,qualified=True,total_cap=1.3)
     extra=sum(p['extra'] for c in d['policies'].values() for p in c['parts'].values())
     scaled=b.resized(d,1.1)
@@ -86,17 +86,42 @@ def persistence_and_loss_basis():
         b.close(d,'tiny-loss',201,-1e-18,accepted=True,final=True)
         b2=RelateBook([config()],p);result=b2.decide(ID,202,.003,.01,qualified=True)
         v=next(iter(result['policies'].values()))['stats']['config']
-        return not b2.error and b2.closed==61 and result['total']==1 and v['loss']>0 and not b2.close(d,'tiny-loss',203,.1,accepted=True,final=True), str(v)
+        return not b2.error and b2.closed==61 and result['total']==1.2 and v['loss']>0 and not b2.close(d,'tiny-loss',203,.1,accepted=True,final=True), str(v)
 
 def config_bounds():
-    bad=[{'ratio':.3},{'steps':16},{'minPf':1},{'maxSlRatio':.5001},{'lastN':20},{'minTrades':61,'lastN':60},{'maxStack':9},{'sources':['unknown']},{'id':''}]
+    bad=[{'ratio':.3},{'steps':16},{'minPf':1},{'maxSlRatio':.5001},{'lastN':20},{'minTrades':61,'lastN':60},
+         {'maxStack':9},{'sources':['unknown']},{'id':''},{'scope':'typo'},{'volumeFactors':{'config':-1}}]
     n=0
     for patch in bad:
         try:clean_configs([config(**patch)])
         except ValueError:n+=1
     return n==len(bad),f'refused={n}/{len(bad)}'
 
-CHECKS=[('relate.twelve-step-growth-loss-reset',progression_twelve_steps),('relate.exact-context-isolation',independent_contexts),
+def overall_relation_weights():
+    factors={s:0 for s in ('config','direction','indication','strategy','coordination','range')}
+    b=RelateBook([config(scope='overall',volumeFactors={**factors,'overall':3,'symbol':1})]);warm(b)
+    other={**ID,'symbol':'ETH-USDT'};warm(b,other,last_loss=True)
+    d=b.decide(ID,200,.003,.01,qualified=True)
+    parts=next(iter(d['policies'].values()))['parts']
+    assert len(parts)==8 and parts['overall']['level']==1 and parts['symbol']['level']==0
+    assert abs(d['total']-1.15)<1e-10
+    cold=b.decide({**ID,'config':'cold'},200,.003,.01,qualified=True)
+    assert cold['total']==1
+    return True,'all-symbol and single-symbol loss streaks remain separate; cold Sets stay at base volume'
+
+
+def active_tracks_skipped_steps():
+    book=RelateBook([config(activeStep=2)]);warm(book,last_loss=True)
+    skipped=book.decide(ID,200,.003,.01,qualified=True)
+    assert skipped['total']==1 and next(iter(skipped['policies'].values()))['parts']['config']['level']==1
+    assert book.close(skipped,'active-loss',201,-.001,accepted=True,final=True)
+    assert book.decide(ID,202,.003,.01,qualified=True)['total']==1.44
+    return True,'the first loss step stays neutral, the second clears Active'
+
+
+CHECKS=[('relate.twelve-step-growth-nonloss-reset',progression_twelve_steps),('relate.exact-context-isolation',independent_contexts),
+ ('relate.overall-relation-weights',overall_relation_weights),
+ ('relate.active-tracks-skipped-steps',active_tracks_skipped_steps),
  ('relate.effective-stop-cost-floor-half-target',stop_and_cost_floor),('relate.parent-partials-unknown-idempotence',partials_unknown_duplicates),
  ('relate.future-exclusion-immutable-policy',future_and_policy_edit),('relate.parallel-portions-total-cap',parallel_shared_additive_cap),
  ('relate.restart-tiny-loss-preservation',persistence_and_loss_basis),('relate.settings-boundaries',config_bounds)]
@@ -110,7 +135,7 @@ def native_entry_close_and_recovery():
     st=next(s for s in b.by_idx if s.pack=='indications' and s.kind=='base')
     ident={'config':st.id,'symbol':lanes.SYM,'side':'LONG','indication':st.pack+':'+st.tf,
            'strategy':st.kind,'coordination':'Main-Real','range':tp_range_of(b.step_bucket(st)),'lane':'pos'}
-    rb=RelateBook([config()]);warm(rb,ident)
+    rb=RelateBook([config()]);warm(rb,ident,last_loss=True)
     rb.configure=lambda _:None
     bars=lanes._scenario_bars('tp',1)
     with patch.object(pt,'RelateBook',lambda *a,**kw:rb):
@@ -140,7 +165,7 @@ def overflow_and_same_time():
     assert stats([1e308,-1e-300])['state']=='unknown'
     b=RelateBook([config()]);warm(b,n=59)
     d=b.decide(ID,200,.003,.01,qualified=True)
-    b.close(d,'same-clock',201,.01,accepted=True,final=True)
+    b.close(d,'same-clock',201,-.001,accepted=True,final=True)
     assert b.decide(ID,201,.003,.01,qualified=True)['total']==1
     assert b.decide(ID,202,.003,.01,qualified=True)['total']>1
     return True,'overflow fails closed; same-time close is not prior evidence'

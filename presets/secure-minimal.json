@@ -79,6 +79,9 @@
       "steps": 12,
       "ratio": 0.2,
       "mode": "shared",
+      "scope": "selected",
+      "activeStep": 0,
+      "volumeFactors": {},
       "sources": [
         "config",
         "symbol"
