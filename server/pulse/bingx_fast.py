@@ -302,11 +302,14 @@ class FastBingX:
         self.err = err
         self.base = (base or BASE).rstrip("/")
         self.buckets = {k: TokenBucket(*v) for k, v in LIMITS.items()}
-        # Commission queries have a 5/s UID limit with no documented burst.
-        # The general private bucket's ten-token burst was hidden by cold
-        # connections; pooled startup must pace the actual dispatches too.
+        # These account reads have separate 5/s UID limits. A pooled
+        # connection can exhaust them with the private bucket's startup burst.
         self.path_buckets = {path: TokenBucket(4.0, 1.0) for path in (
-            '/openApi/swap/v2/user/commissionRate', '/openApi/swap/v1/trade/positionHistory')}
+            '/openApi/swap/v2/user/commissionRate',
+            '/openApi/swap/v1/trade/positionHistory',
+            '/openApi/swap/v2/trade/allOrders',
+            '/openApi/swap/v2/trade/allFillOrders',
+        )}
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.http = None
