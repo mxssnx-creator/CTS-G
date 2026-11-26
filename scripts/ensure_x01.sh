@@ -7,6 +7,10 @@ REPO="${REPO:-/home/user/CTS-G}"
 DIR="${PULSE_DIR:-/opt/grok-x01-pulse}"
 # Owner stop (2026-11-14, "Stop x1"): while /var/lib/cts-g/x01-stopped-by-owner exists nothing starts x01 (delete the file to resume the standing restart rule).
 if [ -e "${X01_OWNER_OFF:-/var/lib/cts-g/x01-stopped-by-owner}" ]; then echo "x01 stopped by the owner (marker /var/lib/cts-g/x01-stopped-by-owner); not started"; exit 0; fi
+mkdir -p "$DIR"
+# One check-and-start at a time (2026-11-26: the watchdog and a manual run started two engines at the same second): every caller takes this lock first.
+exec 9>"$DIR/ensure_x01.lock"
+flock -w 60 9 || { echo "x01 ensure: lock busy, skipped"; exit 0; }
 running=0
 for p in $(pgrep -f "[p]ulse_trader.py" 2>/dev/null); do
   tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -q "^PULSE_CONN=bingx-x01$" && running=$((running + 1))
