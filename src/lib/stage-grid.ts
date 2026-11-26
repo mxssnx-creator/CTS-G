@@ -4,7 +4,7 @@ export type StageName = (typeof STAGE_ORDER)[number];
 export const STAGE_LABEL = { base: "Base", main: "Main", real: "Real", exec: "Exec" } as const;
 export const LONG_COUNTS = [10, 20, 30, 40, 50] as const;
 export const SHORT_COUNTS = [4, 8, 12, 16] as const;
-export const EXEC_SHORT_COUNTS = [...SHORT_COUNTS, 20, 24, 28, 30] as const;
+export const LATE_SHORT_COUNTS = [...SHORT_COUNTS, 20, 24, 28, 30] as const;
 export const LAST_COUNTS = [1, 2, 3, 4, 5] as const;
 export const SIGN_MODES = ["positive", "negative"] as const;
 export const LONG_MODES = ["none", "inherit"] as const;
@@ -35,7 +35,7 @@ export function stageGridOf(raw: unknown): StageGridConfig {
   }
   function stage(name: StageName): StageWindows {
     const value = inputFor(name);
-    const short = selected(name === "exec" ? EXEC_SHORT_COUNTS : SHORT_COUNTS, value.short);
+    const short = selected(name === "real" || name === "exec" ? LATE_SHORT_COUNTS : SHORT_COUNTS, value.short);
     return {
       short,
       last: selected(LAST_COUNTS, value.last),
@@ -81,6 +81,8 @@ export type StageGridSelection = {
   parentIds: Partial<Record<StageName, string>>;
   setIds?: Partial<Record<StageName, string>>;
   selectedBlocks?: Partial<Record<StageName, Partial<Record<"long" | "short" | "last", StageEvidence>>>>;
+  selectedWindows?: Partial<Record<StageName, StageEvidence>>;
+  selectedFloors?: Partial<Record<StageName, Partial<Record<"long" | "short" | "last" | "total", number>>>>;
   validatedBase?: StageEvidence;
   postStages?: Partial<Record<StageName, StageEvidence>>;
 };

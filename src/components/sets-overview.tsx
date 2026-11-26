@@ -242,6 +242,8 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                         const w = grid?.windows[name];
                         const post = postStageEvidence(grid, name);
                         const blocks = grid?.selectedBlocks?.[name];
+                        const total = grid?.selectedWindows?.[name];
+                        const totalFloor = grid?.selectedFloors?.[name]?.total;
                         const related = [grid?.parentIds[name], grid?.setIds?.[name]].filter(Boolean).join(" → ");
                         return w ? <div key={name} title={related} className="whitespace-nowrap">
                           {STAGE_LABEL[name]} {w.long || "—"} / {w.short}{w.shortMode === "negative" ? "−" : "+"} / {w.last}{w.lastMode === "negative" ? "−" : "+"}
@@ -250,8 +252,13 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                               const evidence = blocks[k];
                               if (!evidence) return [];
                               const pf = evidence.pf?.toFixed(2) ?? (evidence.gain > 0 && evidence.loss === 0 ? "no losses" : "—");
-                              return [`${k} PF ${pf}`];
+                              const floor = grid?.selectedFloors?.[name]?.[k];
+                              const negative = k === "short" ? w.shortMode === "negative" : k === "last" && w.lastMode === "negative";
+                              return [`${k} PF ${pf}${floor == null ? "" : negative ? ` (loss/gain ≥ ${floor.toFixed(2)})` : ` (≥ ${floor.toFixed(2)})`}`];
                             }).join(" · ")}
+                          </div>}
+                          {total && totalFloor != null && <div className="text-muted">
+                            Window PF {total.pf?.toFixed(2) ?? (total.gain > 0 && total.loss === 0 ? "No losses" : "—")} ≥ {totalFloor.toFixed(2)}
                           </div>}
                           {post && <div className="text-muted">
                             {post.orders} paper closes · PF {post.pf?.toFixed(2) ?? (post.gain > 0 && post.loss === 0 ? "No losses" : "—")}

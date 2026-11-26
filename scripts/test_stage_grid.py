@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent, causal oracle for disjoint windows and Exec attribution."""
+from dataclasses import asdict
 import json
 import math
 from pathlib import Path
@@ -17,7 +18,7 @@ import stage_grid as sg
 import auto_set_pf
 from indication_extra import (CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, bollinger_reclaim, keltner_cross,
                               resolve, rsi_trend_reclaim, sar_retest, sar_signal, sar_state)
-from stage_eval import AutoFloors, relation_rows
+from stage_eval import AutoFloors, execute, gate_metrics, relation_rows
 
 
 def plain(grid, rows, now, lookback, floor):
@@ -32,20 +33,27 @@ def plain(grid, rows, now, lookback, floor):
         short = seen[-w.short - w.last:-w.last]
         last = seen[-w.last:]
 
-        def positive(block):
+        def meets_floor(block, negative=False):
             gain = math.fsum(x for x in block if x > 0)
             loss = math.fsum(-x for x in block if x < 0)
+            if negative:
+                gain, loss = loss, gain
             threshold = floor(decision) if callable(floor) else floor
             return gain > 0 and gain >= threshold * loss
 
-        if long and not positive(long):
+        if long and not meets_floor(long):
             return True, None
-        if not (positive(short) if w.short_mode == "positive" else math.fsum(short) < -1e-12):
+        negative_short = w.short_mode == "negative"
+        if not meets_floor(short, negative_short) or (negative_short and math.fsum(short) >= -1e-12):
             return True, None
         net = math.fsum(last)
-        if not (net > 1e-12 if w.last_mode == "positive" else net < -1e-12):
+        negative_last = w.last_mode == "negative"
+        if (not meets_floor(last, negative_last) or
+                not (net < -1e-12 if negative_last else net > 1e-12)):
             return True, None
         values = long + short + last
+        if not meets_floor(values):
+            return True, None
         return True, (len(values), math.fsum(x for x in values if x > 0), math.fsum(-x for x in values if x < 0))
 
     def walk(tape, path):
@@ -71,6 +79,157 @@ def plain(grid, rows, now, lookback, floor):
 
 
 class StageGridTest(unittest.TestCase):
+    def test_rule_reload_discards_in_flight_tape_and_scores_the_complete_universe(self):
+        block = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        config = {"stageLastN": {"base": {**block, "long": [10]},
+                                  **{s: {**block, "longModes": ["none"]} for s in sg.STAGES[1:]}},
+                  "histKeepLastComplete": True, "histLookbackAuto": False, "histLookbackBars": 240,
+                  "histMinBars": 60, "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 4,
+                  "stratIndications": False, "stratTrailing": False, "exitSets": False,
+                  "setSlRatios": [1.0], "directionMode": "both"}
+        changed = {**config, "lastNBasis": "count"}
+        book = se.SetBook()
+        book.load(config)
+        names = ("AAA-USDT", "BBB-USDT")
+        now = 48 * 3600.0
+        book.bars = {s: [[100.0, 102.0, 99.0, 101.0, 1.0]] * 120 for s in names}
+        calls = []
+        change_during_replay = False
+
+        def replay(symbol, rows, decision, on_step=None):
+            calls.append(symbol)
+            for st in book.by_idx:
+                rows[st.id].extend(dict(t=decision - 120 * i - names.index(symbol) * 60,
+                                        symbol=symbol, side="LONG", pnl=.019, pnl_pct=.02,
+                                        hold_s=30, reason="fixture", set_id=st.id)
+                                   for i in range(40, 0, -1))
+            if change_during_replay:
+                book.load(changed)
+            return {}
+
+        book._replay_symbol = replay
+        book.replay_all(now=now, expected_symbols=names)
+        st = book.by_idx[0]
+        self.assertTrue(st.exec_grid.ready)
+        self.assertTrue(book.progress.ready)
+
+        change_during_replay = True
+        book.replay_all(now=now, expected_symbols=names)
+        change_during_replay = False
+        self.assertEqual(calls, [*names, names[0]])
+        self.assertFalse(book._hist_rows)
+        self.assertIsNone(st.exec_grid)
+        self.assertTrue(book._lookback_pending)
+
+        book.replay_all(now=now, symbols=names[:1], expected_symbols=names)
+        self.assertFalse(book.progress.ready)
+        self.assertEqual(book.progress.sets_done, 0)
+        self.assertIsNone(book.pick_any(st.pack))
+        book.load(changed)  # A routine reload must leave the fixed-window rebuild pending.
+        self.assertTrue(book._lookback_pending)
+        book.replay_all(now=now, symbols=names[1:], expected_symbols=names)
+        self.assertFalse(book.progress.ready)
+        book.replay_all(now=now, symbols=names[:1], expected_symbols=names)
+        self.assertTrue(book.progress.ready)
+        self.assertFalse(book._lookback_pending)
+        self.assertEqual(st.n, 80)
+        self.assertTrue(st.exec_grid.ready)
+
+    def test_auto_pf_refits_when_late_training_closes_arrive(self):
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "minPfByStep": True, "minPfStepAuto": True,
+                   "setMinStep": 4, "setStepMax": 4, "stratIndications": False, "setSlRatios": [1.0]})
+        st = next(st for st in book.by_idx if st.kind == "base")
+        symbol, hour = "BTC-USDT", float(48 * 3600)
+        rows = [(hour - (100 - i) * 60, symbol, "LONG", .005, .006, 30, "tp", st.id) for i in range(103)]
+        book._hist_rows[symbol] = {st.id: rows[:70]}
+        book._hist_replay_bar_at[symbol] = rows[69][0] - se.BAR_S
+        with book._lock:
+            book._learn_grid_floors((symbol,), hour + 15)
+            incomplete = book._grid_auto_models[st.id]
+            book._hist_rows[symbol] = {st.id: rows[:100]}
+            book._hist_replay_bar_at[symbol] = hour - 2 * se.BAR_S
+            book._learn_grid_floors((symbol,), hour + 30)
+            complete = book._grid_auto_models[st.id]
+            self.assertGreater(len(complete.closes), len(incomplete.closes))
+            self.assertLess(complete.closes[-1], hour)
+            book._hist_rows[symbol] = {st.id: rows}
+            book._hist_replay_bar_at[symbol] = hour + se.BAR_S
+            book._learn_grid_floors((symbol,), hour + 130)
+            self.assertIs(book._grid_auto_models[st.id], complete)
+
+    def test_exec_replay_uses_the_live_kind_policy_and_stable_set_rank(self):
+        win = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        book = se.SetBook()
+        book.load({"stageLastN": {"base": {**win, "long": [10]},
+                                  **{s: {**win, "longModes": ["none"]} for s in sg.STAGES[1:]}},
+                   "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 4, "histEnabled": True,
+                   "stratIndications": False, "stratTrailing": False, "exitSets": False,
+                   "setSlRatios": [.5, 1.0], "directionMode": "split",
+                   "blockEnabled": False, "dcaEnabled": False})
+        choices = [st for st in book.by_idx if st.kind == "base" and st.side == 1]
+        self.assertEqual(len(choices), 2)
+        first, second = choices
+        symbol, hour = "BTC-USDT", 200 * 3600
+        dates = list(range(hour, hour + 3600, 60))
+        past = [hour - 60 * i for i in range(160, 0, -1)]
+        entries = [t - 30 for t in past]
+        gross = [.02] * len(past)
+        tapes = SimpleNamespace(by_set={st.idx: (past, entries, gross) if st in choices else ([], [], [])
+                                        for st in book.by_idx}, cf=se.cost_as_frac(book.cost_pct))
+        # The second Set becomes ready first in the live candidate index.
+        for st in (second, first):
+            rows = [(t, symbol, "LONG", .019, .02, 30, "tp", st.id) for t in past]
+            book.set_processed(st, rows, hour + 60)
+            book._score_one(st, now=hour + 60)
+        self.assertEqual(first.exec_grid.rank, second.exec_grid.rank)
+        self.assertIs(book.pick_any(first.pack, side=1), first)
+        self.assertEqual(gate_metrics(book, tapes, first, hour + 60)[1], book.lane_rank_key(first))
+        # An old Negative-lane preference must not hide the new Exec stage.
+        book.lane_order = ("neg",)
+        bars = [[100.0, 102.0, 100.0, 100.0] for _ in dates]
+        signals = {first.pack: [1] * len(dates)}
+        confidence = {first.pack: [.9] * len(dates)}
+        shadow = {symbol: (0, signals, confidence, {})}
+        report = execute(book, [symbol], {symbol: bars}, {symbol: dates}, shadow, tapes, [hour])
+        self.assertEqual({r["set"] for r in report if "set" in r}, {first.id})
+        self.assertTrue(all(r["execLaneId"] == book.exec_lane_id(first) for r in report if "set" in r))
+        book.processing_overlay.update(stratNormal=False, axisPrevEnabled=False, axisLastEnabled=False,
+                                       axisContEnabled=False, axisPauseEnabled=False)
+        self.assertIsNone(book.pick_any(first.pack, side=1))
+        self.assertFalse(gate_metrics(book, tapes, first, hour + 60)[0])
+        disabled = execute(book, [symbol], {symbol: bars}, {symbol: dates}, shadow, tapes, [hour])
+        self.assertFalse([r for r in disabled if "set" in r])
+
+    def test_replay_position_cap_counts_open_slots_and_releases_closed_ones(self):
+        block = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        book = se.SetBook()
+        book.load({"stageLastN": {"base": {**block, "long": [10]},
+                                  **{s: {**block, "longModes": ["none"]} for s in sg.STAGES[1:]}},
+                   "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 4, "minSlDistancePct": .1,
+                   "stratIndications": False, "stratTrailing": False, "exitSets": False,
+                   "setSlRatios": [1.0], "directionMode": "both", "timeStopS": 3600})
+        st = book.by_idx[0]
+        now, names = 200 * 3600, ["AAA-USDT", "BBB-USDT"]
+        history = [now - 60*i for i in range(90, 0, -1)]
+        tapes = SimpleNamespace(by_set={st.idx: (history, [t-30 for t in history], [.02]*len(history))},
+                                cf=se.cost_as_frac(book.cost_pct))
+        bars = {s: [[100, 100.1, 99.9, 100]]*8 for s in names}
+        times = {s: [now + 60*i for i in range(8)] for s in names}
+        shadow = {s: (0, {st.pack: [1,0,0,0,1,0,0,0]}, {st.pack: [.9]*8}, {}) for s in names}
+
+        def replay(cap):
+            return [r for r in execute(book, names, bars, times, shadow, tapes, [now],
+                                       include_open=True, max_open=cap) if 'symbol' in r]
+
+        self.assertEqual({r['symbol'] for r in replay(0)}, set(names))
+        self.assertEqual([(r['symbol'],r['open_at_end']) for r in replay(1)], [(names[0],True)])
+        bars[names[0]][2] = [100, 102, 99.9, 101]
+        shadow[names[0]][1][st.pack][4]=0
+        final = replay(1)
+        self.assertEqual([r['symbol'] for r in final], names)
+        self.assertLess(final[0]['t'], final[1]['t_in'])
+
     def test_auto_pf_independence_and_strict_boundaries(self):
         early = 72 * 3600
         rows = [(early + i * 60, early + i * 60 - 30, net)
@@ -257,16 +416,17 @@ class StageGridTest(unittest.TestCase):
             expected = {p: se._variant_signal(bars[:index + 1], [p.removeprefix("extra.")]) for p in packs}
             self.assertEqual(se.bar_signal(bars, index, packs, {}, 60.0 * (index + 1)), expected)
 
-    def test_exec_short_thirty_reads_only_its_real_parent(self):
+    def test_real_and_exec_short_thirty_read_their_own_parents(self):
         base = {"long": [10], "short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
         child = {"short": [4], "last": [1], "longModes": ["none"],
                  "shortModes": ["positive"], "lastModes": ["positive"]}
-        grid = sg.StageGrid.from_settings({"base": base, "main": child, "real": child,
+        grid = sg.StageGrid.from_settings({"base": base, "main": child, "real": {**child, "short": [30]},
                                            "exec": {**child, "short": [28, 30]}})
         rows = [(60.0 * t, 60.0 * t - 1, .005) for t in range(95)]
         actual = sg.StageHistory(grid, *zip(*rows), 2400, lambda _: 1.1).evaluate(95 * 60, streams=True)
         counts, expected = plain(grid, rows, 95 * 60, 2400, 1.1)
         self.assertTrue(actual.ready)
+        self.assertEqual(actual.path[-2].short, 30)
         self.assertEqual(actual.path[-1].short, 30)
         self.assertEqual(actual.counts[-1].qualified, counts[-1][2])
         self.assertEqual(actual.streams[-1], expected[actual.path])
@@ -307,14 +467,14 @@ class StageGridTest(unittest.TestCase):
 
     def test_default_paths_and_signed_windows(self):
         grid = sg.StageGrid.from_settings({})
-        self.assertEqual(grid.capacities(), (350, 49000, 6860000, 1509200000))
+        self.assertEqual(grid.capacities(), (350, 49000, 10780000, 2371600000))
         for depth in range(4):
             choices = grid.windows(depth, 30)
             self.assertEqual({(w.last, w.last_mode) for w in choices},
                              {(size, sign) for size in (1, 2, 3, 4, 5) for sign in ("positive", "negative")})
             self.assertEqual({w.short for w in choices if w.short_mode == "negative"}, {4, 8, 12})
             self.assertEqual({w.short for w in choices if w.short_mode == "positive"},
-                             set(sg.EXEC_SHORT if depth == 3 else sg.SHORT))
+                             set(sg.LATE_SHORT if depth >= 2 else sg.SHORT))
             if depth:
                 self.assertEqual({w.long for w in choices}, {0, 30})
         grid_setting = grid.settings()
@@ -324,8 +484,87 @@ class StageGridTest(unittest.TestCase):
         extended = sg.StageGrid.from_settings({"exec": {"short": [12, 20, 24, 28, 30]}})
         self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "negative"}, {12})
         self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "positive"}, {12, 20, 24, 28, 30})
+        self.assertEqual(sg.StageGrid.from_settings({"real": {"short": [30]}}).options[2].shorts, (30,))
         with self.assertRaises(ValueError):
-            sg.StageGrid.from_settings({"real": {"short": [30]}})
+            sg.StageGrid.from_settings({"main": {"short": [30]}})
+
+    def test_auto_floor_is_local_to_parent_window_sign_and_training_prefix(self):
+        rng = random.Random(730)
+        rows = [(i * 300.0, i * 300.0 - 10, rng.choice((.022, .019, -.010, -.041, .015, -.005)))
+                for i in range(128)]
+        policy = sg.WindowAuto(1.12, 12, (1.1, 1.25, 1.5, 2.0, 3.0), .01, 0.0)
+        at = 11 * 3600
+        lookback = 3600 * 4
+        grid = sg.StageGrid.from_settings({})
+        sg_auto = sg.StageHistory(grid, *zip(*rows), lookback, lambda _: 1.12, window_auto=policy)
+        observed_fits = []
+        original = auto_set_pf.fit
+        def record(pairs, *args):
+            observed_fits.append(tuple(pairs))
+            return original(pairs, *args)
+        def reference(ids, n, offset, kind):
+            pairs = []
+            for i in ids:
+                close, entry, net = rows[i]
+                if close >= at:
+                    break
+                visible = [rows[j][2] for j in ids if entry - lookback <= rows[j][0] < entry]
+                if len(visible) < n + offset:
+                    continue
+                block = visible[len(visible)-offset-n:len(visible)-offset]
+                gain = math.fsum(max(0.0, v) for v in block)
+                loss = math.fsum(max(0.0, -v) for v in block)
+                numerator, denominator = (loss, gain) if kind == "negative" else (gain, loss)
+                if numerator > 0 and (kind not in sg.SIGN_MODES or numerator > denominator + sg.NEG_EPS):
+                    pairs.append((numerator/denominator if denominator else math.inf, net))
+            return pairs
+        probe = []
+        with patch.object(auto_set_pf, "fit", side_effect=record):
+            for ids in (range(len(rows)), tuple(i for i in range(len(rows)) if i % 3 != 1)):
+                tape = sg._Tape(sg_auto, ids)
+                for n, offset, kind in ((4, 2, "pf"), (4, 3, "pf"), (5, 0, "positive"), (5, 0, "negative")):
+                    actual = tape.floor(n, offset, kind, at + 30)
+                    expected = reference(ids, n, offset, kind)
+                    self.assertEqual(len(observed_fits[-1]), len(expected))
+                    for (x, nx), (y, ny) in zip(observed_fits[-1], expected):
+                        self.assertEqual(nx, ny)
+                        self.assertAlmostEqual(x, y, places=10)
+                    probe.append(actual)
+                self.assertEqual(tape.floor(1, 0, "positive", at), 1.12)
+                self.assertEqual(tape.floor(1, 0, "negative", at), 1.12)
+        self.assertEqual(len(observed_fits), 8)
+        self.assertGreater(len(set(observed_fits)), 4)
+        future = [v if c < at else 900.0 for c, _, v in rows]
+        unaffected = sg.StageHistory(grid, sg_auto.closes, sg_auto.entries, future, lookback,
+                                     lambda _: 1.12, window_auto=policy)
+        self.assertEqual(unaffected.root.floor(4, 2, "pf", at + 30), probe[0])
+        self.assertEqual(sg._Tape(sg_auto, tuple(range(10))).floor(4, 2, "pf", at), 1.12)
+
+    def test_positive_and_negative_last_require_configured_pf(self):
+        grid = sg.StageGrid.from_settings({})
+        for kind, sign in (("positive", 1), ("negative", -1)):
+            for floor, allowed in ((1.2, True), (1.4, False)):
+                owner = sg.StageHistory(grid, (1, 2), (.5, 1.5), (.01 * sign, -.008 * sign),
+                                        100, lambda n: floor)
+                self.assertEqual(owner.root.test(2, 2, kind, 3) is not None, allowed)
+
+    def test_negative_blocks_cannot_pass_a_losing_total_or_seed_a_child(self):
+        grid = sg.StageGrid.from_settings({})
+        w = sg.Window(0, 4, 1, "negative", "negative")
+        rows = [(i, i - .1, -.01) for i in range(1, 12)]
+        history = sg.StageHistory(grid, *zip(*rows), 100, lambda _: 1.1)
+        tape = history.root
+        self.assertIsNotNone(tape.test(4, 10, "negative", 12))
+        self.assertIsNotNone(tape.test(1, 11, "negative", 12))
+        for depth in (1, 2, 3):
+            self.assertFalse(tape.passes(w, depth, 12))
+            self.assertEqual(tape.child_mask(w, depth), 0)
+        mixed = [(.02 if i % 5 else -.002) for i in range(1, 13)]
+        owner = sg.StageHistory(grid, tuple(range(1, 13)), tuple(i-.1 for i in range(1, 13)),
+                                mixed, 100, lambda _: 1.1)
+        eligible = sg.Window(0, 4, 1, "negative", "positive")
+        self.assertTrue(owner.root.passes(eligible, 3, 11))
+        self.assertTrue(owner.root.child_mask(eligible, 3) & (1 << 10))
 
     def test_each_parent_and_sign_matches_plain_walk(self):
         downstream = {"short": [4], "last": [1], "longModes": ["none", "inherit"]}
@@ -405,6 +644,8 @@ class StageGridTest(unittest.TestCase):
                            grid_result=got)
         self.assertEqual(st.exec_grid.validated_base, got.validated_base)
         self.assertEqual(st.exec_grid.validated_base_ids, ())
+        self.assertEqual((st.exec_grid.row_ids, st.exec_grid.streams), ((), ()))
+        self.assertEqual(st.exec_grid.report(book.stage_grid, st.id), got.report(book.stage_grid, st.id))
         tx = [row[0] for row in tape]
         te = [row[0]-row[5] for row in tape]
         tapes = SimpleNamespace(by_set={st.idx:(tx,te,[row[4] for row in tape])},cf=cost,
@@ -420,16 +661,17 @@ class StageGridTest(unittest.TestCase):
         rng = random.Random(32)
         rows = [sg.StageOrder(i, i - (i % 4), rng.choice((.01, .02, .04, -.017))) for i in range(760)]
         at = lambda decision: 1.10 if decision < 420 else 1.65
-        history = sg.StageHistory(grid, *zip(*rows), 350, lambda _: 1.65, entry_floor=at)
-        full = history.evaluate(550, streams=True)
-        _, paths = plain(grid, rows, 550, 350, at)
+        now, lookback = 650, 550
+        history = sg.StageHistory(grid, *zip(*rows), lookback, lambda _: 1.65, entry_floor=at)
+        full = history.evaluate(now, streams=True)
+        _, paths = plain(grid, rows, now, lookback, at)
         self.assertTrue(full.ready)
         self.assertEqual(full.streams, tuple(paths[full.path[:i]] for i in range(1, 5)))
-        self.assertNotEqual(full.streams[0], sg.StageHistory(grid, *zip(*rows), 350, lambda _: 1.65).stream(
-            full.path, 550 - 350, 550)[0])
-        shortened = [r for r in rows if r.close < 550]
-        older = sg.StageHistory(grid, *zip(*shortened), 350, lambda _: 1.65, entry_floor=at)
-        self.assertEqual(full, older.evaluate(550, streams=True))
+        self.assertNotEqual(full.streams[0], sg.StageHistory(grid, *zip(*rows), lookback, lambda _: 1.65).stream(
+            full.path, now - lookback, now)[0])
+        shortened = [r for r in rows if r.close < now]
+        older = sg.StageHistory(grid, *zip(*shortened), lookback, lambda _: 1.65, entry_floor=at)
+        self.assertEqual(full, older.evaluate(now, streams=True))
 
     def test_equal_clock_and_insufficient_lanes(self):
         grid = sg.StageGrid.from_settings({})
@@ -456,6 +698,25 @@ class StageGridTest(unittest.TestCase):
             scalar = sg.StageHistory(grid, *zip(*rows), 99, lambda _: 1.05,
                                      main_filter=without, filter_need=3).evaluate(238, streams=True)
         self.assertEqual(vector.evaluate(238, streams=True), scalar)
+
+    @unittest.skipIf(sg.np is None, "optional vector operations unavailable")
+    def test_scoped_auto_vector_mask_matches_scalar_at_hour_boundaries(self):
+        block = {"short": [4, 8], "last": [1, 2]}
+        grid = sg.StageGrid.from_settings({"base": {**block, "long": [10, 20]},
+                                           **{s: {**block, "longModes": ["none"]} for s in sg.STAGES[1:]}})
+        policy = sg.WindowAuto(1.14, 10, (1.1, 1.25, 1.5), .05, 0.0)
+        rng = random.Random(61)
+        closes = [float(i * 60 + 60) for i in range(540)]
+        entries = [t - rng.choice((1, 60, 61, 290)) for t in closes]
+        nets = [rng.choice((.003, .005, .007, -.001, -.004, -.006)) for _ in closes]
+        args = grid, closes, entries, nets, 6 * 3600, lambda _: 1.14
+        vector = sg.StageHistory(*args, window_auto=policy)
+        scalar = sg.StageHistory(*args, window_auto=policy)
+        for minute in (479, 480, 481, 540):
+            now = minute * 60.0
+            with patch.object(sg, "np", None):
+                expected = scalar.evaluate(now, streams=True)
+            self.assertEqual(vector.evaluate(now, streams=True), expected)
 
     def test_exec_gate_mirror_sides_and_settlement(self):
         book = se.SetBook()
@@ -516,6 +777,75 @@ class StageGridTest(unittest.TestCase):
         before = st.exec_grid
         book.on_live_close(loss)
         self.assertIs(st.exec_grid, before)
+
+    def test_exec_reentry_rests_only_its_side_and_uses_settled_net(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        pulse.sets = SimpleNamespace(stage_grid=True, pause_minutes=lambda *_: 9, cooldown_bars=2)
+        pulse.cooldown, pulse.ignore_syms = {}, {}
+        pulse.position_cost_pct = .176
+        pos = pt.Position("TEST-USDT", "LONG", 1, 100, 601, 99, 102, 100, exec_lane_id="lane")
+        with patch.object(pt.time, "time", return_value=609):
+            pulse.rest_position_slot(pos, 0)
+            self.assertTrue(pulse.entry_slot_rests(pos.symbol, "LONG", 609))
+            self.assertFalse(pulse.entry_slot_rests(pos.symbol, "LONG", 660))
+            self.assertFalse(pulse.entry_slot_rests(pos.symbol, "SHORT", 609))
+            pause = pulse.symbol_backoff(pos.symbol, .0014, 62, "tp", True, "general", 1,
+                                         net_pnl_pct=.0003)
+            self.assertEqual(pause, 540)
+            pulse.rest_position_slot(pos, pause)
+            pulse.rest_position_slot(pos, 90)
+            self.assertTrue(pulse.entry_slot_rests(pos.symbol, "LONG", 1000))
+            self.assertFalse(pulse.entry_slot_rests(pos.symbol, "SHORT", 1000))
+            pulse.cooldown[pos.symbol] = 1200
+            self.assertTrue(pulse.entry_slot_rests(pos.symbol, "SHORT", 1000))
+
+    def test_exec_cash_pf_includes_reported_funding_on_restart(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        win = pt.Closed(1795254001, "BTC-USDT", "LONG", 1, 100, 101, .9, .01, "tp", 60,
+                        funding_usdt=-.3, exec_lane_id="lane", filled_orders=2, net_pnl_pct=.009)
+        loss = pt.Closed(1795254002, "BTC-USDT", "SHORT", 1, 100, 101, -.6, -.01, "sl", 60,
+                         funding_usdt=.1, exec_lane_id="lane", filled_orders=2, net_pnl_pct=-.006)
+        for row in (win, loss):
+            pulse._exec_note(row)
+        before = pulse.exec_scope["stage:exec"].copy()
+        self.assertAlmostEqual(before["cash_gain"] / before["cash_loss"], 1.2)
+        self.assertAlmostEqual(before["return_gain"] / before["return_loss"], 1.5)
+        self.assertAlmostEqual(before["reported_funding"], -.2)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "closed.jsonl"
+            ledger.write_text("".join(json.dumps(asdict(row)) + "\n" for row in (win, loss)))
+            with patch.object(pt, "TRADES_PATH", str(ledger)), patch.object(pt, "downtime_intervals", return_value=()), \
+                    patch.object(pt.time, "time", return_value=1795254090):
+                pulse._exec_boot()
+        self.assertEqual(pulse.exec_scope["stage:exec"], before)
+
+    def test_flat_probe_preserves_one_way_and_hedge_slots(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        pos = pt.Position("TEST-USDT", "SHORT", 1, 100, 601, 101, 98, 100)
+        for side, qty in (("BOTH", "-1"), ("SHORT", "1"), ("SHORT", "NaN")):
+            response = {"code": 0, "data": [{"symbol": pos.symbol, "positionSide": side, "positionAmt": qty}]}
+            pulse.api = SimpleNamespace(get=lambda _: response)
+            self.assertFalse(pulse._exchange_flat(pos))
+        response["data"][0].update(positionSide="LONG", positionAmt="1")
+        self.assertTrue(pulse._exchange_flat(pos))
+
+    def test_exec_entry_scan_reuses_pack_side_ranks_across_200_symbols(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        book = se.SetBook()
+        book.stage_grid = sg.StageGrid.from_settings({})
+        pulse.sets, pulse.open, pulse.cooldown = book, {}, {}
+        symbols = [f"TEST{i}-USDT" for i in range(200)]
+        pulse.cooldown[pulse.position_key(symbols[0], "LONG")] = 1000
+        signals = [("scoped", 1, .9, "test"), ("general", 1, .8, "test"), ("general", -1, .7, "test")]
+        pulse._entry_sig = {symbol: (540, signals) for symbol in symbols}
+        with patch.object(pt, "SYMBOLS", symbols), patch.object(book, "entry_signals_pending", return_value=False), \
+                patch.object(book, "symbol_allows", side_effect=lambda pack, sym: pack != "scoped" or sym == symbols[-1]), \
+                patch.object(pulse, "_scope_choice", return_value=(object(), "pos", "")) as pick:
+            candidates = pulse.set_entry_candidates(now=610)
+        self.assertEqual(len(candidates), 399)
+        self.assertEqual(pick.call_count, 3)
+        self.assertIn("set:scoped:", candidates[pulse.position_key(symbols[-1], "LONG")][3])
+        self.assertIn("set:general:", candidates[pulse.position_key(symbols[1], "LONG")][3])
 
 
 if __name__ == "__main__":

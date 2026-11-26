@@ -4,12 +4,14 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from itertools import product
 import math
 import re
 import weakref
 from typing import Callable, NamedTuple, Sequence
+
+import auto_set_pf
 
 try:
     import numpy as np
@@ -19,12 +21,15 @@ except ImportError:
 STAGES = ("base", "main", "real", "exec")
 BASE_LONG = (10, 20, 30, 40, 50)
 SHORT = (4, 8, 12, 16)
-EXEC_SHORT = (*SHORT, 20, 24, 28, 30)
+LATE_SHORT = (*SHORT, 20, 24, 28, 30)
+EXEC_SHORT = LATE_SHORT
 LAST = (1, 2, 3, 4, 5)
 SIGN_MODES = ("positive", "negative")
 NEGATIVE_SHORT_MAX = 12
 NEG_EPS = 1e-12
 BLOCK_NAMES = ("long", "short", "last")
+# Bound each fit on busy Sets. Both halves still need independent sample support.
+MAX_WINDOW_OBSERVATIONS = 256
 
 
 class Window(NamedTuple):
@@ -94,7 +99,7 @@ class StageGrid:
             if is_base:
                 longs = counts(config, "long", BASE_LONG)
             long_modes = () if is_base else modes(config, "longModes", ("none", "inherit"), stage)
-            shorts = counts(config, "short", EXEC_SHORT if stage == "exec" else SHORT)
+            shorts = counts(config, "short", LATE_SHORT if stage in ("real", "exec") else SHORT)
             short_modes = modes(config, "shortModes", SIGN_MODES, stage)
             if short_modes == ("negative",) and min(shorts) > NEGATIVE_SHORT_MAX:
                 raise ValueError(f"Negative Short requires 4, 8 or 12 in stageLastN.{stage}")
@@ -117,6 +122,15 @@ class StageGrid:
             product_so_far *= len(self.windows(depth, self.longs[0] if depth else 0))
             counts.append(product_so_far)
         return tuple(counts)
+
+    @cached_property
+    def sample_bounds(self) -> dict[tuple[int, int], tuple[int, int]]:
+        bounds = {}
+        for depth in range(len(STAGES)):
+            for base_long in self.longs if depth else (0,):
+                sizes = [window.need for window in self.windows(depth, base_long)]
+                bounds[depth, base_long] = min(sizes), max(sizes)
+        return bounds
 
     def path(self, base_id: str, identity: str) -> Path:
         prefix = base_id + "/"
@@ -174,6 +188,14 @@ class Evidence(NamedTuple):
                 "pf": round(self.gain / self.loss, 4) if self.loss else 1.0 if self.count and not self.gain else None}
 
 
+class WindowAuto(NamedTuple):
+    fallback: float
+    minimum: int
+    candidates: tuple[float, ...]
+    tolerance: float
+    orders_factor: float
+
+
 @dataclass(slots=True)
 class StageCount:
     evaluated: int = 0
@@ -220,6 +242,8 @@ class GridResult:
     selected_blocks: tuple[tuple[Evidence, ...], ...] = ()
     validated_base: Evidence = field(default_factory=Evidence)
     validated_base_ids: tuple[int, ...] = ()
+    stream_sizes: tuple[int, ...] = ()
+    selected_floors: tuple[tuple[float, ...], ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -227,9 +251,7 @@ class GridResult:
 
     @property
     def rank(self) -> tuple[float, int]:
-        count, gain, loss = self.evidence
-        # Reduce the effect of very short, zero-loss samples on selection.
-        return round((min(5.0, pf(gain, loss)) - 1) * count / (20 + count), 12), count
+        return evidence_rank(self.evidence)
 
     def report(self, grid: StageGrid, set_id: str) -> dict:
         ids = [lane_id(set_id, self.path[:depth]) for depth in range(len(self.path) + 1)]
@@ -238,12 +260,20 @@ class GridResult:
                 "parentIds": dict(zip(STAGES, ids[:-1])),
                 "setIds": dict(zip(STAGES, ids[1:])),
                 "windows": path_settings(self.path),
-                "selectedOrders": dict(zip(STAGES, map(len, self.streams))),
+                "selectedOrders": dict(zip(STAGES, self.stream_sizes or tuple(map(len, self.streams)))),
                 "selectedWindows": {s: ev.report() for s, ev in zip(STAGES, self.selected_evidence)},
                 "selectedBlocks": {s: {name: ev.report() for name, ev in zip(BLOCK_NAMES, blocks) if ev.count}
                                    for s, blocks in zip(STAGES, self.selected_blocks)},
+                "selectedFloors": {s: {name: floor for name, floor in zip((*BLOCK_NAMES, "total"), floors) if floor}
+                                    for s, floors in zip(STAGES, self.selected_floors)},
                 "validatedBase": self.validated_base.report(),
                 "postStages": {s: ev.report() for s, ev in zip(STAGES, self.post_evidence)}}
+
+
+def evidence_rank(evidence: Evidence) -> tuple[float, int]:
+    count, gain, loss = evidence
+    # Reduce the effect of very short, zero-loss samples on selection.
+    return round((min(5.0, pf(gain, loss)) - 1) * count / (20 + count), 12), count
 
 
 BYTE_BITS = tuple(tuple(bit for bit in range(8) if byte & (1 << bit)) for byte in range(256))
@@ -252,7 +282,8 @@ BaseRisk = Callable[[Sequence[float], Sequence[float], Sequence[float], Sequence
 
 class _Tape:
     """An immutable history along one parent. Windows share its cumulative gains and losses."""
-    __slots__ = ("ids", "times", "values", "gains", "losses", "decisions", "owner", "masks", "sign", "numeric")
+    __slots__ = ("ids", "times", "values", "gains", "losses", "decisions", "owner", "masks", "sign", "numeric",
+                 "learned_floors")
 
     def __init__(self, owner: StageHistory, ids: Sequence[int]) -> None:
         self.owner, self.ids = weakref.proxy(owner), ids
@@ -268,6 +299,7 @@ class _Tape:
         self.decisions = None
         self.numeric = None
         self.masks: dict[tuple[int, int, str], int] = {}
+        self.learned_floors: dict[tuple[int, int, str, float], float] | None = None
 
     def indices(self, now: float) -> tuple[int, int]:
         return bisect_left(self.times, now - self.owner.lookback), bisect_left(self.times, now)
@@ -283,7 +315,42 @@ class _Tape:
             gain = math.fsum(v for v in self.values[start:end] if v > 0)
         return Evidence(size, gain, loss)
 
-    def test(self, size: int, end: int, kind: str, entry: float) -> Evidence | None:
+    def floor(self, size: int, offset: int, kind: str, when: float) -> float:
+        policy = self.owner.window_auto
+        fallback = self.owner.floor_at(size, when) if policy is None else policy.fallback
+        if policy is None or self.sign or size == 1 or len(self.ids) < size + offset + policy.minimum:
+            return fallback
+        lower, upper = auto_set_pf.training_window(when)
+        first, stop = bisect_left(self.times, lower), bisect_left(self.times, upper)
+        first = max(first, size + offset, stop - max(MAX_WINDOW_OBSERVATIONS, 2 * policy.minimum))
+        if stop - first < policy.minimum:
+            return fallback
+        key = size, offset, kind, upper
+        if self.learned_floors is None:
+            self.learned_floors = {}
+        cached = self.learned_floors.get(key)
+        if cached is not None:
+            return cached
+        if self.decisions is None:
+            self.decisions = [self.indices(self.owner.entries[i]) for i in self.ids]
+        pairs = []
+        for i in range(first, stop):
+            lo, hi = self.decisions[i]
+            hi -= offset
+            if hi - lo < size:
+                continue
+            _, gain, loss = self.evidence(size, hi)
+            if kind == "negative":
+                gain, loss = loss, gain
+            if gain > 0 and (kind not in SIGN_MODES or gain - loss > NEG_EPS):
+                pairs.append((gain / loss if loss > 0 else math.inf, self.values[i]))
+        fit = auto_set_pf.fit(pairs, policy.minimum, fallback, policy.candidates, policy.tolerance,
+                              policy.orders_factor)
+        floor = fallback if fit is None else fit
+        self.learned_floors[key] = floor
+        return floor
+
+    def test(self, size: int, end: int, kind: str, entry: float, offset: int = 0) -> Evidence | None:
         evidence = self.evidence(size, end)
         gain, loss = evidence.gain, evidence.loss
         if kind in SIGN_MODES:
@@ -291,8 +358,22 @@ class _Tape:
             net = gain - loss
             if abs(abs(net) - NEG_EPS) <= 1e-8 * max(gain, loss):
                 net = math.fsum(self.values[end - size:end])
-            return evidence if (net > NEG_EPS if kind == "positive" else net < -NEG_EPS) else None
-        floor = self.owner.floor_at(size, entry)
+            if kind == "negative":
+                net, gain, loss = -net, loss, gain
+            if net <= NEG_EPS:
+                return None
+            if loss > 0:
+                threshold = self.floor(size, offset, kind, entry)
+                if math.isclose(gain, loss * threshold, rel_tol=1e-8):
+                    values = self.values[end - size:end]
+                    positive = math.fsum(v for v in values if v > 0)
+                    negative = math.fsum(-v for v in values if v < 0)
+                    gain, loss = (positive, negative) if kind == "positive" else (negative, positive)
+                    evidence = Evidence(size, positive, negative)
+                if gain < loss * threshold:
+                    return None
+            return evidence
+        floor = self.floor(size, offset, kind, entry)
         if loss > 0:
             if math.isclose(gain, loss * floor, rel_tol=1e-8):
                 # A borderline result must be independent of any older prefix.
@@ -333,7 +414,7 @@ class _Tape:
         bits = bytearray((len(self.ids) + 7) // 8)
         for j, (start, end) in enumerate(self.decisions):
             end -= offset
-            if end - start >= size and (always or self.test(size, end, kind, self.owner.entries[self.ids[j]]) is not None):
+            if end - start >= size and (always or self.test(size, end, kind, self.owner.entries[self.ids[j]], offset) is not None):
                 bits[j // 8] |= 1 << (j % 8)
         mask = int.from_bytes(bits, "little")
         self.masks[key] = mask
@@ -346,20 +427,39 @@ class _Tape:
             floors = self.owner.entry_floors
             local_floors = (np.fromiter((floors[i] for i in self.ids), dtype=np.float64, count=len(self.ids))
                             if floors is not None else None)
+            refit = auto_set_pf.REFIT_SECONDS
+            entry_hours = (np.unique(np.floor(entries / refit) * refit, return_inverse=True)
+                           if self.owner.window_auto is not None else None)
             self.numeric = (np.searchsorted(times, entries - self.owner.lookback),
-                            np.searchsorted(times, entries), np.asarray(self.gains), np.asarray(self.losses), local_floors)
-        first, ends, gains, losses, local_floors = self.numeric
+                            np.searchsorted(times, entries), np.asarray(self.gains), np.asarray(self.losses),
+                            local_floors, entry_hours)
+        first, ends, gains, losses, local_floors, entry_hours = self.numeric
         valid = ends - first >= offset + size
         rows = np.flatnonzero(valid)
         right = ends[rows] - offset
         left = right - size
         gain, loss = gains[right] - gains[left], losses[right] - losses[left]
+        if entry_hours is not None:
+            # Every entry in this hour uses the same strict training prefix of
+            # this parent and block. Resolve it once, even when it falls back.
+            hours, hour_ids = entry_hours
+            selected = hour_ids[rows]
+            thresholds = np.empty(len(hours))
+            for hour_id in np.flatnonzero(np.bincount(selected)):
+                thresholds[hour_id] = self.floor(size, offset, kind, float(hours[hour_id]))
+            floors = thresholds[selected]
+        else:
+            floors = local_floors[rows] if local_floors is not None else self.owner.floors[size]
         if kind in SIGN_MODES:
             margin = gain - loss
             good = margin > NEG_EPS if kind == "positive" else margin < -NEG_EPS
             borderline = np.abs(np.abs(margin) - NEG_EPS) <= 1e-8 * np.maximum(gain, loss)
+            numerator, denominator = (gain, loss) if kind == "positive" else (loss, gain)
+            threshold = denominator * floors
+            good &= numerator >= threshold
+            borderline |= np.abs(numerator - threshold) <= 1e-8 * np.maximum(numerator, threshold)
         else:
-            threshold = loss * (local_floors[rows] if local_floors is not None else self.owner.floors[size])
+            threshold = loss * floors
             margin = gain - threshold
             good = (gain > 0) & (margin >= 0)
             borderline = np.abs(margin) <= 1e-8 * np.maximum(gain, threshold)
@@ -368,7 +468,7 @@ class _Tape:
         verify = (good | borderline) if kind == "risk" and self.owner.base_risk else borderline
         for j in np.flatnonzero(verify):
             row = self.ids[rows[j]]
-            good[j] = self.test(size, int(right[j]), kind, self.owner.entries[row]) is not None
+            good[j] = self.test(size, int(right[j]), kind, self.owner.entries[row], offset) is not None
         valid[rows] = good
         return int.from_bytes(np.packbits(valid, bitorder="little").tobytes(), "little")
 
@@ -380,13 +480,16 @@ class _Tape:
             self.values[max(start, end - self.owner.filter_need):end]
         ):
             return False
-        return all(self.test(n, end - offset, kind, now) is not None
-                   for n, offset, kind in window_blocks(w, depth) if n)
+        return (all(self.test(n, end - offset, kind, now, offset) is not None
+                    for n, offset, kind in window_blocks(w, depth) if n)
+                and self.test(w.need, end, "pf", now) is not None)
 
     def child_mask(self, w: Window, depth: int) -> int:
         mask = self.mask(w.last, 0, w.last_mode) & self.mask(w.short, w.last, "pf" if w.short_mode == "positive" else "negative")
         if mask and w.long:
             mask &= self.mask(w.long, w.last + w.short, "risk" if depth == 0 else "pf")
+        if mask:
+            mask &= self.mask(w.need, 0, "pf")
         if mask and depth == 1 and self.owner.main_filter:
             mask &= self.owner.filter_mask(self)
         return mask
@@ -403,12 +506,15 @@ class StageHistory:
     def __init__(self, grid: StageGrid, closes: Sequence[float], entries: Sequence[float], nets: Sequence[float],
                  lookback: float, floor: Callable[[int], float], base_risk: BaseRisk | None = None,
                  main_filter: Callable[[Sequence[float]], bool] | None = None, filter_need: int = 0,
-                 entry_floor: Callable[[float], float] | None = None) -> None:
+                 entry_floor: Callable[[float], float] | None = None,
+                 window_auto: WindowAuto | None = None) -> None:
         self.grid, self.closes, self.entries, self.nets = grid, closes, entries, nets
         self.lookback, self.base_risk = lookback, base_risk
-        sizes = {n for options in grid.options for n in options.shorts}
+        sizes = {n for options in grid.options for n in (*options.shorts, *options.lasts)}
+        sizes.update(n for minimum, maximum in grid.sample_bounds.values() for n in range(minimum, maximum + 1))
         self.floors = {n: floor(n) for n in {*grid.longs, *sizes}}
         self.entry_floor = entry_floor
+        self.window_auto = window_auto
         self._entry_floors = None
         self.main_filter, self.filter_need = main_filter, filter_need
         self._root: _Tape | None = None
@@ -429,6 +535,12 @@ class StageHistory:
         if self._decision and self._decision[0] == now:
             return self._decision[1]
         end = first = bisect_left(self.closes, now)
+        if self.window_auto is not None:
+            # Auto can read older, independently admitted outcomes of any
+            # parent. Keep the available strictly closed context for training.
+            tape = self.root if end == len(self.closes) else _Tape(self, range(end))
+            self._decision = now, tape
+            return tape
         earliest = now
         # A child can reach older evidence through the entry of a position
         # closed inside its window. Walk back once for each historical stage,
@@ -524,16 +636,18 @@ class StageHistory:
             out.append(tuple(tape.ids[start:end]))
         return tuple(out)
 
-    def selected_blocks(self, path: Path, now: float, root: _Tape | None = None) -> tuple[tuple[Evidence, ...], ...]:
+    def selected_blocks(self, path: Path, now: float, root: _Tape | None = None):
         tape = self._decision_tape(now) if root is None else root
-        out = []
+        evidence, floors = [], []
         for depth, w in enumerate(path):
             _, end = tape.indices(now)
-            out.append(tuple(tape.evidence(n, end - offset) if n else Evidence()
-                             for n, offset, _ in reversed(window_blocks(w, depth))))
+            blocks = tuple(reversed(window_blocks(w, depth)))
+            evidence.append(tuple(tape.evidence(n, end - offset) if n else Evidence() for n, offset, _ in blocks))
+            floors.append((*tuple(tape.floor(n, offset, kind, now) if n else 0.0 for n, offset, kind in blocks),
+                           tape.floor(w.need, 0, "pf", now)))
             if depth + 1 < len(path):
                 tape = self.child(tape, tape.child_mask(w, depth))
-        return tuple(out)
+        return tuple(evidence), tuple(floors)
 
     def read_streams(self, row_ids: tuple[tuple[int, ...], ...]) -> tuple[tuple[StageOrder, ...], ...]:
         return tuple(tuple(StageOrder(self.closes[i], self.entries[i], self.nets[i]) for i in ids) for ids in row_ids)
@@ -559,6 +673,7 @@ class StageHistory:
     def evaluate(self, now: float, *, streams: bool = False, limit: int | None = None) -> GridResult:
         validated_base_mask = 0
         root = self._decision_tape(now)
+        bounds = self.grid.sample_bounds
 
         @lru_cache(maxsize=2048)
         def last_stage(ids: tuple[int, ...], base_long: int) -> GridResult:
@@ -573,9 +688,13 @@ class StageHistory:
             tally.evaluated = len(choices)
             start, end = tape.indices(now)
             size = end - start
+            if size < bounds[depth, base_long][0]:
+                return GridResult(counts)
             results: dict[tuple[int, int, str], Evidence | None] = {}
             paths: dict[tuple[int, int], tuple[Window, int]] = {}
-            pick = GridResult(counts)
+            picked_path: Path = ()
+            picked_evidence = Evidence()
+            picked_key = (0, (0.0, 0))
             filter_ok = depth != 1 or not self.main_filter or self.main_filter(
                 tape.values[max(start, end - self.filter_need):end]
             )
@@ -586,18 +705,21 @@ class StageHistory:
                 tally.sample_full += 1
                 if not filter_ok:
                     continue
-                evidence = Evidence()
                 for n, offset, kind in window_blocks(w, depth):
                     if not n:
                         continue
                     key = (n, offset, kind)
                     if key not in results:
-                        results[key] = tape.test(n, end - offset, kind, now)
-                    window = results[key]
-                    if window is None:
+                        results[key] = tape.test(n, end - offset, kind, now, offset)
+                    if results[key] is None:
                         break
-                    evidence += window
                 else:
+                    key = (w.need, 0, "pf")
+                    if key not in results:
+                        results[key] = tape.test(w.need, end, "pf", now)
+                    evidence = results[key]
+                    if evidence is None:
+                        continue
                     tally.qualified += 1
                     tally.negative_short += int(w.short_mode == "negative")
                     tally.negative_last += int(w.last_mode == "negative")
@@ -605,9 +727,9 @@ class StageHistory:
                     tally.gain += evidence.gain
                     tally.loss += evidence.loss
                     if depth == len(STAGES) - 1:
-                        candidate = GridResult(counts, (w,), evidence)
-                        if not pick.path or candidate.rank > pick.rank:
-                            pick = candidate
+                        candidate_key = (1, evidence_rank(evidence))
+                        if candidate_key > picked_key:
+                            picked_path, picked_evidence, picked_key = (w,), evidence, candidate_key
                         continue
                     key = (w.long if depth == 0 else base_long, tape.child_mask(w, depth))
                     first, copies = paths.get(key, (w, 0))
@@ -616,18 +738,19 @@ class StageHistory:
             for (long, mask), (first, copies) in paths.items():
                 if streams and depth == 0:
                     validated_base_mask |= mask
-                if depth == len(STAGES) - 2:
-                    max_window = max(w.need for w in self._rules[depth + 1, long])
+                if depth == len(STAGES) - 2 and self.window_auto is None:
+                    max_window = bounds[depth + 1, long][1]
                     ids = self.latest_members(tape, mask, start, end, max_window)
                     next_result = last_stage(ids, long)
                 else:
                     next_result = walk(depth + 1, self.child(tape, mask), long)
                 for dest, source in zip(counts[1:], next_result.counts):
                     dest.add(source, copies)
-                path = (first, *next_result.path)
-                if (len(path), next_result.rank) > (len(pick.path), pick.rank):
-                    pick = GridResult(counts, path, next_result.evidence)
-            return pick
+                candidate_key = (1 + len(next_result.path), next_result.rank)
+                if candidate_key > picked_key:
+                    picked_path = (first, *next_result.path)
+                    picked_evidence, picked_key = next_result.evidence, candidate_key
+            return GridResult(counts, picked_path, picked_evidence)
 
         try:
             result = walk(0, root, 0)
@@ -642,7 +765,7 @@ class StageHistory:
                 shown = start if limit is None else max(start, end - limit)
                 row_ids.append(tuple(tape.ids[shown:end]))
             row_ids = tuple(row_ids)
-            blocks = self.selected_blocks(result.path, now, root)
+            blocks, floors = self.selected_blocks(result.path, now, root)
             selected = tuple(sum(group, Evidence()) for group in blocks)
             low, high = root.indices(now)
             # A Base position can belong to several qualifying First Stage Sets.
@@ -653,5 +776,5 @@ class StageHistory:
             base = Evidence(len(base_ids), math.fsum(x for x in base_net if x > 0),
                             math.fsum(-x for x in base_net if x < 0))
             return GridResult(result.counts, result.path, result.evidence, self.read_streams(row_ids), row_ids,
-                              selected, tuple(post), blocks, base, base_ids)
+                              selected, tuple(post), blocks, base, base_ids, selected_floors=floors)
         return result

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+from heapq import heappop, heappush
 import json
 import math
 import os
@@ -280,7 +281,7 @@ def tape_source(tapes, idx: int, now: float, lookback_s: float):
 
 
 
-def grid_at(book, tapes: Tapes, st, now: float):
+def grid_at(book, tapes: Tapes, st, now: float, *, streams: bool = True):
     """The same stage query as the live scorer, on the snapshot's closed prefix."""
     params = book.stage_params(st.pack, st)
     source = tape_source(tapes, st.idx, now, params.lookback_s)
@@ -289,24 +290,25 @@ def grid_at(book, tapes: Tapes, st, now: float):
     model = book._grid_auto_models.get(st.id)
     key = (now, id(close), book.stage_grid, params, tapes.cf, model, book.sl_auto_allows(st))
     item = cache.get(st.idx)
-    if item and item[0] == key:
+    if item and item[0] == key and (item[2] or not streams):
         return item[1]
     cutoff = bisect.bisect_left(close, now - book.history_bars() * 60.0)
     end = bisect.bisect_left(close, now)
     result = book.grid_history(st, closes=close[cutoff:end], entries=entry[cutoff:end],
                                nets=[v - tapes.cf for v in gross[cutoff:end]]).evaluate(
-                                   now, streams=True, limit=se.PROC_KEEP)
-    cache[st.idx] = (key, result)
+                                   now, streams=streams, limit=se.PROC_KEEP)
+    cache[st.idx] = (key, result, streams)
     return result
 
 def gate_metrics(book, tapes: Tapes, st, now: float):
     """(valid, rank, gate_n, gate_pf): the gate and the ranking key exactly as SetBook._score_one / gate_reason /
     rank_key compute them (self_check compares both with the engine). The Base windows first (gate_base), then the stages after Base."""
     if getattr(book, "stage_grid", None):
-        result = grid_at(book, tapes, st, now)
+        result = grid_at(book, tapes, st, now, streams=False)
         base = result.counts[0]
-        allowed = book.sl_auto_allows(st) and not book.stop_cap_exceeded(st)
-        return ("pos" if allowed and result.ready else "", result.rank, base.orders, se.pf_of(base.gain, base.loss))
+        allowed = book.processing_allows(st) and book.sl_auto_allows(st) and not book.stop_cap_exceeded(st)
+        return ("pos" if allowed and result.ready else "", book.exec_rank_key(st, result),
+                base.orders, se.pf_of(base.gain, base.loss))
     valid, rank, n, pf = gate_base(book, tapes, st, now)
     if valid and (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
         valid, lane_stats = stage_lane_stats(book, tapes, st, now)          # "pos" / "neg": the lane the Set passes Real on; "" when none
@@ -741,7 +743,8 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
         valid, key, n, pf = gate_metrics(book, tapes, st, now)
         if getattr(book, "stage_grid", None):
             checked = grid_at(book, tapes, st, now)
-            bad += int(bool(valid) != eng_valid or checked.path != st.exec_grid.path or checked.counts != st.exec_grid.counts)
+            bad += int(bool(valid) != eng_valid or checked.path != st.exec_grid.path or checked.counts != st.exec_grid.counts
+                       or (eng_valid and key != book.lane_rank_key(st, eng_lane)))
             st.hist = []
             continue
         if (valid or "") not in ("", True) and str(valid) != eng_lane:
@@ -916,10 +919,10 @@ class AutoFloors:
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
             refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None,
-            candidate_filter=None) -> List[Dict[str, Any]]:
+            candidate_filter=None, max_open: int = 0) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
-    this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
+    this often inside the hour (the live engine refreshes every histRefreshS, 120 s). max_open mirrors a venue session's position cap."""
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -928,6 +931,15 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     axis_sizing = None
     if grid_enabled:
         axis_sizing, axis_pick, axis_coord = axis_pick, None, None
+    sequences = {}
+    for pack in book.packs:
+        if grid_enabled:
+            sequences[pack] = [("pos", kinds) for kinds in book.kind_order_for(pack)]
+        elif hasattr(book, "pick_sequence_for"):
+            sequences[pack] = book.pick_sequence_for(pack)
+        else:
+            sequences[pack] = [(lane, kinds) for lane in getattr(book, "lane_order", ("pos", "neg"))
+                               for kinds in (("base", "exit"), ("trail",))]
     busy = {} if grid_enabled else {s: -1 for s in names}
     executed: List[Dict[str, Any]] = []
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
@@ -938,6 +950,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it
     axis_cache: Dict[Tuple[int, str], Any] = {}
     opened: List[Tuple[float, str, str]] = []           # (exit t, Set id, lane) of executed positions: the Axis continuation cap counts the open ones
+    active_ends: List[float] = []
     # the profit group gate (SetBook.group_gate, owner 2026-11-06): a group (pack x kind x TP range x lane) opens only while the newest groupGateN net results it executed inside
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
     gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if not grid_enabled and getattr(book, "group_gate", False) else None
@@ -994,11 +1007,15 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         for minute in range(60):
             t = int(h) + minute * 60
             entry_t = float(t + 60)
+            while active_ends and active_ends[0] <= entry_t:
+                heappop(active_ends)
             if refresh_s and minute and minute % every == 0:
                 ranked, _ = rank_at(entry_t)
                 ranked_t = entry_t
             slots = ((s, d) for s in names for d in (1, -1)) if grid_enabled else ((s, 0) for s in names)
             for s, desired in slots:
+                if max_open > 0 and len(active_ends) >= max_open:
+                    break
                 slot = (s, desired) if desired else s
                 i = idx_of[s].get(t)
                 if i is None or i <= busy.get(slot, -1):
@@ -1022,7 +1039,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     if axis_pick is not None:
                         # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
                         chosen = None
-                        for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
+                        for lane_, kinds in sequences[pack]:
                             cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
                                 if not group_ok(st_c, lane_, entry_t):
@@ -1038,7 +1055,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # the engine's Axis per Set (Pulse._scope_choice with an Axis enabled): the positive lane first, then Real Negative; per lane base and Exit
                         # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
                         chosen = None
-                        for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
+                        for lane_, kinds in sequences[pack]:
                             cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
                                 if not group_ok(st_c, lane_, entry_t):
@@ -1052,7 +1069,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                             if chosen is not None:
                                 pool, lane_pick = [chosen], lane_
                                 break
-                    for lane_, kinds_ in (() if (axis_coord is not None or axis_pick is not None) else (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))])):
+                    for lane_, kinds_ in (() if (axis_coord is not None or axis_pick is not None) else sequences[pack]):
                         # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...)); the (lane, kinds) walk is the engine's
                         # SetBook.pick_sequence_for (trailPick / trailPickByPack: lanes outside, or kinds outside for first-any)
                         pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
@@ -1086,7 +1103,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     break
                 else:
                     continue
-                path_id = lane_id(st.id, grid_at(book, tapes, st, ranked_t).path) if grid_enabled else ""
+                path_id = lane_id(st.id, grid_at(book, tapes, st, ranked_t, streams=False).path) if grid_enabled else ""
                 lane = se.SetLane(st, s)
                 end = end_of[s]
                 # The explicit candidate admits only this bar. Later signals on the same tape cannot reopen it.
@@ -1100,6 +1117,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # Its exit is unknown beyond this replay window; omitting
                         # it here lets other symbols exceed the live per-Set cap.
                         opened.append((float("inf"), st.id, lane_pick))
+                        if max_open > 0:
+                            heappush(active_ends, float("inf"))
                         if include_open:
                             pos = lane.open
                             mark = float(bars[s][end - 1][3])
@@ -1129,6 +1148,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))
+                if max_open > 0:
+                    heappush(active_ends, rec["t"])
                 if gg is not None:
                     ghist.setdefault(se.set_group(st.id, lane_pick, gside), []).append((rec["t"], rec["net"]))
                 if cg:

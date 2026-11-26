@@ -502,6 +502,36 @@ def manual_rest_key(symbol: str, side: str) -> str:
     return f"{symbol}:{str(side).upper()}"
 
 
+def venue_position_row(row: Any) -> Optional[Tuple[str, str, float]]:
+    """Use the explicit hedge side or the signed amount of a one-way position."""
+    if not isinstance(row, dict):
+        return None
+    amount = number(row.get("positionAmt"))
+    if row.get("positionAmt") in (None, ""):
+        amount = number(row.get("availableAmt"))
+    symbol = str(row.get("symbol") or "")
+    side = str(row.get("positionSide") or "").upper()
+    if amount is None or not symbol or side not in ("", "BOTH", "LONG", "SHORT"):
+        return None
+    if side in ("", "BOTH"):
+        side = "LONG" if amount > 0 else "SHORT"
+    return symbol, side, abs(amount)
+
+
+def venue_position_rows(rows: Any) -> Optional[List[Tuple[str, str, float, dict]]]:
+    if not isinstance(rows, list):
+        return None
+    active = []
+    for row in rows:
+        position = venue_position_row(row)
+        if position is None:
+            return None
+        symbol, side, size = position
+        if size > 1e-12:
+            active.append((symbol, side, size, row))
+    return active
+
+
 def manual_rest_active(rest: Dict[str, float], symbol: str, side: str, now: float) -> bool:
     """True while (symbol, side) rests after a position of it was closed outside the engine (manual close on the venue)."""
     return float(rest.get(manual_rest_key(symbol, side), 0.0) or 0.0) > now
@@ -3809,6 +3839,21 @@ class Pulse:
     def position_key(symbol: str, side: str) -> str:
         return f"{symbol}:{side.upper()}"
 
+    def entry_slot_rests(self, symbol: str, side: str, now: float) -> bool:
+        cooldown = getattr(self, "cooldown", {})
+        return now < max(cooldown.get(symbol, 0.0), cooldown.get(self.position_key(symbol, side), 0.0))
+
+    def rest_position_slot(self, pos: Position, wait: float) -> None:
+        deadline = time.time() + wait
+        if self.exec_stage_enabled() or pos.exec_lane_id:
+            key = self.position_key(pos.symbol, pos.side)
+            # A completed candle can enter once per slot, including when
+            # the configured rest is zero and the fill closes immediately.
+            deadline = max(deadline, (math.floor(pos.opened_at / 60.0) + 1) * 60.0)
+        else:
+            key = pos.symbol
+        self.cooldown[key] = max(self.cooldown.get(key, 0.0), deadline)
+
     def tracked_position(self, symbol: str, side: str) -> Optional[Position]:
         pos = self.open.get(self.position_key(symbol, side))
         if pos is None:
@@ -4068,16 +4113,17 @@ class Pulse:
             return
         if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
-        if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or self.occupying(sym, "LONG" if direction > 0 else "SHORT"):
+        side = "LONG" if direction > 0 else "SHORT"
+        if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or self.occupying(sym, side):
             return
         if any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
                for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
             return   # reconcile an uncertain Relate order before another admission
-        if time.time() < self.cooldown.get(sym, 0):
+        if self.entry_slot_rests(sym, side, time.time()):
             return
         if self.ignore_syms.get(sym, 0) > time.time():
             return
-        if manual_rest_active(getattr(self, "manual_rest", {}), sym, "LONG" if direction > 0 else "SHORT", time.time()):
+        if manual_rest_active(getattr(self, "manual_rest", {}), sym, side, time.time()):
             return              # closed by hand a moment ago: not the exact same position again (every other symbol and direction trades on)
         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
             return
@@ -4106,7 +4152,6 @@ class Pulse:
         margin = notional / max(1, lev)
         if margin > float(self.available or 0) * 0.95:
             return
-        side = "LONG" if direction > 0 else "SHORT"
         order_side = "BUY" if direction > 0 else "SELL"
         exec_lane_id = ""
         exec_axis_vol = 1.0
@@ -4602,19 +4647,8 @@ class Pulse:
             return False
         if not self.ok(r):
             return False
-        for p in (r.get("data") or []):
-            if str(p.get("symbol") or "") != pos.symbol:
-                continue
-            side = (p.get("positionSide") or "").upper() or ("LONG" if float(p.get("positionAmt") or 0) > 0 else "SHORT")
-            if side != pos.side:
-                continue
-            try:
-                amt = abs(float(p.get("positionAmt") or p.get("availableAmt") or 0))
-            except Exception:
-                amt = 0.0
-            if amt > 1e-12:
-                return False
-        return True
+        live = venue_position_rows(r.get("data"))
+        return live is not None and not any(symbol == pos.symbol and side == pos.side for symbol, side, _, _ in live)
 
     def venue_exit(self, pos: Position) -> Optional[Tuple[str, float]]:
         """The venue fill that closed this position: ("sl" or "tp", fill price) when its own stop or TP order FILLED,
@@ -4752,20 +4786,10 @@ class Pulse:
             r = self.api.get("/openApi/swap/v2/user/positions")
         except Exception:
             return
-        rows = r.get("data") if self.ok(r) else None
-        if not isinstance(rows, list):
+        live = venue_position_rows(r.get("data")) if self.ok(r) else None
+        if live is None:
             return
-        held = set()
-        for p in rows:
-            try:
-                amt = abs(float(p.get("positionAmt") or p.get("availableAmt") or 0))
-            except Exception:
-                continue
-            if amt > 1e-12:
-                side = (p.get("positionSide") or "").upper()
-                if side not in ("LONG", "SHORT"):          # one-way mode reports BOTH: the sign of the amount is the side
-                    side = "LONG" if float(p.get("positionAmt") or 0) >= 0 else "SHORT"
-                held.add((str(p.get("symbol") or ""), side))
+        held = {(symbol, side) for symbol, side, _, _ in live}
         confirmed = None                                    # a second read, before a position without a fill is dropped
         for pos in list(self.open.values()):
             if pos.close_pending:
@@ -4775,7 +4799,7 @@ class Pulse:
                 continue
             pos.downtime_close = True                       # the venue closed it while the engine was down: recorded, never scored
             if self.close_from_venue(pos, "restart"):
-                self.cooldown[pos.symbol] = time.time() + 90.0
+                self.rest_position_slot(pos, 90.0)
                 continue
             pos.downtime_close = False
             # an empty list is a real answer too (the account is flat): the second read below decides it, so a lagging empty
@@ -4786,11 +4810,10 @@ class Pulse:
                     r2 = self.api.get("/openApi/swap/v2/user/positions")
                 except Exception:
                     return
-                rows2 = r2.get("data") if self.ok(r2) else None
-                if not isinstance(rows2, list):
+                live = venue_position_rows(r2.get("data")) if self.ok(r2) else None
+                if live is None:
                     return
-                confirmed = {(str(p.get("symbol") or ""), "LONG" if float(p.get("positionAmt") or 0) >= 0 else "SHORT")
-                             for p in rows2 if abs(float(p.get("positionAmt") or 0)) > 1e-12}
+                confirmed = {(symbol, side) for symbol, side, _, _ in live}
             if (pos.symbol, pos.side) in confirmed:
                 continue
             settlement=self.verified_position_settlement(pos)
@@ -4799,7 +4822,7 @@ class Pulse:
                 self.cancel_controls(pos.symbol,side=pos.side)
                 self.close_pos(pos,settlement['exit'],'external-position-close',exchange=False)
                 self.note_restore('closed-by-history',pos.symbol,pos.side,'exact owned position settled while offline')
-                self.cooldown[pos.symbol]=time.time()+90.0
+                self.rest_position_slot(pos, 90.0)
                 continue
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
             self.note_restore("dropped", pos.symbol, pos.side, "the venue no longer holds it (two reads)")
@@ -4808,7 +4831,7 @@ class Pulse:
             self.cancel_controls(pos.symbol, side=pos.side)
             self.rounds_release(pos)
             self.forget_position(pos)
-            self.cooldown[pos.symbol] = time.time() + 90.0
+            self.rest_position_slot(pos, 90.0)
         self.save_open_book()
 
     def close_from_venue(self, pos: Position, why: str) -> bool:
@@ -5114,8 +5137,9 @@ class Pulse:
                     self.cooldown["__book__"] = time.time() + 120
                     self.consec_loss = 4
                     log("pause new entries 120s after cold streak")
-        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason, set_lane=bool(pos.set_id), pack=str(getattr(pos, "pack", "") or ""),
-                                                                           side=1 if str(getattr(pos, "side", "")).upper() == "LONG" else -1)
+        wait = self.symbol_backoff(pos.symbol, pnl_pct, hold, reason, set_lane=bool(pos.set_id), pack=pos.pack,
+                                   side=1 if pos.side == "LONG" else -1, net_pnl_pct=rec.net_pnl_pct)
+        self.rest_position_slot(pos, wait)
         if not pos.set_id:
             # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
             self.block.on_parent_close(pos.symbol, pos.side, pnl)
@@ -5129,7 +5153,8 @@ class Pulse:
         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self._stats_force = True
 
-    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False, pack: str = "", side: int = 0) -> float:
+    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False,
+                       pack: str = "", side: int = 0, net_pnl_pct: Optional[float] = None) -> float:
         """Seconds before this symbol may be entered again. A stop-out within 30 s of the entry (a book that moves faster
         than the strategy can act on) bans the symbol for SYM_BAN_S, whatever the lane: a venue safety. After a Set close
         the wait is the Set lane's own cooldown (setCooldownBars, as replayed), never a backoff from other closes. After an
@@ -5138,7 +5163,7 @@ class Pulse:
         if str(reason) == "sl" and float(hold_s) < 30.0:
             self.ignore_syms[sym] = max(self.ignore_syms.get(sym, 0.0), time.time() + SYM_BAN_S)
             log(f"SYMBOL BAN {sym} {int(SYM_BAN_S / 60)} min: stopped out after {hold_s:.0f}s")
-        net = float(pnl_pct) - cost_as_frac(self.position_cost_pct)
+        net = net_pnl_pct if net_pnl_pct is not None else float(pnl_pct) - cost_as_frac(self.position_cost_pct)
         if set_lane:
             wait = float(getattr(self.sets, "cooldown_bars", 2)) * 60.0
             if pack and net > 0:
@@ -5373,6 +5398,7 @@ class Pulse:
                             set_id=str(rec.get("set_id") or rec.get("setId") or ""),
                             exec_lane_id=str(rec.get("exec_lane_id") or ""),
                             filled_orders=max(0, int(rec.get("filled_orders") or 0)),
+                            funding_usdt=number(rec.get("funding_usdt")) or 0.0,
                             pack=str(rec.get("pack") or ""), lane=str(rec.get("lane") or "pos"),
                             block_fills=list(rec.get("block_fills") or []),
                             net_pnl_pct=number(rec.get("net_pnl_pct")), base_net_pnl_pct=number(rec.get("base_net_pnl_pct")),
@@ -5411,13 +5437,18 @@ class Pulse:
             return
         self._exec_inc("execFilledOrders", getattr(rec, "filled_orders", 0))
         cash = number(rec.pnl) if verified else None
+        funding = (number(getattr(rec, "funding_usdt", None)) or 0.0) if cash is not None else 0.0
         net = number(getattr(rec, "net_pnl_pct", None)) if verified else None
         row = self.__dict__.setdefault("exec_scope", {}).setdefault("stage:exec", {
             "orders": 0, "wins": 0, "cash_n": 0, "cash_gain": 0.0, "cash_loss": 0.0,
-            "return_n": 0, "return_gain": 0.0, "return_loss": 0.0, "fee_sources": {},
+            "return_n": 0, "return_gain": 0.0, "return_loss": 0.0, "fee_sources": {}, "reported_funding": 0.0,
         })
         row["orders"] += 1
         if cash is not None:
+            # The journal's pnl is fill PnL after commissions. A verified
+            # position can also have a separate signed funding settlement.
+            cash += funding
+            row["reported_funding"] += funding
             row["cash_n"] += 1
             row["wins"] += int(cash > 0)
             row["cash_gain"] += max(0.0, cash)
@@ -5565,6 +5596,7 @@ class Pulse:
             "exec": {**exec_scope,
                      "returnGain": exec_totals.get("return_gain", 0.0),
                      "returnLoss": exec_totals.get("return_loss", 0.0),
+                     "reportedFundingUsdt": exec_totals.get("reported_funding", 0.0),
                      "activePositions": len({(p.symbol, p.side) for p in exec_positions}),
                      "activeFilledOrders": sum(count_position_orders(p) for p in exec_positions),
                      "activeControlOrders": len({(p.symbol, oid) for p in exec_positions
@@ -6756,13 +6788,20 @@ class Pulse:
         # A pack may qualify only on the opposite side of this signal. Cache
         # eligibility by pack AND direction for this cycle, never across cycles:
         # stage/Axis verdicts may change while the completed-bar signal is cached.
+        grid_enabled = self.exec_stage_enabled()
         eligible: Dict[Tuple[str, int, str], bool] = {}
         def can_enter(candidate, symbol):
-            key = (candidate[0], int(candidate[1]), symbol)
+            pack, side = candidate[0], int(candidate[1])
+            if grid_enabled and isinstance(self.sets, SetBook):
+                if not self.sets.symbol_allows(pack, symbol):
+                    return False
+                # Exec eligibility is common to the pack/direction. The
+                # symbol restriction above is specific to the indication.
+                symbol = ""
+            key = (pack, side, symbol)
             if key not in eligible:
-                eligible[key] = self._scope_choice(key[0], side=key[1], symbol=key[2])[0] is not None
+                eligible[key] = self._scope_choice(pack, side=side, symbol=symbol)[0] is not None
             return eligible[key]
-        grid_enabled = self.exec_stage_enabled()
         for s in SYMBOLS:
             if not grid_enabled and self.occupying(s):
                 continue
@@ -6785,7 +6824,7 @@ class Pulse:
             hits = hit[1]
             for desired in ((1, -1) if grid_enabled else (0,)):
                 side = "LONG" if desired == 1 else "SHORT"
-                if desired and self.occupying(s, side):
+                if desired and (self.occupying(s, side) or self.entry_slot_rests(s, side, now)):
                     continue
                 sig = next((candidate for candidate in hits
                             if (not desired or int(candidate[1]) == desired) and can_enter(candidate, s)), None)
@@ -7062,8 +7101,10 @@ class Pulse:
             self.recon_ok = False
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
-        rows = r.get("data") or []
-        if not isinstance(rows, list):
+        live_rows = venue_position_rows(r.get("data"))
+        if live_rows is None:
+            self.recon_ok = False
+            self.recon_detail = "adopt invalid positions"
             return
         # A terminal, unfilled request frees its original side. Unknown
         # requests remain reserved to avoid resubmitting on the same slot.
@@ -7077,49 +7118,30 @@ class Pulse:
             row = self.confirmed_order({}, intent["symbol"], cid)
             if executed_qty(row) == 0:
                 self.clear_exec_intent(cid)
-        live_n = 0
-        for p in rows:
-            try:
-                if abs(float(p.get("positionAmt") or p.get("availableAmt") or 0)) > 1e-12:
-                    live_n += 1
-            except Exception:
-                pass
-        if live_n == 0 and self.open:
+        if not live_rows and self.open:
             # an empty list can be lag or a rate limit: only the third empty pass in a row, and only a position the
             # direction-aware check confirms flat, leaves the book
             self._adopt_empty_n = int(getattr(self, "_adopt_empty_n", 0) or 0) + 1
             if self._adopt_empty_n >= 3:
                 for pos in list(self.open.values()):
-                    sym = pos.symbol
                     if pos and pos.close_pending:
                         self.settle_pending_close(pos)
                         continue
                     if not pos or time.time() - float(pos.opened_at or 0) < 180.0 or not self._exchange_flat(pos):
                         continue
                     if self.close_from_venue(pos, "stale"):
-                        self.cooldown[sym] = time.time() + 90.0
+                        self.rest_position_slot(pos, 90.0)
                         continue
                     self.drop_ghost(pos, 'stale')
-                    self.cooldown[sym] = time.time() + 90.0
+                    self.rest_position_slot(pos, 90.0)
                 self.save_open_book()
             log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
             return
         self._adopt_empty_n = 0
         live = set()
         foreign = set()
-        for p in rows:
-            try:
-                amt = float(p.get("positionAmt") or p.get("availableAmt") or 0)
-            except Exception:
-                continue
-            if amt == 0:
-                continue
-            sym = p.get("symbol")
-            if not sym:
-                continue
-            side = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
+        for sym, side, qty, p in live_rows:
             px = float(p.get("avgPrice") or p.get("entryPrice") or self.px.get(sym) or 0)
-            qty = abs(amt)
             ours = self.tracked_position(sym, side)
             live.add(self.position_key(sym, side))
             live_lev = 0
@@ -7127,12 +7149,13 @@ class Pulse:
                 live_lev = int(float(p.get("leverage") or 0))
             except Exception:
                 live_lev = 0
-            tagged = []
-            try:
-                tagged = [o for o in self.our_orders(sym) if str(o.get("positionSide") or "").upper() in (side, "")]
-            except Exception:
-                tagged = []
             owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
+            tagged = []
+            if not owned or not ours.set_id:
+                try:
+                    tagged = [o for o in self.our_orders(sym) if str(o.get("positionSide") or "").upper() in (side, "")]
+                except Exception:
+                    tagged = []
             if not owned and any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
                                  for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
                 probe = Position(sym, side, qty, px, time.time(), px, px, px)
@@ -7287,10 +7310,10 @@ class Pulse:
                 if not self._exchange_flat(pos):
                     continue
             if self.close_from_venue(pos, "stale"):
-                self.cooldown[sym] = time.time() + 90.0
+                self.rest_position_slot(pos, 90.0)
                 continue
             self.drop_ghost(pos,'stale')
-            self.cooldown[sym] = time.time() + 90.0
+            self.rest_position_slot(pos, 90.0)
         self.ignored_foreign = len(foreign)
         self.foreign_slots = foreign
         book_slots = {self.position_key(pos.symbol, pos.side) for pos in self.open.values()}

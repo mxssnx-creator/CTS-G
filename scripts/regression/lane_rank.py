@@ -420,7 +420,7 @@ def trail_pick_decides_how_trailing_sets_compete():
         got[f"{order} (T neg only)"] = "B" if pick is base else "T" if pick is tr else None
     from common import ROOT
     sim = open(_os.path.join(ROOT, "scripts", "stage_eval.py")).read()
-    sim_ok = sim.count("book.pick_sequence_for(pack)") >= 3 and 'for kinds in (("base", "exit"), ("trail",))' not in sim
+    sim_ok = "sequences[pack] = book.pick_sequence_for(pack)" in sim and "book.kind_order_for(pack)" in sim
     want = {"after": "B", "together": "T", "together (T lower)": "B", "first (T lower)": "T", "bogus": "B", "after-alone": "T",
             "first (T neg only)": "B", "first-any (T neg only)": "T"}
     ok = got == want and sim_ok and se.KIND_ORDER_DEFAULT == "after"

@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import type { LiveStats } from "@/lib/live-stats";
 import {
-  type StageGridConfig, type StageName, LONG_COUNTS, SHORT_COUNTS, EXEC_SHORT_COUNTS, LAST_COUNTS,
+  type StageGridConfig, type StageName, LONG_COUNTS, SHORT_COUNTS, LATE_SHORT_COUNTS, LAST_COUNTS,
   SIGN_MODES, LONG_MODES, STAGE_ORDER, STAGE_LABEL, stageGridOf, postStageEvidence,
 } from "@/lib/stage-grid";
 
@@ -51,7 +51,7 @@ export function StageGridSettings({ value, onChange }: {
         <>
           <p className="text-xs text-muted">
             Every enabled combination gets its own Set at each stage. The Long, Short and Last blocks use distinct earlier closes.
-            Long and positive Short use the Set's PF floor. Negative Short and signed Last compare PF against 1.
+            Each block uses its minimum or Auto PF. Negative blocks divide losses by gains. The full window must also meet its positive PF floor.
             Negative Short is available for 4, 8 and 12 samples.
           </p>
           <div className="grid gap-3 md:grid-cols-2">
@@ -63,7 +63,7 @@ export function StageGridSettings({ value, onChange }: {
                   {stage === "base"
                     ? <Choices<number> label="Long" choices={LONG_COUNTS} values={value.base.long} onChange={(long) => changeStage(stage, { long })} />
                     : <Choices label="Long" choices={LONG_MODES} values={value[stage].longModes} onChange={(longModes) => changeStage(stage, { longModes })} display={(mode) => mode === "inherit" ? "Inherit Base Long" : "Without Long"} />}
-                  <Choices<number> label="Short" choices={stage === "exec" ? EXEC_SHORT_COUNTS : SHORT_COUNTS} values={options.short} onChange={(short) => changeStage(stage, { short })} />
+                  <Choices<number> label="Short" choices={stage === "real" || stage === "exec" ? LATE_SHORT_COUNTS : SHORT_COUNTS} values={options.short} onChange={(short) => changeStage(stage, { short })} />
                   <Choices label="Short sign" choices={options.short.some((n) => n <= 12) ? SIGN_MODES : ["positive"] as const} values={options.shortModes} onChange={(shortModes) => changeStage(stage, { shortModes })} display={signLabel} />
                   <Choices<number> label="Last" choices={LAST_COUNTS} values={options.last} onChange={(last) => changeStage(stage, { last })} />
                   <Choices label="Last sign" choices={SIGN_MODES} values={options.lastModes} onChange={(lastModes) => changeStage(stage, { lastModes })} display={signLabel} />
@@ -136,6 +136,8 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
           Live mirrors Exec · {count.format(executed.activePositions)} active positions · {count.format(executed.activeFilledOrders)} filled orders on active positions
           {executed.activeControlOrders != null && ` · ${count.format(executed.activeControlOrders)} live controls`}
           {" · "}{count.format(executed.closedFilledOrders)} filled orders on closed positions · {executed.orders == null || !executed.orders ? "Exec PF awaiting settled positions" : executed.noLoss ? `Exec PF no losses (${executed.orders} closed positions)` : `Exec PF ${executed.pf?.toFixed(2) ?? "—"} (${executed.orders} closed positions)`}
+          {!!executed.cashOrders && ` · Cash PF ${executed.cashNoLoss ? "no losses" : executed.cashPf?.toFixed(2) ?? "—"}`}
+          {!!executed.reportedFundingUsdt && ` including ${executed.reportedFundingUsdt.toFixed(4)} USDT reported funding`}
           {!!executed.unverifiedPositions && ` · ${executed.unverifiedPositions} closed positions awaiting verified returns`}
         </p>
       )}

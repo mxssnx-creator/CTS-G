@@ -2523,7 +2523,9 @@ function PfWindowControls({
   return (
     <>
       <div className="col-span-full mt-1 font-mono text-[11px] text-muted">
-        Minimum PF by TP step · one floor per Set for every window of every stage (Base, Main, Real, Real Negative) and for the Axis / Block / DCA gates on that Set's own stream. The drawdown time and the minimum order count are Base-stage rules
+        {overlay.stageLastN.enabled
+          ? "Minimum PF by TP step sets the fallback for each Set. Auto PF can learn a separate floor for each parent lane and Last-N block from its own settled history."
+          : "Minimum PF by TP step sets one floor per Set for the legacy stages and the Axis, Block and DCA gates on that Set’s own stream."}
       </div>
       <Toggle
         label="Minimum PF by TP step (on: replaces the window-size classes below)"
@@ -2614,7 +2616,7 @@ function PfWindowControls({
         onChange={(v) => patch("setScratchEnabled", v)}
       />
       <Toggle
-        label={overlay.stageLastN.enabled ? "Auto PF · learn independently for each Set" : "Auto: learn the best floor for every step 0.2–3.5%"}
+        label={overlay.stageLastN.enabled ? "Auto PF · independent Stage and Last-N windows" : "Auto: learn the best floor for every step 0.2–3.5%"}
         on={byStep && overlay.minPfStepAuto !== false}
         onChange={(v) => patch("minPfStepAuto", v)}
       />
@@ -2659,7 +2661,7 @@ function PfWindowControls({
         min={1}
         max={200}
         step={1}
-        hint={overlay.stageLastN.enabled ? "Both halves of the prior 48 hours need sample support. An unproven floor uses the Set's fallback." : "admitted orders of the Set itself before its own floor is used; fewer = the defaults"}
+        hint={overlay.stageLastN.enabled ? "Each window learns from its own parent Set before the last completed hour. Both chronological halves need sample support. Otherwise its fallback applies." : "admitted orders of the Set itself before its own floor is used; fewer = the defaults"}
         onChange={(v) => patch("minPfSetAutoMin", v)}
       />
       <Slider
