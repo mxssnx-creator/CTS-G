@@ -20,7 +20,7 @@ test("relate: bounds equal the server's (minimum closes 5, last-N 10, stop ceili
   const ok = (patch: object) => relateConfigs([{ id: "p", ...patch }]);
   assert.doesNotThrow(() => ok({ minTrades: 5, lastN: 10, maxSlRatio: 1.25, maxLossRun: 12 }));
   for (const bad of [{ minTrades: 4 }, { lastN: 9, minTrades: 5 }, { maxSlRatio: 1.2501 }, { maxLossRun: 13 }, { maxLossRun: 1.5 }, { ratio: 0.3 }, { minTrades: 61, lastN: 60 }, { sources: ["nope"] }])
-    assert.throws(() => ok(bad), undefined, JSON.stringify(bad));
+    assert.throws(() => ok(bad), /./, JSON.stringify(bad));
 });
 
 test("Relate trigger: every subsequent order or only after a win, refused otherwise", () => {

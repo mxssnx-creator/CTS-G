@@ -59,7 +59,7 @@
   "timeStopS": 21600,
   "scratchS": 600,
   "scratchMinPct": 0.16,
-  "scanS": 0.2,
+  "scanS": 0.25,
   "cooldownS": 3,
   "staggerS": 0.12,
   "controlOrders": true,
@@ -87,7 +87,9 @@
       "minTrades": 60,
       "minPf": 1.1,
       "maxStack": 2,
-      "maxSlRatio": 0.5
+      "maxSlRatio": 0.5,
+      "maxLossRun": 0,
+      "trigger": "win"
     }
   ],
   "relationLanes": {
@@ -220,7 +222,7 @@
   "axisContMaxWindow": 8,
   "axisPauseEnabled": false,
   "axisPauseMaxWindow": 8,
-  "minPf": 1.25,
+  "minPf": 1.35,
   "positionCostPct": 0.176,
   "slippageAllowancePct": 0.016,
   "makerFeeRate": 0.0005,
@@ -229,7 +231,7 @@
   "windowsLinked": true,
   "pfWindow": 8,
   "slMinPct": 0.2,
-  "slMaxPct": 15.75,
+  "slMaxPct": 3,
   "tpMinPct": 0.35,
   "tpMaxPct": 4.5,
   "tpCostRatio": 5,
@@ -371,10 +373,11 @@
     2.6
   ],
   "setDeactN": 25,
-  "setMinPf": 1.25,
+  "setMinPf": 1.35,
   "setMaxDdtHours": 24,
   "setGateWindow": 50,
   "setGateMinTrades": 12,
+  "stageLastN": {"enabled": true, "base": {"short": [4, 8, 12, 16], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "long": [10, 20, 30, 40, 50]}, "main": {"short": [4, 8, 12, 16], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}, "real": {"short": [4, 8, 12, 16, 20, 24, 28, 30], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}, "exec": {"short": [4, 8, 12, 16, 20, 24, 28, 30], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}},
   "stagesEnabled": true,
   "lastNDisjoint": false,
   "setGateShortMode": "positive",
@@ -431,6 +434,7 @@
   "minPfByRange": {
     "micro": 1.01
   },
+  "autoPfDefaultByRange": { "minimal": 1.24, "short": 1.42 },
   "rankByLane": true,
   "setScratchEnabled": false,
   "tpRanges": {
@@ -482,7 +486,7 @@
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
   "minPfStepAutoScope": "set",
-  "minPfSetAutoMin": 10,
+  "minPfSetAutoMin": 20,
   "minPfStepAutoTol": 5,
   "minPfStepAutoLow": 1.02,
   "minPfStepAutoHigh": 2,
@@ -532,7 +536,7 @@
     120
   ],
   "setMinSamples": 12,
-  "setMinStep": 5,
+  "setMinStep": 2,
   "setStepMax": 8,
   "setTrailingDistance": "dynamic",
   "setStepAdapt": false,
@@ -550,7 +554,7 @@
   "exitOptSlMin": 0.1,
   "exitOptSlMax": 0.9,
   "exitMinHoldS": 45,
-  "setSlMinRatio": 0.5,
+  "setSlMinRatio": 0.1,
   "trailStepMin": 3,
   "trailTimeExit": true,
   "trailHoldBars": 0,
@@ -582,7 +586,7 @@
   "exitSetHoldBars": 720,
   "exitPfWindow": 8,
   "exitDeactN": 25,
-  "exitMinPf": 1.25,
+  "exitMinPf": 1.35,
   "exitAutoDeact": true,
   "modules": {
     "exchange.bingx": true,

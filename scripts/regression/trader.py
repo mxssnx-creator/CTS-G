@@ -77,15 +77,18 @@ def restored_book_drops_a_position_only_when_two_reads_agree():
     other = {"symbol": "OTHER-USDT", "positionSide": "LONG", "positionAmt": "1"}
     mine = {"symbol": "A-USDT", "positionSide": "LONG", "positionAmt": "1"}
     oneway = {"symbol": "A-USDT", "positionSide": "BOTH", "positionAmt": "-2"}
+    hedge_short = {"symbol": "A-USDT", "positionSide": "SHORT", "positionAmt": "2"}
     lag = run([other], [other, mine], [("A-USDT", "LONG")])                  # the second read lists it: kept
     gone = run([other], [other], [("A-USDT", "LONG")])                       # two reads agree: dropped
     held = run([other, mine], [other, mine], [("A-USDT", "LONG")])           # listed: kept
     both = run([oneway], [oneway], [("A-USDT", "SHORT")])                    # one-way mode: the sign of the amount is the side
     empty = run([], [], [("A-USDT", "LONG")])                                # two empty reads: the account is flat, the ghost is dropped
     empty_lag = run([], [mine], [("A-USDT", "LONG")])                        # an empty first read that the second read contradicts: kept
-    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == [] and empty_lag == ["A-USDT"]
+    hedge_lag = run([], [hedge_short], [("A-USDT", "SHORT")])
+    ok = (lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"]
+          and empty == [] and empty_lag == ["A-USDT"] and hedge_lag == ["A-USDT"])
     return ok, (f"lagging read kept={lag}, two reads agree dropped={gone}, listed kept={held}, one-way short kept={both}, "
-                f"two empty reads dropped={empty == []}, empty then listed kept={empty_lag}")
+                f"two empty reads dropped={empty == []}, empty then listed kept={empty_lag}, hedge short kept={hedge_lag}")
 
 
 def cycles_start_at_least_scan_apart():
@@ -700,7 +703,7 @@ def set_volume_multiples_size_by_pack_type_and_range():
                 p.boot_ts, p.halted, p.available = 0.0, False, 1e6
                 p.px[sym] = 100.0
                 p.entry_sense = lambda *a, **k: None
-                p.volume_factor, p.size_pct, p.size_max = 1.0, 0.0, 25.0
+                p.volume_factor, p.size_pct, p.size_max = 5.0, 0.0, 25.0
                 p.volume_by_pack, p.volume_by_kind, p.volume_by_range = (pt.volume_mults_of(m) for m in mults)
                 p._scope_choice = lambda pack, side=0, symbol="": (st, "pos", "")
                 p.sets.lane_fracs = lambda s_: (0.01, 0.015)
@@ -745,7 +748,7 @@ def relation_lanes_raise_a_set_entry_and_never_cancel_it():
                 p.boot_ts, p.halted, p.available = 0.0, False, 1e6
                 p.px[sym] = 100.0
                 p.entry_sense = lambda *a, **k: None
-                p.volume_factor, p.size_pct, p.size_max = 1.0, 0.0, 25.0
+                p.volume_factor, p.size_pct, p.size_max = 5.0, 0.0, 25.0
                 if opt.get("strict"):
                     p.strict_size_cap, p.equity, p.size_pct, p.size_max = True, 1000.0, 1.0, 25.0
                 if "size_max" in opt:
@@ -807,7 +810,7 @@ def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
         p = pt.Pulse(api, contracts)
         p.boot_ts, p.halted, p.available = 0.0, False, 1e6
         p.entry_sense = lambda *a, **k: None
-        p.volume_factor, p.size_pct, p.size_max = 1.0, 0.0, 25.0
+        p.volume_factor, p.size_pct, p.size_max = 5.0, 0.0, 25.0
         p._scope_choice = lambda pack, side=0, symbol="": (st, "pos", "")
         p.sets.lane_fracs = lambda s_: (0.01, 0.015)
         for sym in syms:
@@ -2355,7 +2358,7 @@ def _entry_budget_case(*, strict, multiple=1.0, carry=False, required_qty=None, 
         contract = pt.Contract(sym, 0.001, 0.001, 3, 2, 0.1, 150)
         p = pt.Pulse(venue, {sym: contract})
         p.boot_ts, p.halted, p.available, p.equity = 0.0, False, available, 100.0
-        p.size_pct, p.volume_factor, p.size_max, p.strict_size_cap = 1.0, 1.0, 25.0, strict
+        p.size_pct, p.volume_factor, p.size_max, p.strict_size_cap = 1.0, 5.0, 25.0, strict
         p.px[sym] = 100.0
         p.entry_sense = lambda *a, **k: None
         p.ensure_max_leverage = lambda *a, **k: 150
@@ -2448,7 +2451,7 @@ def size_budget_preserves_exact_venue_minimum():
     legacy = p.size_qty(c, px)
     p.strict_size_cap = True
     small = p.size_qty(c, px)
-    p.size_pct, p.volume_factor, p.size_max = 100.0, 1.0, minimum * px
+    p.size_pct, p.volume_factor, p.size_max = 100.0, 5.0, minimum * px
     exact = p.size_qty(c, px)
     p.size_max = (minimum - c.step) * px
     below = p.size_qty(c, px)
@@ -2467,8 +2470,8 @@ def strict_size_budget_skips_oversized_venue_minimum():
     p.leverage_for = lambda _c: 1
     c = pt.Contract(symbol="TEST-USDT", min_qty=0.01, step=0.01, qprec=2, pprec=2, min_usdt=5.0, max_lev=50)
     p.strict_size_cap = True
-    small = p.size_qty(c, 100.0)               # 2 USDT budget cannot buy the 5 USDT minimum
-    p.equity = 500.0
+    small = p.size_qty(c, 100.0)               # 0.4 USDT budget cannot buy the 5 USDT minimum
+    p.equity = 2500.0
     capped = p.size_qty(c, 100.0)              # budget is capped at 5 USDT
     p.equity = 0.0
     unknown = p.size_qty(c, 100.0)             # no fixed-notional fallback
@@ -2481,8 +2484,8 @@ def strict_size_budget_skips_oversized_venue_minimum():
 
 
 def position_size_follows_the_balance_and_the_volume_factor():
-    """Position notional = balance x sizePctOfBalance % x volumeFactor: it doubles with the balance and with the factor,
-    falls back to targetNotional x volumeFactor before a balance is read (or with the percentage at 0), and size_qty raises
+    """Position notional scales with balance and effective volumeFactor. It doubles with the balance or the configured factor,
+    falls back to targetNotional x effective volumeFactor before a balance is read (or with the percentage at 0), and size_qty raises
     it to the venue's minimum order on a small account."""
     p = _bare_pulse()
     p.volume_factor, p.size_pct = 1.5, 1.0
@@ -2495,14 +2498,14 @@ def position_size_follows_the_balance_and_the_volume_factor():
     doubled_factor = round(p.sized_notional(), 6)
     p.size_pct = 0.0
     fixed = round(p.sized_notional(), 6)
-    # a 9 USDT account: 1 % x 1.5 = 0.13 USDT, under a 5 USDT minimum order -> the minimum
+    # A 9 USDT account with effective factor 0.3 is under the 5 USDT venue minimum.
     p.size_pct, p.volume_factor, p.equity, p.available = 1.0, 1.5, 8.92, 8.92
     c = pt.Contract(symbol="X-USDT", min_qty=0.001, step=0.001, qprec=3, pprec=4, min_usdt=5.0, max_lev=50)
     p.leverage_for = lambda c_: 50
     q = p.size_qty(c, 100.0)
-    ok = (out[0.0] == round(pt.TARGET_NOTIONAL * 1.5, 6) and abs(out[1000.0] - 15.0) < 1e-9
-          and abs(out[2000.0] - 30.0) < 1e-9 and abs(doubled_factor - 30.0) < 1e-9
-          and fixed == round(pt.TARGET_NOTIONAL * 3.0, 6) and abs(q * 100.0 - 5.0) < 1e-6)
+    ok = (out[0.0] == round(pt.TARGET_NOTIONAL * 0.3, 6) and abs(out[1000.0] - 3.0) < 1e-9
+          and abs(out[2000.0] - 6.0) < 1e-9 and abs(doubled_factor - 6.0) < 1e-9
+          and fixed == round(pt.TARGET_NOTIONAL * 0.6, 6) and abs(q * 100.0 - 5.0) < 1e-6)
     return ok, (f"notional by balance={out}; factor 3 at 1000={doubled_factor}; pct 0={fixed}; "
                 f"9 USDT account order={round(q * 100.0, 4)} USDT (venue minimum 5)")
 
@@ -2564,6 +2567,7 @@ def _signal_book():
     import set_engine as se
     b = se.SetBook()
     ov = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json")))
+    ov["stageLastN"] = False
     # the shipped x01 now runs every signal pack, so some pack signals on nearly every bar of this synthetic trend and the "quiet bar" half of the check disappears; the check
     # pins the packs it was written for (the signal transport is the same for every pack)
     ov["stratReversion"] = ov["stratFlow"] = ov["stratMulti"] = ov["stratTrend"] = False
@@ -3137,7 +3141,7 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
 
 def volume_factor_is_bounded_and_defaults_to_the_minimum():
     """volumeFactor (owner: default and minimum 0.05): an overlay without it, with 0, a negative or an unreadable value sizes at 0.05, never at 1.0 (the
-    earlier fallback, 20 x the default); a valid value is kept inside 0.05 .. 10; the sized notional follows it."""
+    earlier fallback, 20 x the default); valid values are bounded inside 0.0125 .. 10, missing values default at 0.05, and effective sizing divides by five."""
     got = {repr(raw): pt.volume_factor_of(raw) for raw in (None, 0, -1, "x", float("nan"), 0.01, 0.025, 0.05, 0.3, 1, 3, 99)}
     want = {"None": 0.05, "0": 0.05, "-1": 0.05, "'x'": 0.05, "nan": 0.05, "0.01": 0.0125, "0.025": 0.025, "0.05": 0.05, "0.3": 0.3, "1": 1.0, "3": 3.0, "99": 10.0}
     p = _bare_pulse()
@@ -3146,7 +3150,7 @@ def volume_factor_is_bounded_and_defaults_to_the_minimum():
     for raw in (None, 0, 1, 2):
         p.volume_factor = pt.volume_factor_of(raw)
         sizes[repr(raw)] = round(p.sized_notional(), 6)
-    ok = got == want and sizes == {"None": 0.5, "0": 0.5, "1": 10.0, "2": 20.0} and pt.VOLUME_FACTOR_MIN == 0.05 and pt.VOLUME_FACTOR_FLOOR == 0.0125   # owner 2026-11-26: explicit values down to 0.025
+    ok = got == want and sizes == {"None": 0.1, "0": 0.1, "1": 2.0, "2": 4.0} and pt.VOLUME_FACTOR_MIN == 0.05 and pt.VOLUME_FACTOR_FLOOR == 0.0125   # owner 2026-11-26: explicit values down to 0.0125; effective sizing divides by five
     return ok, f"factors {got}; notional at 1 % of 1,000 USDT: {sizes}"
 
 def a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry():
@@ -3255,10 +3259,12 @@ def a_manual_close_rests_only_that_symbol_and_direction():
     def calls(method,name):
         return any(isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr==name
                    for n in ast.walk(methods[method]))
-    wired = ("manual_rest_active(getattr(self, \"manual_rest\", {}), sym, \"LONG\" if direction > 0 else \"SHORT\", time.time())" in src
-             and 'getattr(self, "manual_rest_scope", "set") != "set" and manual_rest_active' in src
-             and calls('adopt_exchange_positions','drop_ghost')and calls('drop_ghost','note_manual_close')
-             and calls('reconcile_restored_book','note_manual_close'))
+    manual_check = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "manual_rest_active"
+                       for n in ast.walk(methods["place"]))
+    wired = (manual_check and
+             'getattr(self, "manual_rest_scope", "set") != "set" and manual_rest_active' in src and
+             calls('adopt_exchange_positions','drop_ghost') and calls('drop_ghost','note_manual_close') and
+             calls('reconcile_restored_book','note_manual_close'))
     ok = active == [True, False, False] and not later and off and pruned == 1 and list(expired) == ["Y:LONG"] and list(saved) == ["AAA-USDT:LONG"] and wired
     return ok, f"rest active (AAA long, AAA short, BBB long) {active}, after 241 min {later}, 0 = off {off}, persisted {list(saved)}, pruned {pruned}, wired into place() and both drop paths {wired}"
 
@@ -3285,11 +3291,21 @@ def the_side_aware_group_gate_judges_long_and_short_groups_apart():
     book.load({"groupGate": True, "groupGateSide": True})
     default_book = SetBook()
     default_book.load({"groupGate": True})
-    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
-    import inspect as _insp
-    import set_engine as _se
-    # the live paths read the side through set_engine.exec_gates_allow (shared with the config gate, 2026-11-15) and record it in _exec_note
-    wired = (src.count("group_gate_side") >= 1 and "exec_gates_allow(" in src and "group_gate_side" in _insp.getsource(_se.exec_gates_allow))
+    # Give both directions ready candidates and exercise the real entry selector.
+    candidates = {1: types.SimpleNamespace(id=long_id, exe=[]), -1: types.SimpleNamespace(id=short_id, exe=[])}
+
+    def pick(_pack, side=0, predicate=None):
+        candidate = candidates[side]
+        return candidate if predicate is None or predicate(candidate) else None
+
+    pulse = _bare_pulse()
+    pulse.sets, pulse.group_exec = book, rec_on
+    book.pick_any, book.lane_of = pick, lambda _st: "pos"
+    scope = tuple(getattr(pulse._scope_choice("general", side)[0], "id", None) for side in (1, -1))
+    from stage_grid import StageGrid
+    book.stage_grid = StageGrid.from_settings({})
+    mirrored = tuple(pulse._scope_choice("general", side)[0].id for side in (1, -1))
+    wired = scope == (None, short_id) and mirrored == (long_id, short_id)
     # pooled scope (groupGateScope "side", CTS-A-O's engine direction acceptance): one record per direction, whatever the pack, kind, range or lane
     pooled_rec = {set_group(long_id, "pos", "pooled"): list(losses)}
     other_long, other_short = "flow:L:1m:tr0.80:0.70", "flow:S:1m:tr0.80:0.70"

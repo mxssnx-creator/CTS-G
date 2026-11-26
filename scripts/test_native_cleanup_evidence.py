@@ -123,6 +123,15 @@ class CleanupEvidence(unittest.TestCase):
         self.assertEqual(terminal_intents(api,[{**intent,'response':rejected}],time.monotonic()+2,order_bodies),[])
         self.assertEqual(calls,[])
 
+    def test_explicit_leverage_rejection_does_not_leave_a_pending_order(self):
+        rejected = {'code': 101414, 'msg': 'The maximum leverage for the trading pair is 25, please reduce the leverage.'}
+        self.assertTrue(definite_refusal(rejected))
+        for change in ({'msg': 'Unconfirmed'}, {'error': True}, {'data': {'orderId': '123'}}):
+            self.assertFalse(definite_refusal({**rejected, **change}))
+        _, _, intent = self.fixture()
+        api = SimpleNamespace(get=lambda *_: self.fail('Rejected write must not be looked up'))
+        self.assertEqual(terminal_intents(api, [{**intent, 'response': rejected}], time.monotonic() + 2, order_bodies), [])
+
     def test_slow_placements_yield_and_all_eligible_entries_still_progress(self):
         p=pt.Pulse.__new__(pt.Pulse);p.halted=False;p.real_stage_paper=False
         p.sets=SimpleNamespace(enabled=True,packs={},use_historic_gate=False)

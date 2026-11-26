@@ -19,6 +19,62 @@ SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_entry_cap_reserves_uncertain_writes_and_still_allows_owned_closes(self):
+        calls = []
+        def dispatch(method, path, data):
+            calls.append((method, path))
+            if len(calls) == 1:
+                raise TimeoutError("entry response not confirmed")
+            return {"code": 0, "data": {}}
+
+        order_path = "/openApi/swap/v2/trade/order"
+        batch_path = "/openApi/swap/v2/trade/batchOrders"
+        entry = {"symbol":"BTC-USDT", "positionSide":"LONG", "side":"BUY",
+                 "quantity":1, "clientOrderID":"Gtest-entry"}
+        with tempfile.TemporaryDirectory() as tmp:
+            api = SimpleNamespace(base=session.HOST, _req=dispatch)
+            journal = session.Journal(api, tmp, "Gtest", {"BTC-USDT"}, max_entry_orders=2)
+            journal.phase = "active"
+            journal.deadline = session.time.monotonic() + 60
+            with self.assertRaises(TimeoutError):
+                api._req("POST", order_path, entry)
+            rejected = api._req("POST", batch_path, {"batchOrders":json.dumps([
+                {**entry,"clientOrderID":"Gtest-a"},
+                {**entry,"clientOrderID":"Gtest-b"},
+            ])})
+            self.assertTrue(rejected["localPolicyRejection"])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(journal.entry_orders, 1)
+            self.assertEqual(api._req("POST", order_path, {**entry,"clientOrderID":"Gtest-c"})["code"], 0)
+            self.assertEqual(journal.entry_orders, 2)
+            self.assertTrue(api._req("POST", order_path, {**entry,"clientOrderID":"Gtest-d"})["localPolicyRejection"])
+            journal.remember_order({"symbol":"BTC-USDT","orderId":"123","clientOrderID":"Gtest-entry","executedQty":"1"})
+            close = {**entry,"side":"SELL","clientOrderID":"Gtest-close"}
+            self.assertEqual(api._req("POST", order_path, close)["code"], 0)
+            self.assertEqual(journal.entry_orders, 2)
+            self.assertEqual(len(calls), 3)
+
+    def test_lower_position_cap_keeps_all_explicit_symbols(self):
+        raw = {"stageLastN": {}}
+        overlay = session.frozen_overlay(raw, SYMBOLS, symbol_count=len(SYMBOLS), max_active=6)
+        self.assertEqual(overlay["maxOpen"], 6)
+        self.assertEqual(overlay["symbols"], SYMBOLS)
+        self.assertEqual(overlay["stageLastN"], {})
+        with self.assertRaises(ValueError):
+            session.frozen_overlay(raw, SYMBOLS, symbol_count=len(SYMBOLS), max_active=101)
+
+    def test_demo_qa_checks_the_configured_bound(self):
+        checks = []
+        native = SimpleNamespace(MAX_OPEN=6)
+        pulse = SimpleNamespace(open={}, record_test=lambda *args: checks.append(args))
+        session.probe_demo_position_bound(pulse, native, 6)
+        pulse.record_test("qa-unlimited", False, "")
+        native.MAX_OPEN = 7
+        pulse.record_test("qa-unlimited", False, "")
+        pulse.record_test("qa-controls", False, "missing")
+        self.assertEqual([(name, ok) for name, ok, _ in checks],
+                         [("qa-demo-position-bound", True), ("qa-demo-position-bound", False), ("qa-controls", False)])
+
     def test_watchdog_does_not_count_a_stale_cycle_as_completed_observation(self):
         self.assertEqual(session.end_reason('active',200,50,150,100,60),'main cycle heartbeat deadline')
         self.assertEqual(session.end_reason('active',200,50,150,199,60),'observation complete')
@@ -253,7 +309,7 @@ class NativeSessionTests(unittest.TestCase):
     def test_total_context_is_bounded_before_any_connection(self):
         raw = json.loads((session.ROOT / 'server/pulse/overlay-bingx-x02.json').read_text())
         self.assertLessEqual(session.context_requirement(session.frozen_overlay(raw, SYMBOLS)), 4320)
-        with self.assertRaisesRegex(ValueError, "4710 minutes"):
+        with self.assertRaisesRegex(ValueError, "5790 minutes"):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 18))
         with self.assertRaises(ValueError):
             session.context_requirement(session.frozen_overlay(raw, SYMBOLS, 48))

@@ -22,6 +22,7 @@ import importlib
 import json
 import multiprocessing
 import os
+from queue import Empty
 import sys
 import time
 import traceback
@@ -154,11 +155,16 @@ def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):
     while finished < len(groups):
         try:
             item = q.get(timeout=queue_timeout_s)
-        except Exception:  # queue.Empty: no news for 5 s; a worker that died without its sentinel must not hang us
-            if not any(p.is_alive() for p in procs) and finished < len(groups):
-                break
+        except Empty:
             progress()
-            continue
+            if any(p.is_alive() for p in procs):
+                continue
+            # A worker can write its final result and exit between the queue
+            # timeout and the liveness check. Read it before marking it lost.
+            try:
+                item = q.get_nowait()
+            except Empty:
+                break
         if item is None:
             finished += 1
             progress()

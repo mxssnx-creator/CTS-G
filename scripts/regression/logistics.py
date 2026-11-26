@@ -16,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "595b92eb9339ee9f110e32cda37fc8e2d84e92ce"
+PIN_WANT = "ff2bf0cb05dccbd3df544cc4ea33920bf610513c"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -26,12 +26,12 @@ def overlays_share_grid_contract():
     detail = []
     for path in (X01, X02):
         ov = json.load(open(path))
-        want = {"setMinStep": 2 if path == X01 else 5, "setStepMax": 32, "trailMinStep": 3, "histLookbackBars": 2880 if path == X01 else 1920,   # x01 2880 (owner 2026-11-26; qO 1.145 / 223 against 1920 0.871 / 217)
+        want = {"setMinStep": 2, "tpStepMin": 2, "setStepMax": 32, "trailMinStep": 3,
+                "trailStepMin": 12 if path == X01 else 3,
+                "histLookbackBars": 2880 if path == X01 else 1920,   # x01 profile C; x02 uses 32 h history
                
                 "setMinPf": 1.35, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
-        if path == X02:
-            want = {**want, "trailMinStep": 7}   # x02 demo defaults (Stable-02): trailing grid starts at 7
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
         detail.append(f"{os.path.basename(path)}:{'ok' if not bad else bad}")
@@ -111,10 +111,9 @@ DESK_DEFAULT_EXCEPTIONS = {
     "minPfStepAutoTol": "owner 2026-11-25, x01 only: Auto PF tolerance 2 % (measured 1.751 / 194 against 1.631 / 188 at 5 %); the desk default keeps 5",
     "minPfStepAutoLow": "owner 2026-11-25, x01 only: lowest learned floor 1.15 (fewer positions, higher Auto PF); the desk default keeps 1.02",
     "stratGeneral": "owner 2026-11-24, x01 only: the general pack is off (pooled PF 0.72 on 74 orders); the desk default keeps it on",
-    "setMinStep": "owner 2026-11-24, x01 only: grid minimum step 3; the desk default stays 5",
-    "tpStepMin": "owner 2026-11-24, x01 only: TP Sets from step 3; the desk default stays 5",
+    "setMinStep": "owner 2026-11-26, x01 only: grid minimum step 2; measured arm C improves both 12 h halves; the desk default stays 5",
+    "tpStepMin": "owner 2026-11-26, x01 only: TP Sets from step 2; the desk default stays 5",
     "timeStopS": "owner 2026-11-24, x01 only: max hold 3 h (10800 s); the desk default stays 6 h",
-    "volumeFactor": "owner 2026-11-24, x01 only: volume factor 1.6; the desk default stays the minimum 0.05",
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
     "symbolCap": "x01 uses 30 symbols by owner request; the shared desk default remains 50",
     # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
@@ -585,8 +584,9 @@ def ensure_x01_script_is_idempotent_and_starts_only_x01():
                 with open(os.path.join(stub, "pgrep"), "w") as f:
                     f.write("#!/bin/sh\n" + "".join(f"echo {p}\n" for p in pids))
                 os.chmod(os.path.join(stub, "pgrep"), 0o755)
-                out = subprocess.run(["bash", script], env={**os.environ, "PATH": stub + os.pathsep + os.environ["PATH"], "ENSURE_X01_DRY": "1"},
-                                     capture_output=True, text=True, timeout=30)
+                out = subprocess.run(["bash", script], env={**os.environ, "PATH": stub + os.pathsep + os.environ["PATH"],
+                                     "PULSE_DIR": os.path.join(d, "pulse-state"), "X01_OWNER_OFF": os.path.join(d, "owner-stop"),
+                                     "ENSURE_X01_DRY": "1"}, capture_output=True, text=True, timeout=30)
                 return out.stdout.strip()
             _t.sleep(0.2)
             present, absent, foreign = run([mine.pid]), run([]), run([other.pid])

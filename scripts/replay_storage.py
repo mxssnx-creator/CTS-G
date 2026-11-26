@@ -17,3 +17,16 @@ def compact_shadow(shadow):
             {p: v if isinstance(v,array) and v.typecode=='d' else array('d',v)
              for p,v in confidences.items()}, rows)
     return shadow
+
+
+def release_shadow_trades(shadow):
+    """Drop per-Set shadow trade columns after gate evaluation.
+
+    The merged Tapes own the histories used by execution gates. The live
+    execution walk only needs each symbol's pause plan, directions, and
+    confidences, so retaining a second copy of every Set's trades wastes RAM.
+    """
+    for symbol, (warm, directions, confidences, rows) in shadow.items():
+        pauses = rows.get(-1, {})
+        shadow[symbol] = (warm, directions, confidences, {-1: pauses})
+    return shadow

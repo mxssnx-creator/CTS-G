@@ -58,7 +58,10 @@ class Settlement(unittest.TestCase):
         def run():
             p,sym=_enter(_StubExchange(executed='1'))
             pos=p.open[sym];pos.entry=pos.base_entry=.003617
-            original_get=p.api.get;p.our_orders=lambda symbol:[]
+            original_get=p.api.get
+            order_reads=[]
+            p.our_orders=lambda symbol:order_reads.append(symbol) or []
+            pos.set_id='general:L:1m:sl0.75:st9'
             def get(path,params=None):
                 if path.endswith('/user/positions'):
                     return {'code':0,'data':[{'symbol':sym,'positionSide':pos.side,
@@ -68,6 +71,7 @@ class Settlement(unittest.TestCase):
             self.assertEqual(pos.entry,.003617)
             self.assertEqual(pos.base_entry,.003617)
             self.assertEqual(pos.notional,pos.qty*.003617)
+            self.assertEqual(order_reads, [])
         _isolated(run)
 
     def test_pending_block_partial_receipts_are_incremental_and_never_use_snapshot_price(self):

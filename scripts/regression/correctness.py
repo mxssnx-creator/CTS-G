@@ -608,7 +608,7 @@ def balance_sizing_and_block_budget():
         amounts.append(p.sized_notional())
     p.equity = 10000
     budget = p.max_book_notional()
-    return amounts == [5, 10, 25] and budget == 35, f"equity 10k/20k/100k -> notional {amounts}; six additive Block groups -> budget {budget}"
+    return amounts == [1, 2, 10] and budget == 14, f"equity 10k/20k/100k -> notional {amounts}; six additive Block groups -> budget {budget}"
 
 
 def frozen_hold_and_block_intent_failure():

@@ -47,10 +47,15 @@ def held_positions_consume_axis_slots_until_the_end():
     shadow = {s: (0, {st.pack: [1] * 60}, {st.pack: [.9] * 60}, {}) for s in names}
     saved = sg.gate_metrics, sg.gate_until, sg.axis_judge, se.SetLane.scan
     entries = []
+    observed_signal_tapes = []
     native_scan = se.SetLane.scan
 
     def scan(lane, *args, **kwargs):
         entries.append(lane)
+        start, _, _, directions, confidence, _, _, candidates, _ = args
+        original = shadow[lane.symbol]
+        observed_signal_tapes.append(directions is original[1][st.pack] and confidence is original[2][st.pack]
+                                     and tuple(candidates) == (start,))
         return native_scan(lane, *args, **kwargs)
 
     try:
@@ -68,7 +73,8 @@ def held_positions_consume_axis_slots_until_the_end():
             counts.append((len(entries), sum(bool(r.get("open_at_end")) for r in rows)))
     finally:
         sg.gate_metrics, sg.gate_until, sg.axis_judge, se.SetLane.scan = saved
-    return counts == [(1, 0), (1, 1)], f"entries/open report rows={counts}; cap=1 across three symbols"
+    ok = counts == [(1, 0), (1, 1)] and observed_signal_tapes == [True, True]
+    return ok, f"entries/open rows={counts}, reused original single-candidate tapes={observed_signal_tapes}"
 
 
 CHECKS = [("replay-runtime." + fn.__name__.replace("_", "-"), fn) for fn in (

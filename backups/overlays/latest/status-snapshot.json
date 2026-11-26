@@ -1,9 +1,9 @@
 {
-  "ts": "2026-11-17T20:08:32.198448+00:00",
+  "ts": "2026-11-25T20:06:11.256079+00:00",
   "x01": {
     "blockEnabled": true,
     "blockMaxStack": 6,
-    "symbolCap": 40,
+    "symbolCap": 120,
     "histTestEnabled": false,
     "is_testnet": false,
     "is_live_trade": true

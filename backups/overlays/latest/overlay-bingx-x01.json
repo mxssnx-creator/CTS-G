@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 0.05,
+  "volumeFactor": 0.15,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 40,
+  "symbolCap": 120,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -19,7 +19,7 @@
   "timeStopS": 21600,
   "scratchS": 600,
   "scratchMinPct": 0.16,
-  "scanS": 0.2,
+  "scanS": 0.25,
   "cooldownS": 3,
   "staggerS": 0.12,
   "controlOrders": true,
@@ -39,12 +39,12 @@
     "*"
   ],
   "axisPrevEnabled": true,
-  "axisPrevMaxWindow": 12,
-  "axisLastEnabled": true,
+  "axisPrevMaxWindow": 4,
+  "axisLastEnabled": false,
   "axisLastMaxWindow": 4,
-  "axisContEnabled": true,
+  "axisContEnabled": false,
   "axisContMaxWindow": 8,
-  "axisPauseEnabled": true,
+  "axisPauseEnabled": false,
   "axisPauseMaxWindow": 8,
   "minPf": 1.25,
   "noise": 0.05,
@@ -204,12 +204,13 @@
   "trailStepMax": 22,
   "trailSlRatios": [],
   "volumeByPack": {},
-  "volumeByKind": {},
-  "volumeByRange": {},
-  "exitSetsByPack": {
-    "indications": false
+  "volumeByKind": {
+    "trail": 2.0,
+    "exit": 0.5
   },
-  "minPfStepAuto": false,
+  "volumeByRange": {},
+  "exitSetsByPack": {},
+  "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
@@ -244,6 +245,9 @@
   "minPfLinked": true,
   "histLookbackAuto": false,
   "histLookbackMax": 4320,
+  "stageLastN": {
+    "enabled": true
+  },
   "stagesEnabled": true,
   "setGateShortN": 25,
   "setGateShortMaxRatio": 0.5,
@@ -282,9 +286,7 @@
   "minPfMediumN": 35,
   "slippageAllowancePct": 0.01,
   "blockRiskPctOfBalance": 0,
-  "volumeByPackKind": {
-    "general:exit": 1.5
-  },
+  "volumeByPackKind": {},
   "slMaxByRange": {
     "long": 1.4,
     "wide": 1.4
@@ -327,6 +329,8 @@
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
   "blockGuard": true,
+  "blockAddLastN": 0,
+  "blockAddAutoMin": 15,
   "blockTargetShare": 0.5,
   "blockKinds": [
     "base",
@@ -337,46 +341,51 @@
     "relations": [
       "step"
     ],
-    "maxMult": 3,
+    "maxMult": 4.0,
+    "auto": true,
+    "autoN": 30,
+    "autoMin": 15,
+    "autoPf": 1.0,
+    "autoRatio": 1.0,
     "counts": {
       "1": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
+        "on": true,
+        "ratio": 1.0,
+        "step": true,
+        "maxLevel": 3,
         "pause": 0
       },
       "2": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
+        "on": true,
+        "ratio": 1.0,
+        "step": true,
+        "maxLevel": 3,
         "pause": 0
       },
       "3": {
         "on": false,
-        "ratio": 0,
+        "ratio": 0.0,
         "step": false,
         "maxLevel": 1,
         "pause": 0
       },
       "4": {
         "on": false,
-        "ratio": 0,
+        "ratio": 0.0,
         "step": false,
         "maxLevel": 1,
         "pause": 0
       },
       "5": {
-        "on": true,
-        "ratio": 1,
-        "step": true,
-        "maxLevel": 2,
+        "on": false,
+        "ratio": 0.0,
+        "step": false,
+        "maxLevel": 1,
         "pause": 0
       },
       "6": {
         "on": false,
-        "ratio": 0,
+        "ratio": 0.0,
         "step": false,
         "maxLevel": 1,
         "pause": 0
@@ -389,12 +398,12 @@
   "stratMulti": true,
   "stratBreakout": true,
   "manualCloseRestMin": 240,
-  "minPfStepAutoHigh": 1.3,
+  "minPfStepAutoHigh": 1.27,
   "trailMinLockPct": 0,
   "makerFeeRate": 0.0002,
   "takerFeeRate": 0.0005,
   "slippageFeeRatio": 0.1,
-  "minSlDistancePct": 0.1,
+  "minSlDistancePct": 0.3,
   "minPfByRange": {
     "micro": 1.01
   },
@@ -421,10 +430,63 @@
     ]
   },
   "minPfStepAutoScope": "set",
-  "minPfSetAutoMin": 10,
+  "minPfSetAutoMin": 20,
+  "autoPfDefaultByRange": {
+    "minimal": 1.24,
+    "short": 1.42
+  },
   "minPfStepAutoLow": 1.02,
   "slAutoRange": true,
   "slAutoMin": 20,
   "slAutoTol": 5,
-  "trailStepMin": 3
+  "trailStepMin": 12,
+  "scanWorkers": 3,
+  "trailTimeExit": true,
+  "configGate": true,
+  "configGateN": 5,
+  "configGatePf": 1.0,
+  "configGateHours": 24,
+  "configGateMin": 1,
+  "stratSignals": true,
+  "signalConfigs": [
+    {
+      "label": "signals 1/5m",
+      "timeframes": [
+        1,
+        5
+      ],
+      "stepMin": 5,
+      "stepMax": 12,
+      "slRatios": [
+        0.5,
+        0.75,
+        1.0
+      ],
+      "types": [
+        "base",
+        "trail"
+      ]
+    },
+    {
+      "label": "signals 15/30m trailing",
+      "timeframes": [
+        15,
+        30
+      ],
+      "stepMin": 6,
+      "stepMax": 15,
+      "slRatios": [
+        0.5,
+        0.75,
+        1.0
+      ],
+      "types": [
+        "trail"
+      ]
+    }
+  ],
+  "exitSets": false,
+  "minPfAutoOrdersFactor": 0,
+  "tpStepMin": 5,
+  "gateRecovery": true
 }
