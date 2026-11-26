@@ -2180,10 +2180,10 @@ function SettingsPage() {
                 <Slider
                   label="Volume factor"
                   value={overlay.volumeFactor ?? 0.05}
-                  min={0.025}
+                  min={0.0125}
                   max={5}
-                  step={0.025}
-                  hint="Scales pulse notional (0.05 = the default, 0.025 the lowest; the venue minimum lot still binds small entries). Independent per Live / VST."
+                  step={0.0125}
+                  hint="Scales pulse notional (0.05 = the default, 0.0125 the lowest; the venue minimum lot still binds small entries). Independent per Live / VST."
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num
