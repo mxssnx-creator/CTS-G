@@ -130,8 +130,10 @@ def auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation():
     b2 = _book(minPfStepAutoMin=100, minPfStepRatio=1.0)
     sets2 = [s for s in b2.by_idx if s.kind == "base" and s.step == 3][:3]
     _learn(b2, {s2.id: tapes[s1.id] for s1, s2 in zip(bucket_sets, sets2)}, boundary)
+    effective = min(b.pf_step_auto_high, manual + (want_f - manual) * 4 / 3)
     ok = ((got if got is not None else manual) == want_f and row["source"] == "step" and row["admitted"] == want_n and row["orders"] == want_pairs
-          and b.step_floor(bucket_sets[0]) == want_f and b.floor_for(50, bucket_sets[0].pack, bucket_sets[0]) == want_f
+          and abs(b.step_floor(bucket_sets[0]) - effective) < 1e-12
+          and abs(b.floor_for(50, bucket_sets[0].pack, bucket_sets[0]) - effective) < 1e-12
           and b2.step_floor_auto.get((3, 0)) == got)
     return ok, f"learned {got} (plain reading {want_f}, manual {manual}; with ratio 1.0 still {b2.step_floor_auto.get((3, 0))}); admitted {row['admitted']}/{row['orders']} orders, delivered PF {row['pfAdmitted']} vs all {row['pfAll']}"
 
@@ -436,12 +438,13 @@ def auto_wide_steps_use_the_last_table_bucket_but_keep_policy_identity():
     from dataclasses import replace
     b = _book(minPfStepAuto=True)
     base = next(st for st in b.by_idx if st.kind == "base")
-    b.step_floor_auto = {(35, base.side): 1.18}
+    b.step_floor_auto = {(35, base.side): 1.76}
+    effective = 1.7 + (1.76 - 1.7) * 4 / 3
     for step in (35, 36, 42, 50):
         st = replace(base, step=step, tp_pct=step * .001)
         assert b.step_bucket(st) == step and b.auto_step_bucket(st) == 35
-        assert {b.floor_for(n, st.pack, st) for n in (1, 5, 50, 200)} == {1.18}
-        assert b.stage_params(st.pack, st).floor == 1.18
+        assert all(abs(b.floor_for(n, st.pack, st) - effective) < 1e-12 for n in (1, 5, 50, 200))
+        assert abs(b.stage_params(st.pack, st).floor - effective) < 1e-12
     b.pf_range_floor = {"wide": 1.31}
     st = replace(base, step=50, tp_pct=.05)
     assert b.step_floor(st) == 1.31
