@@ -1424,12 +1424,14 @@ def history_growth_retries_failed_or_missing_pages():
         p._hist_tick()
         first = (list(replayed), p.sets._lookback_pending,
                  dict(p.sets._hist_replay_key), len(p.sets.bars["B-USDT"]))
+        retained_a = p.sets._hist_rows.get("A-USDT")
         p.api.failure = None
         p.sets.last_run = 0.0
         replayed.clear()
         p._hist_tick()
         second = (list(replayed), p.sets._lookback_pending,
-                  dict(p.sets._hist_replay_key), len(p.sets.bars["B-USDT"]))
+                  dict(p.sets._hist_replay_key), len(p.sets.bars["B-USDT"]),
+                  retained_a is not None and p.sets._hist_rows.get("A-USDT") is retained_a)
         return first, second, p.sets.history_bars()
 
     saved, sleep = list(pt.SYMBOLS), pt.time.sleep
@@ -1457,8 +1459,8 @@ def history_growth_retries_failed_or_missing_pages():
     finally:
         pt.SYMBOLS[:], pt.time.sleep = saved, sleep
     ok = (all(first[0] == ["A-USDT"] and first[1] and "B-USDT" not in first[2] and first[3] < target
-              and set(second[0]) == {"A-USDT", "B-USDT"} and not second[1]
-              and set(second[2]) == {"A-USDT", "B-USDT"} and second[3] == target
+              and second[0] == ["B-USDT"] and not second[1]
+              and set(second[2]) == {"A-USDT", "B-USDT"} and second[3] == target and second[4]
               for first, second, target in cases)
           and available == {"A-USDT"} and short_n == 499
           and gap_first == (set(), 119) and gap_second == ({"A-USDT"}, gap_target))

@@ -3532,7 +3532,8 @@ class SetBook:
         (no trade in the minute) or that jumps by more than histMaxJumpPct in one minute (a broken print, as the demo venue
         shows on illiquid names) would validate Sets on prices nobody could trade."""
         rows = self.bars.get(symbol) or []
-        frame = self._bar_frames.get(symbol)
+        frames = getattr(self, "_bar_frames", None)
+        frame = frames.get(symbol) if frames is not None else None
         if frame and frame[0] is rows:
             key = (frame[1], self.min_bars, self.max_flat_share, self.max_jump)
             cached = self._bar_quality_cache.get(symbol)
@@ -3624,7 +3625,8 @@ class SetBook:
             first_new = float(last_t) - (len(cleaned) - 1) * BAR_S if last_t is not None else None
             if watching and old_last is not None and first_new is not None and first_new > old_last + BAR_S + 1e-6:
                 self._history_snapshot_active = False
-            frame = self._bar_frames.get(symbol)
+            frames = getattr(self, "_bar_frames", None)
+            frame = frames.get(symbol) if frames is not None else None
             joined = _join_bars(old, cleaned, keep_on_gap=tail, share_rows=bool(frame and frame[0] is old))
             capacity = self.history_bars()
             if len(joined) > capacity:
@@ -3633,7 +3635,8 @@ class SetBook:
                 # Ingestion replaces a completed frame; replay readers can
                 # keep the old object until they finish reading it.
                 self.bars[symbol] = joined
-                self._bar_frames[symbol] = (joined, object())
+                if frames is not None:
+                    frames[symbol] = (joined, object())
             bar_t = self.__dict__.setdefault("bar_t", {})
             if last_t is not None and joined and joined[-1] == cleaned[-1]:
                 bar_t[symbol] = float(last_t)
