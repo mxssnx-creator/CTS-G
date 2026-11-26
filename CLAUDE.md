@@ -2,6 +2,12 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-26, owner: "Start live x01 now with 60 symbols ... decrease vol factor by half ... make Axis, Block fully work ... run continuously by monitoring".** x01: `symbolCap` 60,
+  `volumeFactor` 0.025 (new explicit floor `VOLUME_FACTOR_FLOOR` 0.025; absent / broken values still size at 0.05), `histLookbackBars` 2880 (sim `qO` 1.145 / 223 / +16.1 % against 1920
+  0.871 / 217 / -16.0 %), **Axis prev 4 only** (the 2026-11-15 measurement: better than all four on both windows; x02 already ran it). Block rounds unchanged (Auto per count, no
+  measured gain beyond it). **Why no orders opened:** this cloud container is reclaimed whenever the session is idle, so the engine lived about 5 minutes per hourly wake-up (it needs
+  about 4 minutes to rebuild before it opens anything). A background keeper loop (`scratchpad/keeper.sh`, about 2 h per run, relaunched on completion) keeps the container and x01 alive; a
+  real host (deploy scripts in `deploy/`) is the lasting fix. Revert = the previous overlay values.
 - **2026-11-25 (latest), owner: "Relate fuer jede Relation, 12 Steigerungen", "12 Stufen pro Lane bis Gewinn, Ratio 2+", "weniger Positionen, hoeheres Auto PF", "100 Symbole, Mindest-Volumenfaktor".**
   x01: `volumeFactor` **0.05**, `symbolCap` **100**; `minPfStepAutoTol` 5 -> **2** (measured better: C 1.751 / 194 against 1.631 / 188), `minPfStepAutoLow` 1.02 -> **1.15** (unmeasured, owner);
   Relate: **one policy per source (10), each 12 steps x 1.2 per winning close, ceiling 8 total**, minTrades 12, PF 1.2, maxLossRun 3, stop <= 1.25 TP (x01 and x02; check

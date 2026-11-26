@@ -103,6 +103,9 @@ def _ts_default(raw):
 
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
+    "axisLastEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
+    "axisContEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
+    "axisPauseEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
     "histLookbackBars": "owner 2026-11-26, x01 only: 2880 bars of pre-history (sim qO executed PF 1.145 / 223 orders against 0.871 / 217 at 1920); the desk default keeps 1920",
     "volumeFactor": "owner 2026-11-26, x01 only: 0.025 (half the minimum); the desk default keeps 0.05",
     "minPfStepAutoTol": "owner 2026-11-25, x01 only: Auto PF tolerance 2 % (measured 1.751 / 194 against 1.631 / 188 at 5 %); the desk default keeps 5",
