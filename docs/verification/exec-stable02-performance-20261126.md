@@ -7,10 +7,11 @@
 - Cache Set gate/rank results until their evidence can change (a new close, lookback expiry, or drawdown-time boundary). Refresh only stale Sets and use a bounded process pool for independent rank refreshes.
 - Release duplicate shadow-trade arrays after gate evaluation while keeping signals and pause plans needed by execution. Report current and peak memory during replay progress.
 - Preserve the legacy scheduled refresh cadence. Do not reuse evidence-bound caching for its ordinary scheduled refreshes.
+- Make report-only gate sampling configurable. Long replays can take sparse opening/final stage snapshots while execution and settled P&L stay hourly; hourly gate fields identify the source sample and its age.
 
 ## Correctness and runtime checks
 
-The complete `npm test` run passed: 775 regression checks, 195 Node checks with 4 skipped, 137 TypeScript checks, and 114 engine checks; typecheck passed. Focused StageGrid checks passed 30/30, and compact-replay memory checks passed 3/3. The 30-symbol replay's 60/60 gate/rank self-checks matched the native engine. Serial and parallel refresh produced identical one-hour trades.
+The complete `npm test` run passed before the report-cadence change: 775 regression checks, 195 Node checks with 4 skipped, 137 TypeScript checks, and 114 engine checks; typecheck passed. The new report-cadence tests passed 3/3, StageGrid checks passed 30/30, and compact-replay memory checks passed 3/3. The 30-symbol replay's 60/60 gate/rank self-checks matched the native engine. Serial and parallel refresh produced identical one-hour trades.
 
 | Replay | Symbols / forward span | Orders | Exec PF | Net | Runtime / peak RSS |
 |---|---:|---:|---:|---:|---:|
@@ -28,6 +29,6 @@ The tested configuration reported Base Short 4–16 and Last 1–5, with positiv
 
 These are historical replays using the x02 overlay; they are not a live exchange session. Native x02 session fixtures passed 49/49, but no authenticated x02 exchange order test was available in this run. Live order placement, fills, protection orders, and account-side parity therefore remain unverified here.
 
-The long 20-symbol replay uses 10 days of one-minute bars with a seven-day forward window. It is being rebuilt from source with compressed per-symbol checkpoints; no result is included until that run completes and its gate self-check passes.
+The long 20-symbol replay uses 10 days of one-minute bars with a seven-day forward window, 48-hour lookback, and 1.35 minimum PF. Its 60/60 engine self-check passed, and the cached execution walk was running when the workspace disconnected at roughly 36 simulated hours. No seven-day PF result is available. The long run reported stable RSS near 2.47 GiB after a 2.77 GiB peak; hourly rank refreshes recomputed roughly 10k–12k Sets and ranged from about 25 to 390 seconds in the observed interval, so long-run refresh latency remains a performance issue.
 
 Parameter selection must account for trying many variants. The [Probability of Backtest Overfitting](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253) paper discusses selection bias from repeated strategy trials, and the [Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551) adjusts for multiple testing and non-normal returns. This is why short-window PF gains are reported separately from longer held-out execution results.

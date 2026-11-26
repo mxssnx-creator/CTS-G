@@ -69,6 +69,23 @@ def acc_pf(vals):
     return pf(sum(v for v in vals if v > 0), -sum(v for v in vals if v < 0))
 
 
+def report_sample_times(run_hours, every_s):
+    """Return report-only validation instants, retaining a final window snapshot.
+
+    Execution still walks every hour independently. Coarser report sampling is
+    useful for long replays because the stage grid does not need to be rebuilt
+    for every unchanged hour just to report multi-day diagnostics.
+    """
+    if not run_hours:
+        return []
+    interval = max(60, int(every_s))
+    start, final = int(run_hours[0]), int(run_hours[-1])
+    slots = list(range(start, final + 1, interval))
+    if not slots or slots[-1] != final:
+        slots.append(final)
+    return slots
+
+
 def apply_portfolio_weights(book, overlay, rows, axis_coord=None):
     """Add the live trader's pack/type/range factors to simulated entry sizes.
 
@@ -237,7 +254,7 @@ def main() -> int:
                     "fingerprint, so arms that differ only in them share one replay; the tapes do not read them")
     ap.add_argument("--next", default="", help="extra next-N order windows after a validation, e.g. 15,25 (next_pf in the JSON)")
     a = ap.parse_args()
-    args_refresh = max(60, min(3600, int(a.eval_every)))
+    args_refresh = max(60, int(a.eval_every))
     if a.patch:
         try:
             patch = json.loads(a.patch if a.patch.lstrip().startswith('{') else Path(a.patch).read_text())
@@ -329,7 +346,7 @@ def main() -> int:
             g["min_n"] = 1e9
     extra_n = tuple(int(x) for x in a.next.split(",") if x.strip()) if a.next else ()
     nxt_ns = (MIN_VALIDATION_N, book.gate_window) + tuple(m for m in extra_n if m not in (MIN_VALIDATION_N, book.gate_window))
-    slots = [h + k * args_refresh for h in run_hours for k in range(max(1, 3600 // args_refresh))]
+    slots = report_sample_times(run_hours, args_refresh)
     evals = []
     stage_evals = []
     auto = sg.AutoFloors(book, tapes)            # Auto floors per TP step, re-learned every hour from the orders closed before it (as the engine)
@@ -580,15 +597,21 @@ def main() -> int:
                 "next": {str(m): {"pf": pf(g[f"n{m}_gp"], g[f"n{m}_gl"]), "orders": int(g[f"n{m}_n"])} for m in nxt_ns}}
 
     def hourly():
-        """Per simulated hour: the validation samples of that hour (valid share, effective PF, next-N PF) and the orders the
-        execution opened in it (count, net, PF, wins)."""
+        """Per simulated hour: latest available gate sample and hourly executed positions."""
         out_h = []
+        sample_i = -1
         for h in run_hours:
             ev = [e for e in evals if h <= e["t"] < h + 3600]
+            while sample_i + 1 < len(evals) and evals[sample_i + 1]["t"] <= h:
+                sample_i += 1
+            sample = ev[-1] if ev else (evals[sample_i] if sample_i >= 0 else None)
             tr = [r["net"] for r in trades if h <= r["t_in"] < h + 3600]
-            out_h.append({"t": h, "valid_pct": round(sum(e["valid_pct"] for e in ev) / len(ev), 2) if ev else 0.0,
-                          "executable_pct": round(sum(e["executable_pct"] for e in ev) / len(ev), 2) if ev else 0.0,
-                          "eff_pf": ev[0]["eff_pf"] if ev else None, "next": ev[0]["next"] if ev else {},
+            out_h.append({"t": h,
+                          "valid_pct": round(sum(e["valid_pct"] for e in ev) / len(ev), 2) if ev else sample["valid_pct"] if sample else None,
+                          "executable_pct": round(sum(e["executable_pct"] for e in ev) / len(ev), 2) if ev else sample["executable_pct"] if sample else None,
+                          "gate_sample_t": sample["t"] if sample else None,
+                          "gate_sample_age_hours": round((h - sample["t"]) / 3600, 3) if sample else None,
+                          "eff_pf": sample["eff_pf"] if sample else None, "next": sample["next"] if sample else {},
                           "orders": len(tr), "net_pct": round(100 * sum(tr), 3), "exec_pf": acc_pf(tr),
                           "wins": sum(1 for x in tr if x > 0)})
         return out_h
@@ -607,11 +630,13 @@ def main() -> int:
                              "partial_tail_seconds": end+60-(hours[-1]+3600)},
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
                                               "real_n": book.realst_n, "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
+           "stage_report_sample_every_seconds": args_refresh,
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
                       "scratch_bars": book.scratch_bars, "scratch_min_pct": round(book.scratch_min * 100, 3),
                       "cost_pct": book.cost_pct, "extra_indicators": list(book.ind_settings.get("extraIndicators") or [])},
            "auto_pf": {"enabled": book.grid_auto_enabled(), "fallback_by_range": book.pf_auto_defaults,
-                       "sets_using_learned_last_hour": len(book.set_floor_auto), "sets_using_learned_by_hour": [e["learned_set_floors"] for e in evals]},
+                       "sets_using_learned_at_last_stage_sample": len(book.set_floor_auto),
+                       "sets_using_learned_by_stage_sample": [e["learned_set_floors"] for e in evals]},
            "all": summary(("all", "all")),
            "types": [summary(k) for k in sorted(groups) if k[0] == "type"],
            "indications": [summary(k) for k in sorted(groups) if k[0] == "indication"],
@@ -628,7 +653,7 @@ def main() -> int:
            "sample_scope": ("Full disjoint blocks of earlier closes per lane and parent. Stages report only lanes reached through a qualifying parent." if book.stage_grid else
                             "Full configured N on each Set's own earlier closes; independent of PF. Main population passes current Base PF; Real population passes Main PF. Partial-window admission can pass without a full N."),
            "stage_evaluations": stage_evals,
-           "hourly_scope": "entry cohorts: eventual returns grouped by entry hour; not realized hourly results",
+           "hourly_scope": "hourly executed positions and their realized returns; gate metrics use the latest stage sample (gate_sample_t and age identify carry-forward)",
            "hourly": hourly(),
            "settled_hourly_scope": "exit bar end: h < exit <= h+1h; held marks excluded; opened includes held entries",
            "settled_hourly": settlement_hours(trades, open_at_end, run_hours),
