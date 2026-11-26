@@ -2679,6 +2679,15 @@ function PfWindowControls({
         onChange={(v) => patch("minPfSetAutoMin", v)}
       />
       <Slider
+        label="Auto PF ratio"
+        value={overlay.autoPfRatio}
+        min={1}
+        max={10}
+        step={1}
+        hint="Default 4. Scales the learned increase above the Set's own fallback up to the configured maximum."
+        onChange={(v) => patch("autoPfRatio", v)}
+      />
+      <Slider
         label="Auto: relation factor PF vs orders"
         value={overlay.minPfAutoOrdersFactor ?? 0}
         min={0}

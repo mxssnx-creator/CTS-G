@@ -203,6 +203,8 @@ class WindowAuto(NamedTuple):
     candidates: tuple[float, ...]
     tolerance: float
     orders_factor: float
+    ratio: int = 3
+    high: float = 2.0
 
 
 @dataclass(slots=True)
@@ -358,7 +360,7 @@ class _Tape:
                     pairs.append((gain / loss if loss > 0 else math.inf, self.values[i]))
         fit = auto_set_pf.fit(pairs, policy.minimum, fallback, policy.candidates, policy.tolerance,
                               policy.orders_factor)
-        floor = fallback if fit is None else fit
+        floor = fallback if fit is None else auto_set_pf.adjusted_floor(fit, fallback, policy.ratio, policy.high)
         self.learned_floors[key] = floor
         return floor
 

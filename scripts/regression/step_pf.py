@@ -334,7 +334,12 @@ def the_simulator_learns_the_engines_own_floor_of_every_set():
         fallback = sum(1 for st in book.by_idx if st.id not in eng)
         from position_cost import tp_range_of as _rng
         ranged = {st.id for st in book.by_idx if (book.pf_range_floor or {}).get(_rng(book.step_bucket(st))) is not None}   # an explicit range floor (minPfByRange) wins
-        uses_own = all(abs(eng_floor[k] - min(v, book.pf_step_auto_high)) < 1e-12 for k, v in eng.items() if k not in ranged) and any(k not in ranged for k in eng)
+        manual_floors = {st.id: book.grid_auto_fallback(st)[0] for st in book.by_idx if st.id in eng and st.id not in ranged}
+        uses_own = bool(manual_floors) and all(
+            abs(eng_floor[k] - max(floor, min(book.pf_step_auto_high,
+                floor + max(0, eng[k] - floor) * book.pf_auto_ratio / 3))) < 1e-12
+            for k, floor in manual_floors.items()
+        )
     finally:
         if saved is None:
             _os.environ.pop("STAGE_OVERLAY_PATCH", None)
@@ -663,14 +668,14 @@ def every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default
     ask("policy, no own", pol, 1.33, "lanePolicy")
     ask("generic, no own", gen, min(manual, 1.3), "manual-step")
     b.pf_set_auto = False
-    ask("explicit step scope", gen, 1.12, "auto-step")
+    ask("explicit step scope", gen, manual + (1.12 - manual) * 4 / 3, "auto-step")
     b.pf_set_auto = True
     for x in (micro, sig, pol, gen):
         b.set_floor_auto[x.id] = 1.18
-    ask("micro, own", micro, 1.18, "auto-set")
-    ask("signals, own", sig, 1.18, "auto-set")
-    ask("policy, own", pol, 1.18, "auto-set")
-    ask("generic, own", gen, 1.18, "auto-set")
+    ask("micro, own", micro, 1.01 + (1.18 - 1.01) * 4 / 3, "auto-set")
+    ask("signals, own", sig, 2.4, "auto-set")
+    ask("policy, own", pol, 1.33, "auto-set")
+    ask("generic, own", gen, b.pf_auto_defaults.get("minimal", 1.24), "auto-set")
     b.set_floor_auto[gen.id] = 1.9
     ask("own capped", gen, 1.3, "auto-set")
     b.step_floor_auto.clear(); b.set_floor_auto.clear()

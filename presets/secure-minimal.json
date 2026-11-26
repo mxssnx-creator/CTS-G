@@ -611,6 +611,7 @@
   },
   "exitSets": false,
   "minPfAutoOrdersFactor": 0,
+  "autoPfRatio": 4,
   "tpStepMin": 0,
   "configGate": false,
   "configGateN": 5,

@@ -2482,6 +2482,7 @@ class SetBook:
         self.rotation_s = 0.0
         self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
         self.pf_step_auto_high = STEP_PF_AUTO_HIGH_DEFAULT
+        self.pf_auto_ratio = auto_set_pf.DEFAULT_RATIO
         self.pf_range_floor: Dict[str, float] = {}      # minPfByRange: a flat minimum PF for every Set of a TP range (absent: the per-step floor)
         self.pf_auto_defaults: Dict[str, float] = {}
         self._grid_auto_key = None
@@ -2660,7 +2661,7 @@ class SetBook:
                               self.hold_auto_min, self.hold_auto_max,
                               self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol, self.pf_auto_factor,
                               self.pf_set_auto, self.pf_set_auto_min, self.pf_step_auto_low, self.pf_step_auto_high,
-                              self.pf_auto_defaults, self.pf_range_floor,
+                              self.pf_auto_defaults, self.pf_range_floor, self.pf_auto_ratio,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -3137,6 +3138,7 @@ class SetBook:
         self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", default_set_samples))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         self.pf_auto_factor = max(0.0, min(3.0, float(num(ov, "minPfAutoOrdersFactor", 0.0))))   # PF vs admitted orders in the Auto choice (0 = tolerance rule)
+        self.pf_auto_ratio = int(max(1, min(10, round(finite(ov.get("autoPfRatio"), auto_set_pf.DEFAULT_RATIO)))))
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
         self.pf_step_auto_high = max(self.pf_step_auto_low, min(2.0, float(num(ov, "minPfStepAutoHigh", STEP_PF_AUTO_HIGH_DEFAULT))))
@@ -4875,7 +4877,8 @@ class SetBook:
         if auto and per_set:
             own = self.set_floor_auto.get(st.id)
             if own is not None:
-                return min(float(own), high), "auto-set"
+                fallback, _ = self.grid_auto_fallback(st)
+                return auto_set_pf.adjusted_floor(float(own), fallback, self.pf_auto_ratio, high), "auto-set"
             if self.stage_grid:
                 return self.grid_auto_fallback(st)
         mine = self.own_manual_floor(st)
@@ -4884,7 +4887,7 @@ class SetBook:
         if auto and not per_set:
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
-                return min(float(learned), high), "auto-step"
+                return auto_set_pf.adjusted_floor(float(learned), self.manual_step_floor_for(st), self.pf_auto_ratio, high), "auto-step"
         return self.manual_step_floor_for(st), "manual-step"
 
     def grid_auto_fallback(self, st: "SetState") -> Tuple[float, str]:
@@ -5020,7 +5023,8 @@ class SetBook:
         main_filter = (lambda values: negative_filter_ok(values, params.negative_filter)) if params.negative_filter else None
         need = max(params.negative_filter["windows"]) if params.negative_filter else 0
         auto = (stage_grid.WindowAuto(self.grid_auto_fallback(st)[0], self.pf_set_auto_min,
-                                     tuple(self.step_auto_candidates()), self.pf_step_auto_tol, self.pf_auto_factor)
+                                     tuple(self.step_auto_candidates()), self.pf_step_auto_tol, self.pf_auto_factor,
+                                     self.pf_auto_ratio, self.pf_step_auto_high)
                 if self.grid_auto_enabled() else None)
         return stage_grid.StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
                                        params.floor_for, risk, main_filter, need, window_auto=auto)
@@ -6557,7 +6561,7 @@ class SetBook:
             "pause": self._pause_report(),
             "relations": self.relation_report(),
             "stepPf": {"on": self.pf_by_step, "auto": self.pf_step_auto, "ratio": self.pf_step_ratio, "autoN": self.pf_step_auto_n,
-                       "autoMin": self.pf_step_auto_min, "steps": list(self.step_floor_report)},
+                       "autoMin": self.pf_step_auto_min, "autoPfRatio": self.pf_auto_ratio, "steps": list(self.step_floor_report)},
             "indicationConfigs": dict(self.config_report),
             "signalConfigs": dict(getattr(self, "signal_report", {}) or {}),
             "slRanges": {"auto": bool(getattr(self, "sl_auto", False)), "minOrders": int(getattr(self, "sl_auto_min", 20)),

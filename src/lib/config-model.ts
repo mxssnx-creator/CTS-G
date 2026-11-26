@@ -546,6 +546,7 @@ export type PulseOverlay = {
   /** PF vs admitted orders in the Auto minimum PF (owner 2026-11-15): 0 = the lowest floor within the tolerance of the best PF; above 0 each
    * candidate floor scores PF x (admitted / most admitted) ^ factor and the best score wins (higher = more orders). */
   minPfAutoOrdersFactor: number;
+  autoPfRatio: number;
   /** The lowest floor Auto may choose (1.00 .. 2.00). */
   minPfStepAutoLow: number;
   /** Highest floor a TP step may ask (server: set_engine.STEP_PF_AUTO_HIGH_DEFAULT); 2 = no cap. */
@@ -886,6 +887,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfSetAutoMin: 20,
   minPfStepAutoTol: 5,
   minPfAutoOrdersFactor: 0,
+  autoPfRatio: 4,
   minPfStepAutoLow: 1.02,
   minPfStepAutoHigh: 2,
   pauseMode: "auto",
@@ -1186,6 +1188,7 @@ export type CtsSettings = {
   minPfSetAutoMin?: number;
   minPfStepAutoTol?: number;
   minPfAutoOrdersFactor?: number;
+  autoPfRatio?: number;
   minPfStepAutoLow?: number;
   minPfStepAutoHigh?: number;
   pauseMode?: string;
@@ -1779,6 +1782,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfSetAutoMin: Math.max(1, Math.min(100000, Math.round(num(live?.minPfSetAutoMin ?? cts.minPfSetAutoMin, DEFAULT_OVERLAY.minPfSetAutoMin)))),
     minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
     minPfAutoOrdersFactor: Math.max(0, Math.min(3, Math.round(num(cts.minPfAutoOrdersFactor, 0) * 100) / 100)),
+    autoPfRatio: Math.max(1, Math.min(10, Math.round(num(live?.autoPfRatio ?? cts.autoPfRatio, 4)))),
     minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1.02) * 100) / 100)),
     minPfStepAutoHigh: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoHigh, 2) * 100) / 100)),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
@@ -1943,6 +1947,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
     ...overlay,
     stageLastN: stageGridOf(overlay.stageLastN),
     autoPfDefaultByRange: pfRangeFloorsOf(overlay.autoPfDefaultByRange),
+    autoPfRatio: Math.max(1, Math.min(10, Math.round(num(overlay.autoPfRatio, 4)))),
     ...blockAddAutoSettings(overlay.blockAddLastN, overlay.blockAddAutoMin),
     relateConfigs: relateConfigs(overlay.relateConfigs),
     relationLanes: relationLanesOf(overlay.relationLanes),

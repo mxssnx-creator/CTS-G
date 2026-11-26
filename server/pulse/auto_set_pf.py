@@ -10,6 +10,12 @@ TRAINING_HOURS = 48
 REFIT_SECONDS = 3600
 DEFAULT_MIN_ADMITTED = 20
 DEFAULT_FALLBACKS = {"minimal": 1.24, "short": 1.42}
+DEFAULT_RATIO = 4
+
+
+def adjusted_floor(learned: float, fallback: float, ratio: int, high: float) -> float:
+    """Strength changes the learned increase; the existing fallback remains a floor."""
+    return max(fallback, min(high, fallback + max(0.0, learned - fallback) * ratio / 3.0))
 
 
 def training_window(now: float) -> tuple[float, float]:
