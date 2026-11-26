@@ -617,22 +617,23 @@ class StageGridTest(unittest.TestCase):
 
     def test_default_paths_and_signed_windows(self):
         grid = sg.StageGrid.from_settings({})
-        self.assertEqual(grid.capacities(), (350, 49000, 10780000, 2371600000))
+        self.assertEqual(grid.capacities(), (400, 64000, 20480000, 6553600000))
         for depth in range(4):
             choices = grid.windows(depth, 30)
             self.assertEqual({(w.last, w.last_mode) for w in choices},
                              {(size, sign) for size in (1, 2, 3, 4, 5) for sign in ("positive", "negative")})
-            self.assertEqual({w.short for w in choices if w.short_mode == "negative"}, {4, 8, 12})
+            self.assertEqual({w.short for w in choices if w.short_mode == "negative"},
+                             set(sg.LATE_SHORT if depth >= 2 else sg.SHORT))
             self.assertEqual({w.short for w in choices if w.short_mode == "positive"},
                              set(sg.LATE_SHORT if depth >= 2 else sg.SHORT))
             if depth:
                 self.assertEqual({w.long for w in choices}, {0, 30})
         grid_setting = grid.settings()
         self.assertEqual(sg.StageGrid.from_settings(grid_setting), grid)
-        with self.assertRaises(ValueError):
-            sg.StageGrid.from_settings({"exec": {"short": [16], "shortModes": ["negative"]}})
+        negative = sg.StageGrid.from_settings({"exec": {"short": [30], "shortModes": ["negative"]}})
+        self.assertTrue(all(w.short == 30 and w.short_mode == "negative" for w in negative.windows(3, 40)))
         extended = sg.StageGrid.from_settings({"exec": {"short": [12, 20, 24, 28, 30]}})
-        self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "negative"}, {12})
+        self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "negative"}, {12, 20, 24, 28, 30})
         self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "positive"}, {12, 20, 24, 28, 30})
         self.assertEqual(sg.StageGrid.from_settings({"real": {"short": [30]}}).options[2].shorts, (30,))
         with self.assertRaises(ValueError):
