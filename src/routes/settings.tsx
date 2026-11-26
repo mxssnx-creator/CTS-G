@@ -1420,11 +1420,16 @@ function SettingsPage() {
                     <Num label="Relate Active positions to skip" value={cfg.activeStep} min={0} max={Math.min(cfg.steps, 6)} step={1}
                       hint="The relation keeps tracking settled closes and starts allocating after this many losses."
                       onChange={activeStep => update({ activeStep })} />
+                    <Num label="Minimum completed trials at the same loss step" value={cfg.recoveryMinTrades} min={6} max={cfg.lastN} step={1}
+                      hint="Earlier and later trials must both clear the configured return PF and drawdown limits."
+                      onChange={recoveryMinTrades => update({ recoveryMinTrades })} />
+                    <Num label="Maximum recovery drawdown / gross profit" value={cfg.recoveryMaxDrawdownRatio} min={.01} max={1} step={.01}
+                      onChange={recoveryMaxDrawdownRatio => update({ recoveryMaxDrawdownRatio })} />
                     <Num label="Increase ratio" value={cfg.ratio} min={.2} max={6} step={.2} onChange={ratio => update({ ratio })} />
                     <Num label="Maximum SL / TP" value={cfg.maxSlRatio} min={.01} max={.5} step={.01} onChange={maxSlRatio => update({ maxSlRatio })} />
                     <Num label="Policy stack ceiling" value={cfg.maxStack} min={1} max={8} step={.25} hint="Parallel policies share a total 8× ceiling, including Block and DCA." onChange={maxStack => update({ maxStack })} />
                     <Num label="Minimum return PF" value={cfg.minPf} min={1.01} max={10} step={.01} onChange={minPf => update({ minPf })} />
-                    <Num label="Last-N parent closes" value={cfg.lastN} min={cfg.minTrades} max={250} step={1} onChange={lastN => update({ lastN })} />
+                    <Num label="Last-N parent closes" value={cfg.lastN} min={Math.max(cfg.minTrades, cfg.recoveryMinTrades)} max={250} step={1} onChange={lastN => update({ lastN })} />
                     <Num label="Minimum parent closes" value={cfg.minTrades} min={60} max={cfg.lastN} step={1} onChange={minTrades => update({ minTrades })} />
                     <label className="text-sm">Relation combination<select className="mt-1 block w-full rounded border p-2" value={cfg.mode} onChange={e => update({ mode: e.target.value === "additive" ? "additive" : "shared" })}><option value="shared">Shared average</option><option value="additive">Additive</option></select></label>
                     <label className="text-sm">Relation scope<select className="mt-1 block w-full rounded border p-2" value={cfg.scope} onChange={e => update({ scope: e.target.value === "overall" ? "overall" : "selected" })}><option value="selected">Selected relations</option><option value="overall">Overall · all relations</option></select></label>

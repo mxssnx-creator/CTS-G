@@ -82,6 +82,8 @@
       "scope": "selected",
       "activeStep": 0,
       "volumeFactors": {},
+      "recoveryMinTrades": 12,
+      "recoveryMaxDrawdownRatio": 0.5,
       "sources": [
         "config",
         "symbol"

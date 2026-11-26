@@ -16,7 +16,8 @@ MAX_STACK = 8.0
 DEFAULT = {'id': 'relate-12', 'enabled': False, 'steps': 12, 'ratio': .2,
            'mode': 'shared', 'sources': ['config', 'symbol'], 'lastN': 250,
            'minTrades': 60, 'minPf': 1.1, 'maxStack': 2., 'maxSlRatio': .5,
-           'scope': 'selected', 'volumeFactors': {}, 'activeStep': 0}
+           'scope': 'selected', 'volumeFactors': {}, 'activeStep': 0,
+           'recoveryMinTrades': 12, 'recoveryMaxDrawdownRatio': .5}
 
 
 def finite(x):
@@ -36,16 +37,18 @@ def clean_configs(raw):
             raise ValueError('Relate policy IDs must be unique nonempty strings')
         ids.add(c['id'])
         if not isinstance(c['enabled'], bool): raise ValueError('Relate enabled must be boolean')
-        for key, lo, hi in [('steps', 2, 15), ('lastN', 60, 250), ('minTrades', 60, 250)]:
+        for key, lo, hi in [('steps', 2, 15), ('lastN', 60, 250), ('minTrades', 60, 250), ('recoveryMinTrades', 6, 250)]:
             x=c[key]
             if not finite(x) or x != int(x) or not lo <= x <= hi: raise ValueError('Invalid Relate '+key)
             c[key]=int(x)
         if c['minTrades'] > c['lastN']: raise ValueError('Relate minTrades exceeds lastN')
+        if c['recoveryMinTrades'] > c['lastN']: raise ValueError('Relate recovery sample exceeds lastN')
         threshold=c['activeStep']
         if not finite(threshold) or threshold != int(threshold) or not 0 <= threshold <= min(6, c['steps']):
             raise ValueError('Invalid Relate Active skip count')
         c['activeStep']=int(threshold)
-        for key, lo, hi in [('ratio', .2, 6), ('minPf', 1.000001, 100), ('maxStack', 1, MAX_STACK), ('maxSlRatio', .01, .5)]:
+        for key, lo, hi in [('ratio', .2, 6), ('minPf', 1.000001, 100), ('maxStack', 1, MAX_STACK), ('maxSlRatio', .01, .5),
+                            ('recoveryMaxDrawdownRatio', .01, 1)]:
             if not finite(c[key]) or not lo <= c[key] <= hi: raise ValueError('Invalid Relate '+key)
         if abs(c['ratio']*5-round(c['ratio']*5)) > 1e-9: raise ValueError('Relate ratios use 0.2 increments')
         if c['mode'] not in ('shared','additive'): raise ValueError('Invalid Relate mode')
@@ -108,6 +111,32 @@ def qualifies(s,c):
     return s['n']>=c['minTrades'] and not s['unknown'] and (s['state']=='no-loss' or (s['pf'] is not None and s['pf']>=c['minPf']))
 
 
+def recovery_qualifies(rows, end, step, config):
+    if step < max(1, config['activeStep']):
+        return False
+    sample = [(row[1], row[4]) for row in rows[:end] if row[3] == step and len(row) == 5]
+    if len(sample) < config['recoveryMinTrades']:
+        return False
+    split = len(sample) // 2
+    for half in (sample[:split], sample[split:]):
+        if any(not finite(value) or not finite(size) or size < 1 for value, size in half):
+            return False
+        unit = stats([value for value, _ in half])
+        sized = [value * size for value, size in half]
+        projected = stats(sized)
+        for summary in (unit, projected):
+            if summary['state'] != 'no-loss' and (summary['pf'] is None or summary['pf'] < config['minPf']):
+                return False
+        cumulative = peak = drawdown = 0.
+        for value in sized:
+            cumulative += value
+            peak = max(peak, cumulative)
+            drawdown = max(drawdown, peak - cumulative)
+        if drawdown > projected['gain'] * config['recoveryMaxDrawdownRatio']:
+            return False
+    return True
+
+
 def stop_within_ratio(sl,tp,ratio):
     # Effective price distances, after costs/minimum-distance and tick rounding. No stop tightening or TP invention.
     return finite(sl) and finite(tp) and finite(ratio) and sl>0 and tp>0 and sl<=tp*ratio+1e-12
@@ -126,17 +155,22 @@ def receipt_parts(receipt):
     for pk,p in policies.items():
         c=clean_configs([p['policy']])[0]
         legacy='progression' not in p['policy']
+        recovery=c.get('progression')=='loss-recovery'
         sources=c['sources'] if legacy else recorded_sources(c)
         if pk!=policy_key(p['policy']) or set(p['parts'])!=set(sources): raise ValueError('Relate receipt policy changed')
-        if not legacy and (c.get('progression')!='losses' or c!=p['policy']): raise ValueError('Relate receipt policy changed')
-        # Legacy receipts can finish settling without supplying old winning levels to the new policy.
+        if (not legacy and not recovery and c.get('progression')!='losses') or (recovery and c!=p['policy']):
+            raise ValueError('Relate receipt policy changed')
+        # Existing receipts can settle while the recovery policy warms from new entry-time evidence.
         for source in sources:
             part=p['parts'][source];volume=part.get('volume');level=part.get('level');addition=part.get('extra')
             if not finite(volume) or not 0<volume<=MAX_STACK or not finite(addition) or addition<0 or abs(volume-base-addition)>1e-9:
                 raise ValueError('Invalid Relate funded portion')
             if type(level) is not int or not 0<=level<=c['steps']: raise ValueError('Invalid Relate level')
             extra+=addition
-            if not legacy: updates.append((pk,source+':'+keys[source],volume,level,c['lastN']))
+            if recovery:
+                trial=part.get('trialSize')
+                if not finite(trial) or trial<1: raise ValueError('Invalid Relate trial size')
+                updates.append((pk,source+':'+keys[source],volume,level,trial,c['lastN']))
     if abs(base+extra-total)>1e-9: raise ValueError('Relate funded portions do not reconcile')
     return updates
 
@@ -154,8 +188,9 @@ def validate_saved(saved):
             rows=state['rows'];previous=-math.inf
             if len(rows)>250: raise ValueError('Relate history exceeds capacity')
             for row in rows:
-                if not isinstance(row,list) or len(row)!=4: raise ValueError('Invalid Relate history row')
-                at,r,volume,level=row
+                if not isinstance(row,list) or len(row) not in (4,5): raise ValueError('Invalid Relate history row')
+                at,r,volume,level=row[:4]
+                if len(row)==5 and (not finite(row[4]) or row[4]<1): raise ValueError('Invalid Relate trial size')
                 if not finite(at) or at<previous or (r is not None and not finite(r)) or not finite(volume) or not 0<volume<=MAX_STACK or type(level) is not int or not 0<=level<=15:
                     raise ValueError('Invalid Relate history values')
                 previous=at
@@ -199,22 +234,29 @@ class RelateBook:
         requests=[]
         for settings in self.configs:
             if not settings['enabled']: continue
-            c={**settings,'progression':'losses'}
+            c={**settings,'progression':'loss-recovery'}
             pk=policy_key(c);book=self.books.get(pk,{})
             parts={};diagnostics={};local_cap=min(cap,c['maxStack']);eligible=stop_within_ratio(sl,tp,c['maxSlRatio'])
             selected=selected_sources(c)
             weights={s: c['volumeFactors'].get(s,1.) for s in selected}
             divisor=sum(weights.values()) if c['mode']=='shared' else 1.
+            own_qualified=False
             for source in recorded_sources(c):
                 key=source+':'+keys[source]
                 rows,end,s=self._window(pk,key,book.get(key,{}).get('rows',[]),now)
                 diagnostics[source]=s
                 level=0
-                if eligible and qualifies(s,c) and qualifies(diagnostics['config'],c):
-                    while level<min(end,c['steps']) and rows[end-level-1][1] < 0: level+=1
+                if eligible:
+                    while level<min(end,c['steps']):
+                        prior=rows[end-level-1][1]
+                        if not finite(prior) or prior>=0: break
+                        level+=1
                 vol=min(local_cap,base*(1+c['ratio'])**level) if level and level>=c['activeStep'] else base
                 weight=weights.get(source,0.) / divisor if divisor else 0.
-                parts[source]={'level':level,'extra':max(0.,vol-base)*weight}
+                extra=max(0.,vol-base)*weight
+                qualified_step=qualifies(s,c) and recovery_qualifies(rows,end,level,c)
+                if source=='config': own_qualified=qualified_step
+                parts[source]={'level':level,'extra':extra if own_qualified and qualified_step else 0.,'trialSize':1.+extra/base}
             wanted=sum(p['extra'] for p in parts.values());room=max(0.,local_cap-base)
             scale=min(1.,room/wanted) if wanted else 0.
             for p in parts.values(): p['extra']*=scale
@@ -249,10 +291,10 @@ class RelateBook:
         if event in self.seen: return False
         updates=receipt_parts(receipt)
         r=float(unit_return) if finite(unit_return) else None
-        for pk,key,volume,level,last_n in updates:
+        for pk,key,volume,level,trial,last_n in updates:
             book=self.books.setdefault(pk,{})
             state=book.setdefault(key,{'rows':[]});rows=state['rows']
-            rows.insert(bisect_right(rows,at,key=lambda row: row[0]),[at,r,volume,level]);del rows[:-last_n]
+            rows.insert(bisect_right(rows,at,key=lambda row: row[0]),[at,r,volume,level,trial]);del rows[:-last_n]
             self._windows.pop((pk,key),None)
         self.seen[event]=at;self.closed+=1
         # Never prune deduplication evidence and then re-admit an old parent as a new observation.

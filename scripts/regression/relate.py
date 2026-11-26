@@ -15,9 +15,11 @@ def config(**patch):
             'lastN':60,'minTrades':60,'minPf':1.05,'maxStack':8.,'maxSlRatio':.5,**patch}
 
 def warm(book,identity=ID,n=60,ret=.01,last_loss=False):
+    active=max(1,book.configs[0]['activeStep'])
     for i in range(n):
         d=book.decide(identity,i*2,.003,.01,qualified=True)
-        book.close(d,str(identity)+str(i),i*2+1,-.001 if last_loss and i==n-1 else ret,accepted=True,final=True)
+        loss=last_loss and (i==n-1 or i<n-2 and i%(active+1)<active)
+        book.close(d,str(identity)+str(i),i*2+1,-.001 if loss else ret,accepted=True,final=True)
 
 def progression_twelve_steps():
     b=RelateBook([config()]);warm(b,last_loss=True)
@@ -31,7 +33,7 @@ def progression_twelve_steps():
     reset=b.decide(ID,240,.003,.01,qualified=True)
     b.close(reset,'flat',241,0,accepted=True,final=True)
     d=b.decide(ID,242,.003,.01,qualified=True)
-    return levels==want and sizes==sorted(sizes) and max(sizes)<=8 and d['total']==1, f'levels={levels}; capped={max(sizes)}; flat reset={d["total"]}'
+    return levels==want and sizes[0]>1 and all(size==1 for size in sizes[1:]) and d['total']==1, f'levels={levels}; capped={max(sizes)}; flat reset={d["total"]}'
 
 def independent_contexts():
     b=RelateBook([config()]);warm(b,last_loss=True)
@@ -86,7 +88,7 @@ def persistence_and_loss_basis():
         b.close(d,'tiny-loss',201,-1e-18,accepted=True,final=True)
         b2=RelateBook([config()],p);result=b2.decide(ID,202,.003,.01,qualified=True)
         v=next(iter(result['policies'].values()))['stats']['config']
-        return not b2.error and b2.closed==61 and result['total']==1.2 and v['loss']>0 and not b2.close(d,'tiny-loss',203,.1,accepted=True,final=True), str(v)
+        return not b2.error and b2.closed==61 and result['total']==1 and v['loss']>0 and not b2.close(d,'tiny-loss',203,.1,accepted=True,final=True), str(v)
 
 def config_bounds():
     bad=[{'ratio':.3},{'steps':16},{'minPf':1},{'maxSlRatio':.5001},{'lastN':20},{'minTrades':61,'lastN':60},
@@ -99,12 +101,12 @@ def config_bounds():
 
 def overall_relation_weights():
     factors={s:0 for s in ('config','direction','indication','strategy','coordination','range')}
-    b=RelateBook([config(scope='overall',volumeFactors={**factors,'overall':3,'symbol':1})]);warm(b)
-    other={**ID,'symbol':'ETH-USDT'};warm(b,other,last_loss=True)
+    b=RelateBook([config(scope='overall',volumeFactors={**factors,'overall':3,'symbol':1})]);warm(b,last_loss=True)
+    other={**ID,'symbol':'ETH-USDT'};warm(b,other)
     d=b.decide(ID,200,.003,.01,qualified=True)
     parts=next(iter(d['policies'].values()))['parts']
-    assert len(parts)==8 and parts['overall']['level']==1 and parts['symbol']['level']==0
-    assert abs(d['total']-1.15)<1e-10
+    assert len(parts)==8 and parts['overall']['level']==0 and parts['symbol']['level']==1
+    assert abs(d['total']-1.05)<1e-10
     cold=b.decide({**ID,'config':'cold'},200,.003,.01,qualified=True)
     assert cold['total']==1
     return True,'all-symbol and single-symbol loss streaks remain separate; cold Sets stay at base volume'
@@ -167,7 +169,7 @@ def overflow_and_same_time():
     d=b.decide(ID,200,.003,.01,qualified=True)
     b.close(d,'same-clock',201,-.001,accepted=True,final=True)
     assert b.decide(ID,201,.003,.01,qualified=True)['total']==1
-    assert b.decide(ID,202,.003,.01,qualified=True)['total']>1
+    assert b.decide(ID,202,.003,.01,qualified=True)['total']==1
     return True,'overflow fails closed; same-time close is not prior evidence'
 CHECKS.append(('relate.numeric-overflow-and-clock',overflow_and_same_time))
 
