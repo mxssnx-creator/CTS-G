@@ -4,6 +4,7 @@ from dataclasses import asdict
 import json
 import math
 from pathlib import Path
+import pickle
 import random
 import sys
 import tempfile
@@ -18,7 +19,7 @@ import stage_grid as sg
 import auto_set_pf
 from indication_extra import (CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, bollinger_reclaim, keltner_cross,
                               resolve, rsi_trend_reclaim, sar_retest, sar_signal, sar_state)
-from stage_eval import AutoFloors, execute, gate_metrics, relation_rows
+from stage_eval import AutoFloors, execute, gate_metrics, grid_at, relation_rows
 
 
 def plain(grid, rows, now, lookback, floor):
@@ -79,6 +80,127 @@ def plain(grid, rows, now, lookback, floor):
 
 
 class StageGridTest(unittest.TestCase):
+    def test_dated_replay_and_stage_scores_only_repeat_changed_work(self):
+        window = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        book = se.SetBook()
+        book.load({
+            "stageLastN": {"base": {**window, "long": [10]},
+                           **{s: {**window, "longModes": ["none"]} for s in sg.STAGES[1:]}},
+            "histKeepLastComplete": True, "histLookbackAuto": False, "histLookbackBars": 120,
+            "histMinBars": 60, "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 5,
+            "stratIndications": False, "stratTrailing": False, "exitSets": False,
+            "setSlRatios": [1.0], "directionMode": "both",
+        })
+        names = "AAA-USDT", "BBB-USDT"
+        now = 48 * 3600.0 + 120
+        bars = [[100.0, 102.0, 99.0, 100.0 + i * .01, 1.0] for i in range(120)]
+        for symbol in names:
+            book.ingest_bars(symbol, bars, last_t=now - 60)
+        first, second = book.by_idx
+        replayed, scheduled = [], []
+
+        def replay(symbol, output, decision, on_step=None):
+            replayed.append(symbol)
+            market, _ = book._replay_market()
+            for st in book.by_idx:
+                gross = .02 if st is second else .02 * market[symbol][70][4]
+                output[st.id].extend(
+                    dict(t=now - 50 * i - names.index(symbol), symbol=symbol, side="LONG",
+                         pnl=gross, pnl_pct=gross, hold_s=15, reason="fixture", set_id=st.id)
+                    for i in range(40, 0, -1)
+                )
+            return {}
+
+        book._replay_symbol = replay
+        book._prefetch_replay = lambda view, symbols, when: scheduled.append(tuple(symbols))
+        with patch.object(book, "grid_history", wraps=book.grid_history) as scoring:
+            book.replay_all(now=now)
+            self.assertTrue(book.progress.ready)
+            self.assertTrue(first.exec_grid.ready)
+            previous = first.exec_grid
+            book.replay_all(now=now + 2)
+            self.assertEqual(replayed, list(names))
+            self.assertEqual(scoring.call_count, 2)
+            self.assertIs(first.exec_grid, previous)
+            self.assertEqual(first.score_at, now + 2)
+
+            corrected = [list(row) for row in bars]
+            corrected[70][4] = 2.0
+            book.ingest_bars(names[0], corrected, last_t=now - 60)
+            book.replay_all(now=now + 3)
+            self.assertEqual(replayed, [*names, names[0]])
+            self.assertEqual([call.args[0] for call in scoring.call_args_list[2:]], [first])
+            self.assertNotEqual(first.exec_grid.evidence, previous.evidence)
+            self.assertEqual(scheduled, [names, (), names[:1]])
+
+            book.replay_all(now=now + 3 * 3600)
+            self.assertEqual(replayed, [*names, names[0]])
+            self.assertEqual(scoring.call_count, 5)
+            self.assertFalse(first.exec_grid.ready)
+            self.assertEqual(first.n, 0)
+
+    def test_grid_query_reuses_the_same_visible_evidence_until_it_expires(self):
+        small = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        book = se.SetBook()
+        book.load({"histLookbackBars": 120, "histLookbackAuto": False,
+                   "stageLastN": {"base": {**small, "long": [10]},
+                                  **{s: {**small, "longModes": ["none"]} for s in sg.STAGES[1:]}}})
+        st = book.by_idx[0]
+        now = 48 * 3600.0
+        closes = [now - 60 * i for i in range(73, 0, -1)]
+        entries = [t - 30 for t in closes]
+        gross = [.01] * len(closes)
+        tapes = SimpleNamespace(by_set={st.idx: (closes, entries, gross)}, cf=.001)
+
+        with patch.object(book, "grid_history", wraps=book.grid_history) as history:
+            first = grid_at(book, tapes, st, now)
+            self.assertTrue(first.ready)
+            self.assertIs(grid_at(book, tapes, st, now + 1, streams=False), first)
+            self.assertEqual(history.call_count, 1)
+            shifted = grid_at(book, tapes, st, now + 3 * 3600)
+            self.assertFalse(shifted.ready)
+            self.assertEqual(shifted.counts[0].sample_full, 0)
+            self.assertEqual(history.call_count, 1)
+            tapes.by_set[st.idx] = closes, entries, [-.01] * len(closes)
+            self.assertFalse(grid_at(book, tapes, st, now).ready)
+            self.assertEqual(history.call_count, 2)
+
+    def test_signal_cache_compresses_and_skips_an_unchanged_write(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            file = Path(dirname) / "signal.pkl"
+            entries = {i: {"same-pack": (1, .8, "identical signal")} for i in range(400)}
+            data = {"BTC-USDT": entries}
+            legacy = pickle.dumps({"v": se.SIG_CACHE_VERSION, "salt": 7, "symbols": data}, protocol=5)
+            file.write_bytes(legacy)
+            self.assertEqual(se.load_signal_cache(str(file), 7), data)
+            book = se.SetBook()
+            book.sig_cache_path = str(file)
+            book._sig_meta["salt"] = 7
+            book._sig_cache.update(data)
+            writes = []
+
+            def queued(*, target, **options):
+                writes.append(target)
+                return SimpleNamespace(start=lambda: None)
+
+            with patch.object(se.threading, "Thread", side_effect=queued):
+                book._save_sig_cache_maybe(force=True)
+                book._save_sig_cache_maybe(force=True)
+                self.assertEqual(len(writes), 1)
+                writes[0]()
+                self.assertLess(file.stat().st_size, len(legacy) / 2)
+                self.assertEqual(se.load_signal_cache(str(file), 7), data)
+                with patch.object(se.time, "time", return_value=book._sig_meta["saved_at"] + 601):
+                    book._save_sig_cache_maybe()
+                    self.assertEqual(len(writes), 1)
+                    book._publish_signal_cache("BTC-USDT", entries, {0: entries[0]})
+                    book._save_sig_cache_maybe()
+                self.assertEqual(len(writes), 2)
+                writes[1]()
+            self.assertEqual(se.load_signal_cache(str(file), 7), {"BTC-USDT": {0: entries[0]}})
+            file.write_bytes(file.read_bytes()[:-4])
+            self.assertEqual(se.load_signal_cache(str(file), 7), {})
+
     def test_rule_reload_discards_in_flight_tape_and_scores_the_complete_universe(self):
         block = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
         config = {"stageLastN": {"base": {**block, "long": [10]},
@@ -157,6 +279,34 @@ class StageGridTest(unittest.TestCase):
             book._hist_replay_bar_at[symbol] = hour + se.BAR_S
             book._learn_grid_floors((symbol,), hour + 130)
             self.assertIs(book._grid_auto_models[st.id], complete)
+
+    def test_auto_pf_invalidates_for_a_training_correction_with_the_same_bar_clock(self):
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "minPfByStep": True, "minPfStepAuto": True,
+                   "setMinStep": 4, "setStepMax": 4, "stratIndications": False, "setSlRatios": [1.0]})
+        st = next(st for st in book.by_idx if st.kind == "base")
+        symbol = "BTC-USDT"
+        hour = 48 * 3600
+        before = [dict(t=hour - (100 - i) * 60, symbol=symbol, side="LONG", pnl=.005,
+                       pnl_pct=.006, hold_s=30, reason="tp", set_id=st.id) for i in range(100)]
+        later = dict(before[-1], t=hour)
+        book._hist_replay_source[symbol] = ("recorded frame",)
+        book._hist_replay_bar_at[symbol] = hour - 60
+        with book._lock:
+            book._replace_paper_rows(symbol, {st.id: se.RowCols(before)})
+            book._learn_grid_floors((symbol,), hour + 1)
+            original = book._grid_auto_models[st.id]
+            book._replace_paper_rows(symbol, {st.id: se.RowCols([*before, later])})
+            book._learn_grid_floors((symbol,), hour + 2)
+            self.assertIs(book._grid_auto_models[st.id], original)
+            corrected = [*before, later]
+            corrected[50] = dict(corrected[50], pnl_pct=.021)
+            book._replace_paper_rows(symbol, {st.id: se.RowCols(corrected)})
+            book._learn_grid_floors((symbol,), hour + 3)
+            rebuilt = book._grid_auto_models[st.id]
+            self.assertIsNot(rebuilt, original)
+            self.assertEqual(rebuilt.closes, original.closes)
+            self.assertNotEqual(rebuilt._net_returns, original._net_returns)
 
     def test_exec_replay_uses_the_live_kind_policy_and_stable_set_rank(self):
         win = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}

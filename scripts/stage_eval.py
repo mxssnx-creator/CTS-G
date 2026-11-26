@@ -36,7 +36,7 @@ import time
 from array import array
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import hashlib
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PULSE = os.path.join(HERE, "..", "server", "pulse")
@@ -44,7 +44,7 @@ sys.path.insert(0, PULSE)
 import set_engine as se  # noqa: E402
 import auto_set_pf  # noqa: E402
 from position_cost import cost_as_frac, signed_result_r
-from stage_grid import lane_id, STAGES  # noqa: E402
+from stage_grid import GridResult, lane_id, STAGES  # noqa: E402
 
 OVERLAY = os.path.join(PULSE, "overlay-bingx-x01.json")
 
@@ -280,24 +280,49 @@ def tape_source(tapes, idx: int, now: float, lookback_s: float):
     return resolve(idx, now, lookback_s) if resolve else tapes
 
 
+class _GridQuery(NamedTuple):
+    columns: tuple
+    policy: tuple
+    now: float
+    bounds: tuple
+    result: GridResult
+    streams: bool
+
 
 def grid_at(book, tapes: Tapes, st, now: float, *, streams: bool = True):
     """The same stage query as the live scorer, on the snapshot's closed prefix."""
     params = book.stage_params(st.pack, st)
     source = tape_source(tapes, st.idx, now, params.lookback_s)
-    close, entry, gross = source.by_set[st.idx]
+    columns = source.by_set[st.idx]
+    close, entry, gross = columns
     cache = tapes.__dict__.setdefault("_exec_grid_query", {})
-    model = book._grid_auto_models.get(st.id)
-    key = (now, id(close), book.stage_grid, params, tapes.cf, model, book.sl_auto_allows(st))
+    grid = book.stage_grid
+    policy = (grid, params, tapes.cf, book._evaluation_config)
     item = cache.get(st.idx)
-    if item and item[0] == key and (item[2] or not streams):
-        return item[1]
+    comparable = item and item.columns is columns and item.policy == policy and (item.streams or not streams)
+    if comparable and item.now == now:
+        return item.result
     cutoff = bisect.bisect_left(close, now - book.history_bars() * 60.0)
     end = bisect.bisect_left(close, now)
-    result = book.grid_history(st, closes=close[cutoff:end], entries=entry[cutoff:end],
-                               nets=[v - tapes.cf for v in gross[cutoff:end]]).evaluate(
-                                   now, streams=streams, limit=se.PROC_KEEP)
-    cache[st.idx] = (key, result, streams)
+    visible = bisect.bisect_left(close, now - params.lookback_s, cutoff, end)
+    if end - visible < grid.sample_bounds[0, 0][0]:
+        cache.pop(st.idx, None)
+        return grid.insufficient()
+    if source is tapes:
+        clock = book.grid_clock_key(params, now, close[visible])
+    else:
+        # Time-dependent tape adapters can change their causal prefix on
+        # each query even when their visible close count does not change.
+        clock = now
+    key = (cutoff, end, visible, clock)
+    if comparable and item.bounds == key:
+        result = item.result
+        streams = item.streams
+    else:
+        result = book.grid_history(st, closes=close[cutoff:end], entries=entry[cutoff:end],
+                                   nets=[v - tapes.cf for v in gross[cutoff:end]], params=params).evaluate(
+                                       now, streams=streams, limit=se.PROC_KEEP)
+    cache[st.idx] = _GridQuery(columns, policy, now, key, result, streams)
     return result
 
 def gate_metrics(book, tapes: Tapes, st, now: float):
