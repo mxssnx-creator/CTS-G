@@ -302,14 +302,14 @@ class FastBingX:
         self.err = err
         self.base = (base or BASE).rstrip("/")
         self.buckets = {k: TokenBucket(*v) for k, v in LIMITS.items()}
-        # These account reads have separate 5/s UID limits. A pooled
-        # connection can exhaust them with the private bucket's startup burst.
-        self.path_buckets = {path: TokenBucket(4.0, 1.0) for path in (
-            '/openApi/swap/v2/user/commissionRate',
-            '/openApi/swap/v1/trade/positionHistory',
-            '/openApi/swap/v2/trade/allOrders',
-            '/openApi/swap/v2/trade/allFillOrders',
-        )}
+        # These account reads have separate 5/s UID limits. Pace archives
+        # below that because a VST account can also have another reader.
+        self.path_buckets = {
+            '/openApi/swap/v2/user/commissionRate': TokenBucket(4.0, 1.0),
+            '/openApi/swap/v1/trade/positionHistory': TokenBucket(4.0, 1.0),
+            '/openApi/swap/v2/trade/allOrders': TokenBucket(2.0, 1.0),
+            '/openApi/swap/v2/trade/allFillOrders': TokenBucket(2.0, 1.0),
+        }
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.http = None

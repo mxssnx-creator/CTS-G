@@ -139,7 +139,7 @@ class SignedPool(unittest.TestCase):
             with self.subTest(path=path):
                 bucket=client.path_buckets[path]
                 with patch.object(bx.time,'monotonic',return_value=bucket.ts):
-                    self.assertEqual([bucket.reserve() for _ in range(5)],[0,.25,.5,.75,1.0])
+                    self.assertEqual([bucket.reserve() for _ in range(5)],[0,.5,1.0,1.5,2.0])
 
     def test_exchange_unblock_timestamp_is_honored_with_its_space(self):
         client=self.client(lambda request:self.fail('no request expected'))
