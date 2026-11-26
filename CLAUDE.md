@@ -2,6 +2,11 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-26 (later), owner: "Low-Range indications and strategies ... high freq and success ... test with 12, 12 h trade sims and 25 symbols".** Sim (trade_sim, top 25 symbols fetched, 20 loaded,
+  last 24 h after 48 h pre-history, executed PF / orders / net, halves of 12 h): A current x01 1.171 / 284 / +23.6 % (1.34 / 223, 0.77 / 61); B steps 2 - 6 incl. 5 / 6 + Minimal range 1.210 / 296 / +32.0 %
+  (1.45 / 226, 0.66 / 70); **C = B + SL ratios 0.5 / 0.75 / 1.0 / 1.25: 1.379 / 293 / +47.5 % (1.68 / 219, 0.82 / 74)** - better on both halves with more orders, **shipped on x01** (`tpStepsOff`
+  [7, 9, 19, 30, 31], `setMinStep` / `tpStepMin` 2, `tpRanges.minimal` true, `setSlRatios` [0.5, 0.75, 1.0, 1.25]); it reverses parts of the 2026-11-24 / 25 disables on this evidence. The
+  `shortrange` pack itself traded 1 - 3 orders in every arm: the gain is the low TP steps and SL ratios of the other packs, not the Low-Range signal. Second half still under 1. Revert = the earlier values.
 - **2026-11-26, owner: "Start live x01 now with 60 symbols ... decrease vol factor by half ... make Axis, Block fully work ... run continuously by monitoring".** x01: `symbolCap` 60,
   `volumeFactor` 0.025 (new explicit floor `VOLUME_FACTOR_FLOOR` 0.025; absent / broken values still size at 0.05), `histLookbackBars` 2880 (sim `qO` 1.145 / 223 / +16.1 % against 1920
   0.871 / 217 / -16.0 %), **Axis prev 4 only** (the 2026-11-15 measurement: better than all four on both windows; x02 already ran it). Block rounds unchanged (Auto per count, no

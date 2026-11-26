@@ -54,11 +54,9 @@
   "minStep": 10,
   "maxStopLossRatio": 1.4,
   "setSlRatios": [
-    0.1,
-    0.15,
-    0.2,
-    0.25,
+    0.5,
     0.75,
+    1.0,
     1.25
   ],
   "trailingMinStep": 6,
@@ -140,7 +138,7 @@
     "exec.batch": true
   },
   "useMaxLeverage": true,
-  "setMinStep": 3,
+  "setMinStep": 2,
   "setStepMax": 32,
   "setStepAdapt": false,
   "trailMinStep": 3,
@@ -200,7 +198,7 @@
   "setScratchEnabled": false,
   "tpRanges": {
     "micro": true,
-    "minimal": false,
+    "minimal": true,
     "short": true,
     "normal": true,
     "long": true,
@@ -398,8 +396,6 @@
   "stratTrend": false,
   "stratGeneral": false,
   "tpStepsOff": [
-    5,
-    6,
     7,
     9,
     19,
@@ -494,7 +490,7 @@
   ],
   "exitSets": false,
   "minPfAutoOrdersFactor": 0,
-  "tpStepMin": 3,
+  "tpStepMin": 2,
   "gateRecovery": true,
   "relateConfigs": [
     {
