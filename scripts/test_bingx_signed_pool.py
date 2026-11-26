@@ -131,6 +131,16 @@ class SignedPool(unittest.TestCase):
         client.path_buckets={path:SimpleNamespace(take=waiting)}
         self.assertFalse(client._take('private',path))
 
+    def test_order_and_fill_archives_reserve_independent_nonbursting_slots(self):
+        client=bx.FastBingX('fixture-key','fixture-secret',SimpleNamespace(write=lambda *a,**k:None),base='https://open-api-vst.bingx.com')
+        self.addCleanup(client.http.close)
+        paths=('/openApi/swap/v2/trade/allOrders','/openApi/swap/v2/trade/allFillOrders')
+        for path in paths:
+            with self.subTest(path=path):
+                bucket=client.path_buckets[path]
+                with patch.object(bx.time,'monotonic',return_value=bucket.ts):
+                    self.assertEqual([bucket.reserve() for _ in range(5)],[0,.5,1.0,1.5,2.0])
+
     def test_exchange_unblock_timestamp_is_honored_with_its_space(self):
         client=self.client(lambda request:self.fail('no request expected'))
         client.path_cd={};client.stats={'rl':0};client.cooldown_until=0

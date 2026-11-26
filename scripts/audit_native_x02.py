@@ -140,8 +140,12 @@ def audit(run,credentials):
         if method!='GET':raise ValueError('fill audit is read-only')
         for attempt in range(3):
             reply=native.get(path,params)
-            if not reply.get('error'):return reply
-            if attempt<2:time.sleep(.5)
+            cooldown=native.path_cd.get(path,0.0)-time.time()
+            if not reply.get('error') and (str(reply.get('code'))=='0' or cooldown<=0):
+                return reply
+            if attempt==2 or cooldown>10:
+                break
+            time.sleep(max(.5,cooldown))
         raise ValueError('venue read unavailable: '+path)
     class ReadOnly:
         pass

@@ -43,12 +43,45 @@ class NativeCash(unittest.TestCase):
                     calls.append(path)
                     if path.endswith('/order'):return {'code':109421,'msg':'order not exist'}
                     return {'code':0,'data':{'orders':[]}if path.endswith('/openOrders')else[]}
-                api=SimpleNamespace(get=get,http=SimpleNamespace(close=lambda:None))
+                api=SimpleNamespace(get=get,path_cd={},http=SimpleNamespace(close=lambda:None))
                 with patch.object(native_audit,'FastBingX',return_value=api):
                     with self.assertRaisesRegex(ValueError,'exact submitted identity'):
                         native_audit.audit(root,credentials)
                 self.assertIn('/openApi/swap/v2/trade/order',calls)
                 self.assertFalse((root/'native-fill-audit.json').exists())
+
+    def test_read_only_audit_waits_for_a_short_exchange_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = time.time()
+            report = {
+                'host': native_audit.HOST, 'connection': native_audit.CONN,
+                'createdAt': now - 120, 'activeEndedAt': now - 100,
+                'tag': 'gtest', 'symbols': ['A-USDT'], 'cleanup': {},
+            }
+            (root / 'session.json').write_text(json.dumps(report))
+            (root / 'mutation-journal.jsonl').write_text('')
+            credentials = root / 'test.json'
+            credentials.write_text(json.dumps({
+                'api_key': 'fixture', 'api_secret': 'fixture', 'base_url': native_audit.HOST,
+            }))
+            positions = '/openApi/swap/v2/user/positions'
+            orders = '/openApi/swap/v2/trade/openOrders'
+            paths, cooldowns = [], {}
+
+            def get(path, params):
+                paths.append(path)
+                if len(paths) == 1:
+                    cooldowns[path] = time.time() + 8
+                    return {'code': 100410, 'msg': 'rate limited'}
+                return {'code': 0, 'data': {'orders': []} if path == orders else []}
+
+            api = SimpleNamespace(get=get, path_cd=cooldowns, http=SimpleNamespace(close=lambda: None))
+            with patch.object(native_audit, 'FastBingX', return_value=api), patch.object(native_audit.time, 'sleep') as sleep:
+                self.assertTrue(native_audit.audit(root, credentials)['passed'])
+            self.assertEqual(paths, [positions, positions, orders])
+            sleep.assert_called_once()
+            self.assertGreater(sleep.call_args.args[0], 7.0)
 
     def test_long_partial_exits_pay_each_reported_commission_once(self):
         result=cash_group([fill('BUY',1,100,-.1),fill('SELL',.4,110,-.044),fill('SELL',.6,90,-.054)])
