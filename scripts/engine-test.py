@@ -112,8 +112,10 @@ def overlay_test() -> None:
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 0, str(x01.get("dcaMaxSteps")))
     rec("x01-set-unlim", "setMaxActive" not in x01, "the set count is never limited (setMaxActive removed)")
     rec("x02-all", x02.get("symbolsAll") is True and x02.get("symbolCap") == 100, f"cap={x02.get('symbolCap')}")
-    rec("x02-step-defaults", x02.get("setMinStep") == x02.get("tpStepMin") == 5
-        and x02.get("trailMinStep") == x02.get("trailStepMin") == 7)
+    rec("x02-step-defaults", x02.get("setMinStep") == x02.get("tpStepMin") == 2
+        and x02.get("trailMinStep") == x02.get("trailStepMin") == 3)
+    rec("x02-autopf-and-micro-floor", x02.get("minPfStepAuto") is True
+        and x02.get("minPfByRange", {}).get("micro") == 1.01)
     rec("x02-strategy-defaults", x02.get("exitSets") is False and x02.get("stratDca") is False
         and x02.get("dcaEnabled") is False and x02.get("tpRanges", {}).get("wide") is False
         and x02.get("trailRanges", {}).get("wide") is False)

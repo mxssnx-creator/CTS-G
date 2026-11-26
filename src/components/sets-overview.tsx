@@ -1,3 +1,4 @@
+import { STAGE_LABEL, STAGE_ORDER, postStageEvidence } from "@/lib/stage-grid";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Legend, ReferenceLine, Tooltip, XAxis, YAxis } from "recharts";
 import { ClientChart } from "@/components/visual-stats";
@@ -231,7 +232,41 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                   <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} / ${r.realWindowN ?? "—"} · ${formatPfWithCount(r.realPf, r.realWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} / ${r.realNegWindowN ?? "—"} · ${formatPfWithCount(r.realNegPf, r.realNegWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.mainShortN ?? "—"}`}</td>
-                  <td className="py-1.5">{r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
+                  <td className="py-1.5">{r.stageGrid ? (
+                    <details>
+                      <summary className={r.execId ? "cursor-pointer text-primary" : "cursor-pointer text-muted"}>
+                        {r.execId ? "Exec" : r.why || "Related Sets"}
+                      </summary>
+                      {STAGE_ORDER.map((name) => {
+                        const grid = r.stageGrid;
+                        const w = grid?.windows[name];
+                        const post = postStageEvidence(grid, name);
+                        const blocks = grid?.selectedBlocks?.[name];
+                        const total = grid?.selectedWindows?.[name];
+                        const totalFloor = grid?.selectedFloors?.[name]?.total;
+                        const related = [grid?.parentIds[name], grid?.setIds?.[name]].filter(Boolean).join(" → ");
+                        return w ? <div key={name} title={related} className="whitespace-nowrap">
+                          {STAGE_LABEL[name]} {w.long || "—"} / {w.short}{w.shortMode === "negative" ? "−" : "+"} / {w.last}{w.lastMode === "negative" ? "−" : "+"}
+                          {blocks && <div className="text-muted">
+                            {(["long", "short", "last"] as const).flatMap((k) => {
+                              const evidence = blocks[k];
+                              if (!evidence) return [];
+                              const pf = evidence.pf?.toFixed(2) ?? (evidence.gain > 0 && evidence.loss === 0 ? "no losses" : "—");
+                              const floor = grid?.selectedFloors?.[name]?.[k];
+                              const negative = k === "short" ? w.shortMode === "negative" : k === "last" && w.lastMode === "negative";
+                              return [`${k} PF ${pf}${floor == null ? "" : negative ? ` (loss/gain ≥ ${floor.toFixed(2)})` : ` (≥ ${floor.toFixed(2)})`}`];
+                            }).join(" · ")}
+                          </div>}
+                          {total && totalFloor != null && <div className="text-muted">
+                            Window PF {total.pf?.toFixed(2) ?? (total.gain > 0 && total.loss === 0 ? "No losses" : "—")} ≥ {totalFloor.toFixed(2)}
+                          </div>}
+                          {post && <div className="text-muted">
+                            {post.orders} paper closes · PF {post.pf?.toFixed(2) ?? (post.gain > 0 && post.loss === 0 ? "No losses" : "—")}
+                          </div>}
+                        </div> : null;
+                      })}
+                    </details>
+                  ) : r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
                 </tr>
               ))
             )}

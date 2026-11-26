@@ -84,7 +84,12 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
     entries: List[Dict[str, Any]] = []
     if not isinstance(configs, (list, tuple)):
         return {"names": [], "ranges": {}, "pause": {}, "dropped": [], "entries": []}
-    for e_i, raw in enumerate(expand_entries(list(configs)[:MAX_ENTRIES])):
+    if len(configs) > MAX_ENTRIES and any(isinstance(c,dict) and isinstance(c.get("lastNLanes"),list) and
+            any(isinstance(p,dict) and p.get("windowGrid") for p in c["lastNLanes"]) for c in configs):
+        raise ValueError("Last-N window grids exceed the indication entry capacity")
+    materialized = expand_entries(list(configs)[:MAX_ENTRIES])
+    strict_grid = any((c.get("lanePolicy") or {}).get("windowPath") for c in materialized if c.get("enabled", True))
+    for e_i, raw in enumerate(materialized):
         if not isinstance(raw, dict) or raw.get("enabled", True) is False:
             continue
         label = str(raw.get("label") or f"entry {e_i + 1}")[:60]
@@ -145,6 +150,8 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
                 if name in names:
                     continue
                 if made >= MAX_NAMES_PER_ENTRY or (len(names) >= MAX_NAMES_TOTAL and name not in names):
+                    if strict_grid:
+                        raise ValueError("Last-N window grid exceeds the indication source capacity")
                     dropped.append({"entry": label, "name": name, "reason": "over the bound"})
                     continue
                 if not known(source):

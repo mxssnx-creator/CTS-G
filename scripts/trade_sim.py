@@ -53,10 +53,37 @@ def pf(gp, gl):
     return 99.0 if gp > 0 else None
 
 
+def current_rss_mib():
+    """Resident memory now, for progress logs alongside the process high-water mark."""
+    try:
+        with open('/proc/self/statm', encoding='ascii') as stream:
+            resident_pages = int(stream.read().split()[1])
+        return resident_pages * os.sysconf('SC_PAGE_SIZE') / (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
+
 def acc_pf(vals):
     if vals and not any(vals):
         return 1.0                      # every result nets exactly zero: neutral
     return pf(sum(v for v in vals if v > 0), -sum(v for v in vals if v < 0))
+
+
+def report_sample_times(run_hours, every_s):
+    """Return report-only validation instants, retaining a final window snapshot.
+
+    Execution still walks every hour independently. Coarser report sampling is
+    useful for long replays because the stage grid does not need to be rebuilt
+    for every unchanged hour just to report multi-day diagnostics.
+    """
+    if not run_hours:
+        return []
+    interval = max(60, int(every_s))
+    start, final = int(run_hours[0]), int(run_hours[-1])
+    slots = list(range(start, final + 1, interval))
+    if not slots or slots[-1] != final:
+        slots.append(final)
+    return slots
 
 
 def apply_portfolio_weights(book, overlay, rows, axis_coord=None):
@@ -206,7 +233,7 @@ def main() -> int:
     ap.add_argument("--cache", required=True)
     ap.add_argument("--symbols", type=int, default=20)
     ap.add_argument("--jobs", type=int, default=3)
-    ap.add_argument("--gate-jobs", type=int, default=min(3, max(1, (os.cpu_count() or 2) - 1)), help="forked workers of the gate pass (slots in contiguous chunks; 1 = serial)")
+    ap.add_argument("--gate-jobs", type=int, default=min(2, max(1, (os.cpu_count() or 2) - 1)), help="forked workers of the gate pass (slots in contiguous chunks; 1 = serial)")
     ap.add_argument("--out", default="")
     ap.add_argument("--sealed", action="store_true", help="read the sealed window (finalists only, once)")
     ap.add_argument("--patch", default="", help="overlay patch: JSON object or a path to a JSON file")
@@ -227,7 +254,7 @@ def main() -> int:
                     "fingerprint, so arms that differ only in them share one replay; the tapes do not read them")
     ap.add_argument("--next", default="", help="extra next-N order windows after a validation, e.g. 15,25 (next_pf in the JSON)")
     a = ap.parse_args()
-    args_refresh = max(60, min(3600, int(a.eval_every)))
+    args_refresh = max(60, int(a.eval_every))
     if a.patch:
         try:
             patch = json.loads(a.patch if a.patch.lstrip().startswith('{') else Path(a.patch).read_text())
@@ -278,7 +305,7 @@ def main() -> int:
     tapes = sg.Tapes(book, names, times, shadow)
     print('Replay tapes ready', flush=True)
     stage_index = None
-    if a.indexed_stage:
+    if a.indexed_stage and not book.stage_grid:
         from indexed_stage_query import IndexedStages
         stage_index = IndexedStages(sg).install()
     cf = cost_as_frac(book.cost_pct)
@@ -319,11 +346,11 @@ def main() -> int:
             g["min_n"] = 1e9
     extra_n = tuple(int(x) for x in a.next.split(",") if x.strip()) if a.next else ()
     nxt_ns = (MIN_VALIDATION_N, book.gate_window) + tuple(m for m in extra_n if m not in (MIN_VALIDATION_N, book.gate_window))
-    slots = [h + k * args_refresh for h in run_hours for k in range(max(1, 3600 // args_refresh))]
+    slots = report_sample_times(run_hours, args_refresh)
     evals = []
     stage_evals = []
     auto = sg.AutoFloors(book, tapes)            # Auto floors per TP step, re-learned every hour from the orders closed before it (as the engine)
-    def gate_slots(slot_list, evals, stage_evals, progress=True):
+    def gate_slots(slot_list, evals, stage_evals, progress=True, progress_label="evaluation"):
         for now in slot_list:
             auto.apply(book, now)
             hv = collections.defaultdict(float)
@@ -332,10 +359,41 @@ def main() -> int:
                 # Effective Base PF must describe Base-passing Sets, independently
                 # of whether their later Main/Real windows already pass.
                 ok, key, n, gpf = sg.gate_base(book, tapes, st, now, coordinate=False)
+                grid_result = sg.grid_at(book, tapes, st, now, streams=False,
+                                         summary=bool(a.stage_details)) if book.stage_grid and (a.stage_details or ok) else None
                 keys = by_set_group[st.idx]
                 for k in keys:
                     groups[k]["set_evals"] += 1
-                if a.stage_details:
+                if a.stage_details and book.stage_grid:
+                    result = grid_result
+                    counts = result.counts
+                    for key in keys:
+                        groups[key]["full_base_evals"] += bool(counts[0].sample_full)
+                    for depth, (stage, lane) in enumerate(zip(sg.STAGES, counts)):
+                        if not lane.evaluated:
+                            continue
+                        for dimension, group in keys:
+                            if dimension not in ("all", "indication", "type", "tprange", "side"):
+                                continue
+                            sr = stage_rows[(dimension, group, stage)]
+                            sr["evaluated"] += lane.evaluated
+                            sr["passed"] += lane.qualified
+                            sr["samples_full"] += lane.sample_full
+                            sr["samples_insufficient"] += lane.evaluated - lane.sample_full
+                            sr["gp"] += lane.gain
+                            sr["gl"] += lane.loss
+                            sr["orders"] += lane.orders
+                            if depth < len(result.post_evidence):
+                                post = result.post_evidence[depth]
+                                sr["post_gp"] += post.gain
+                                sr["post_gl"] += post.loss
+                                sr["post_orders"] += post.count
+                            if depth == 0 and ok:
+                                base = result.validated_base
+                                sr["validated_base_gp"] += base.gain
+                                sr["validated_base_gl"] += base.loss
+                                sr["validated_base_orders"] += base.count
+                elif a.stage_details:
                     readiness = {}
                     figures = sg.window_figures(book, tapes, st, now, samples=readiness)
                     for key in keys:
@@ -364,9 +422,14 @@ def main() -> int:
                     continue
                 executable = bool(sg.gate_metrics(book, tapes, st, now)[0])
                 hv["executable"] += executable
-                tx, te, pp = tapes.window(st.idx, now, sg.evidence_s(book), book.win(st).base_long)
-                gp = sum(x - cf for x in pp if x - cf > 0)
-                gl = -sum(x - cf for x in pp if x - cf < 0)
+                if book.stage_grid:
+                    base = grid_result.counts[0]
+                    gp, gl, evidence_n = base.gain, base.loss, base.orders
+                else:
+                    _tx, _te, pp = tapes.window(st.idx, now, sg.evidence_s(book), book.win(st).base_long)
+                    gp = sum(x - cf for x in pp if x - cf > 0)
+                    gl = -sum(x - cf for x in pp if x - cf < 0)
+                    evidence_n = len(pp)
                 # A trade already open at validation was not admitted by that
                 # decision. Select the earliest later entries rather than the
                 # first closes, with stable symbol order when entries share a minute.
@@ -378,7 +441,7 @@ def main() -> int:
                     g["executable_evals"] += executable
                     g["in_gp"] += gp
                     g["in_gl"] += gl
-                    g["in_n"] += len(pp)
+                    g["in_n"] += evidence_n
                     for m, v in nxt.items():
                         g[f"n{m}_gp"] += sum(x for x in v if x > 0)
                         g[f"n{m}_gl"] += -sum(x for x in v if x < 0)
@@ -392,6 +455,7 @@ def main() -> int:
                 hv["in_gl"] += gl
                 hv["min_n"] = n if not hv.get("min_n") else min(hv["min_n"], n)
             evals.append({"t": now, "valid": int(hv["valid"]), "valid_pct": round(100.0 * hv["valid"] / len(book.by_idx), 2),
+                          "learned_set_floors": len(book.set_floor_auto),
                           "executable": int(hv["executable"]), "executable_pct": round(100.0 * hv["executable"] / len(book.by_idx), 2),
                           "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0),
                           "next": {str(m): pf(hv[f"n{m}_gp"], hv[f"n{m}_gl"]) for m in nxt_ns}})
@@ -405,10 +469,16 @@ def main() -> int:
                                     "enough_samples_pct": round(100 * sr["samples_full"] / sr["evaluated"], 3),
                                     "requested_orders": int(sr["requested_orders"]),
                                     "available_orders": int(sr["available_orders"]),
+                                    **({"post_paper": sg.se.stage_grid.Evidence(
+                                        int(sr["post_orders"]), sr["post_gp"], sr["post_gl"]).report()}
+                                       if book.stage_grid else {}),
+                                    **({"validated_base_paper": sg.se.stage_grid.Evidence(
+                                        int(sr["validated_base_orders"]), sr["validated_base_gp"], sr["validated_base_gl"]).report()}
+                                       if book.stage_grid and stage == "base" else {}),
                                     "gain": sr["gp"], "loss": sr["gl"]})
             if progress:
-                print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} Real={int(hv['executable'])}", flush=True)
-
+                print(f"{progress_label} {len(evals)}/{len(slot_list)} Base={int(hv['valid'])} "
+                      f"{'Exec' if book.stage_grid else 'Real'}={int(hv['executable'])}", flush=True)
     gate_jobs = max(1, int(a.gate_jobs))
     base_groups = {k: dict(v) for k, v in groups.items()}
     if gate_jobs > 1 and len(slots) >= 2 * gate_jobs:
@@ -420,7 +490,7 @@ def main() -> int:
             auto_c = sg.AutoFloors(book, tapes)
             nonlocal auto
             auto = auto_c
-            gate_slots(chunks[i], ev, se_, progress=False)
+            gate_slots(chunks[i], ev, se_, progress=True, progress_label=f"gate chunk {i + 1}/{len(chunks)}")
             delta = {k: {f: v - base_groups[k].get(f, 0.0) for f, v in g.items() if f != "min_n"} for k, g in groups.items()}
             mins = {k: g["min_n"] for k, g in groups.items()}
             return ev, se_, delta, mins
@@ -439,8 +509,22 @@ def main() -> int:
         print(f"evaluation {len(evals)}/{len(slots)} (gate pass in {gate_jobs} workers)", flush=True)
     else:
         gate_slots(slots, evals, stage_evals)
-    print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
+    print(f"gate pass done [{time.time() - t0:.0f}s; parent peak "
+          f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MiB; "
+          f"parent now {current_rss_mib():.0f} MiB; "
+          f"child peak {resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024:.0f} MiB]", flush=True)
     del auto  # release the completed reporting learner before execution creates its own
+
+    signal_coverage = [{"pack": pack,
+        "signals": sum(sum(int(d != 0 and shadow[s][2][pack][i] >= book.entry_conf) for i, d in enumerate(shadow[s][1][pack]) if lo <= times[s][i] + 60 < hi) for s in names),
+        "symbols_signaling": sum(any(d and shadow[s][2][pack][i] >= book.entry_conf for i, d in enumerate(shadow[s][1][pack]) if lo <= times[s][i] + 60 < hi) for s in names),
+        "shadow_closes": sum(sum(lo < times[s][xi]+60 <= hi for xi in shadow[s][3][st.idx][1]) for st in book.by_idx if st.pack == pack for s in names)}
+        for pack in book.packs]
+    # Gate calculations are complete. Tapes own the merged per-Set histories
+    # used below; execution only needs signals and the pause plan from shadow.
+    del future_tapes
+    from replay_storage import release_shadow_trades
+    release_shadow_trades(shadow)
 
     coordinator = None
     if a.axis_current:
@@ -462,8 +546,14 @@ def main() -> int:
                 _cache[key] = (v["allow"], v["vol"], v["setting"])
             return _cache[key][0], _cache[key][1]
         coordinator = None
+    def execution_progress(phase, now, valid, rows, elapsed_s=0.0):
+        clock = time.strftime('%m-%d %H:%M', time.gmtime(now))
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        work = f"recomputed={rows} rank={elapsed_s:.1f}s" if phase == "refresh" else f"rows={rows}"
+        print(f"execution {phase} {clock} UTC valid={valid} {work} "
+              f"RSS={current_rss_mib():.0f} MiB peakRSS={peak:.0f} MiB", flush=True)
     rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)), include_open=True, axis_coord=coordinator,
-                      axis_pick=axis_pick)
+                      axis_pick=axis_pick, progress=execution_progress)
     apply_portfolio_weights(book, overlay, rows, coordinator)
     if a.execution_cache:
         with open(a.execution_cache, 'wb') as stream:
@@ -507,34 +597,46 @@ def main() -> int:
                 "next": {str(m): {"pf": pf(g[f"n{m}_gp"], g[f"n{m}_gl"]), "orders": int(g[f"n{m}_n"])} for m in nxt_ns}}
 
     def hourly():
-        """Per simulated hour: the validation samples of that hour (valid share, effective PF, next-N PF) and the orders the
-        execution opened in it (count, net, PF, wins)."""
+        """Per simulated hour: latest available gate sample and hourly executed positions."""
         out_h = []
+        sample_i = -1
         for h in run_hours:
             ev = [e for e in evals if h <= e["t"] < h + 3600]
+            while sample_i + 1 < len(evals) and evals[sample_i + 1]["t"] <= h:
+                sample_i += 1
+            sample = ev[-1] if ev else (evals[sample_i] if sample_i >= 0 else None)
             tr = [r["net"] for r in trades if h <= r["t_in"] < h + 3600]
-            out_h.append({"t": h, "valid_pct": round(sum(e["valid_pct"] for e in ev) / len(ev), 2) if ev else 0.0,
-                          "executable_pct": round(sum(e["executable_pct"] for e in ev) / len(ev), 2) if ev else 0.0,
-                          "eff_pf": ev[0]["eff_pf"] if ev else None, "next": ev[0]["next"] if ev else {},
+            out_h.append({"t": h,
+                          "valid_pct": round(sum(e["valid_pct"] for e in ev) / len(ev), 2) if ev else sample["valid_pct"] if sample else None,
+                          "executable_pct": round(sum(e["executable_pct"] for e in ev) / len(ev), 2) if ev else sample["executable_pct"] if sample else None,
+                          "gate_sample_t": sample["t"] if sample else None,
+                          "gate_sample_age_hours": round((h - sample["t"]) / 3600, 3) if sample else None,
+                          "eff_pf": sample["eff_pf"] if sample else None, "next": sample["next"] if sample else {},
                           "orders": len(tr), "net_pct": round(100 * sum(tr), 3), "exec_pf": acc_pf(tr),
                           "wins": sum(1 for x in tr if x > 0)})
         return out_h
 
     out = {"window": f"last {a.last_hours} h" if a.last_hours else "sealed" if a.sealed else "development", "symbols": names, "sets": len(book.by_idx),
-           "validation_scope": "Base only; executable_pct is the separate full Base/Main/Real gate",
+           "validation_scope": "Base only; executable_pct is the full Base/Main/Real/Exec grid" if book.stage_grid else "Base only; executable_pct is the separate full Base/Main/Real gate",
+           "stage_last_n": book.stage_grid.settings() if book.stage_grid else None,
            "forward_cohort_scope": "earliest entries at or after each validation, ties by symbol; completed shadow trades only; overlapping and potentially incomplete cohorts",
            "execution_axis": "overlay settings" if a.axis_current else "off (parent control)",
            "stage_query": stage_index.provenance() if stage_index else {"implementation": "native"},
            "start_utc": lo, "end_utc": hi, "replay_fingerprint": manifest,
            'memory_storage':memory_accelerator.provenance() if memory_accelerator else {'implementation':'native unpacked reference'},
-           "data_coverage": {"common_last_open": end, "common_last_close": end+60,
+           "data_coverage": {"prehistory_hours": (lo - max(times[s][0] for s in names)) / 3600,
+                             "common_last_open": end, "common_last_close": end+60,
                              "complete_hour_end": hours[-1]+3600,
                              "partial_tail_seconds": end+60-(hours[-1]+3600)},
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
                                               "real_n": book.realst_n, "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
+           "stage_report_sample_every_seconds": args_refresh,
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
                       "scratch_bars": book.scratch_bars, "scratch_min_pct": round(book.scratch_min * 100, 3),
                       "cost_pct": book.cost_pct, "extra_indicators": list(book.ind_settings.get("extraIndicators") or [])},
+           "auto_pf": {"enabled": book.grid_auto_enabled(), "fallback_by_range": book.pf_auto_defaults,
+                       "sets_using_learned_at_last_stage_sample": len(book.set_floor_auto),
+                       "sets_using_learned_by_stage_sample": [e["learned_set_floors"] for e in evals]},
            "all": summary(("all", "all")),
            "types": [summary(k) for k in sorted(groups) if k[0] == "type"],
            "indications": [summary(k) for k in sorted(groups) if k[0] == "indication"],
@@ -548,9 +650,10 @@ def main() -> int:
            "tpranges_all": [summary(k) for k in sorted(groups) if k[0] == "tprange_all"],
            "sides": [summary(k) for k in sorted(groups) if k[0] == "side"],
            "evaluations": evals,
-           "sample_scope": "Full configured N on each Set's own earlier closes; independent of PF. Main population passes current Base PF; Real population passes Main PF. Partial-window admission can pass without a full N.",
+           "sample_scope": ("Full disjoint blocks of earlier closes per lane and parent. Stages report only lanes reached through a qualifying parent." if book.stage_grid else
+                            "Full configured N on each Set's own earlier closes; independent of PF. Main population passes current Base PF; Real population passes Main PF. Partial-window admission can pass without a full N."),
            "stage_evaluations": stage_evals,
-           "hourly_scope": "entry cohorts: eventual returns grouped by entry hour; not realized hourly results",
+           "hourly_scope": "hourly executed positions and their realized returns; gate metrics use the latest stage sample (gate_sample_t and age identify carry-forward)",
            "hourly": hourly(),
            "settled_hourly_scope": "exit bar end: h < exit <= h+1h; held marks excluded; opened includes held entries",
            "settled_hourly": settlement_hours(trades, open_at_end, run_hours),
@@ -560,20 +663,18 @@ def main() -> int:
                                "net_pct": 100 * sum(r["net"] * r.get("vol", 1.0) for r in trades),
                                "scope": "same executed parents weighted by entry volume; percent of one base notional, not account return"},
            "open_at_end": [{**{k: r[k] for k in ("t_in", "t_mark", "symbol", "set", "pack", "kind", "lane", "side", "entry", "mark")},
+                            "exec_lane_id": r.get("execLaneId") or None,
                             "mark_net_pct": round(100 * r["mark_net"], 4)} for r in open_at_end],
            "closed_and_marked_pf": acc_pf([r["net"] for r in trades] + [r["mark_net"] for r in open_at_end]),
            "exits": dict(collections.Counter(r["reason"] for r in trades)),
            "trades": [{"t_in": r["t_in"], "t_out": r["t"], "symbol": r["symbol"], "set": r["set"], "pack": r["pack"],
                        "kind": r["kind"], "reason": r["reason"], "net_pct": round(100 * r["net"], 4), "lane": r.get("lane", ""),
+                       "exec_lane_id": r.get("execLaneId") or None,
                        "step": by_id[r["set"]].step, "sl_ratio": by_id[r["set"]].sl_ratio, "trail": by_id[r["set"]].trail_key,
                        "volume_multiple": r.get("vol", 1.0),
                        "weighted_net_pct": round(100 * r["net"] * r.get("vol", 1.0), 6),
                        "tp_range": tp_range_name(by_id[r["set"]]), "side": int(r["tr"]["dir"])} for r in trades]}
-    out["signal_coverage"] = [{"pack": pack,
-        "signals": sum(sum(int(d != 0 and shadow[s][2][pack][i] >= book.entry_conf) for i, d in enumerate(shadow[s][1][pack]) if lo <= times[s][i] + 60 < hi) for s in names),
-        "symbols_signaling": sum(any(d and shadow[s][2][pack][i] >= book.entry_conf for i, d in enumerate(shadow[s][1][pack]) if lo <= times[s][i] + 60 < hi) for s in names),
-        "shadow_closes": sum(sum(lo < times[s][xi]+60 <= hi for xi in shadow[s][3][st.idx][1]) for st in book.by_idx if st.pack == pack for s in names)}
-        for pack in book.packs]
+    out["signal_coverage"] = signal_coverage
     out["runtime"] = {"elapsed_s": round(time.time() - t0, 3), "jobs": a.jobs,
                       "parent_peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
                       "max_child_peak_rss_mib": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024}

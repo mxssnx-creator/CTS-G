@@ -1,8 +1,11 @@
+export const WINDOW_GRID_FIELDS = ["baseLong","baseShort","mainLong","mainShort","negWindows","realN","realNegN"] as const;
+type WindowField = typeof WINDOW_GRID_FIELDS[number];
 /** Each profile owns a native processing lane; roles are labels, never borrowed qualification. */
 export type LastNLane = {
   id: string; role: "major" | "minor" | "independent" | "additional";
   scope?: "overall" | "symbol" | "indication" | "type" | "config";
   lastN: { baseLong?: number; baseShort?: number; mainLong?: number; mainShort?: number[]; negWindows?: number[]; realN?: number; realNegN?: number };
+  windowGrid?: Partial<Record<WindowField, number[]>>;
   minPfByStep?: Record<string, number>; minPfBySlRatio?: Record<string, number>;
   negativeFilter?: { windows: number[]; mode: "any" | "all"; maxPf: number } | null;
 };
@@ -37,6 +40,22 @@ export function lastNLanes(raw: unknown): LastNLane[] {
       }
     }
     const p: LastNLane = { id, role, scope, lastN };
+    if (item.windowGrid !== undefined) {
+      const grid = item.windowGrid;
+      if (!grid || typeof grid !== "object" || Array.isArray(grid) || Object.keys(grid).some(k => !WINDOW_GRID_FIELDS.includes(k as WindowField)))
+        throw new Error("Invalid Last-N window grid");
+      p.windowGrid = {};
+      let paths = 1;
+      for (const key of WINDOW_GRID_FIELDS) {
+        if (!(key in grid)) continue;
+        const choices = grid[key];
+        if (!Array.isArray(choices) || !choices.length || choices.some(n => !number(n, key === "baseShort" ? 0 : 1, 200, true)) ||
+            new Set(choices).size !== choices.length) throw new Error("Invalid Last-N window choices for " + key);
+        p.windowGrid[key] = [...choices].sort((a,b) => a-b);
+        paths *= choices.length;
+      }
+      if (paths > 384) throw new Error("Last-N window grid exceeds the configured pack capacity");
+    }
     if (item.negativeFilter != null) {
       const f = item.negativeFilter, mode = f.mode ?? "any", maxPf = f.maxPf ?? 1;
       if (typeof f !== "object" || Array.isArray(f) || Object.keys(f).some(k=>!["windows","mode","maxPf"].includes(k)) ||

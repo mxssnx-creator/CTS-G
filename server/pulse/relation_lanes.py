@@ -36,6 +36,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import islice
 import math
+import json
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from position_cost import MIN_PF_FLOOR, tp_range_of
@@ -134,6 +135,9 @@ def cell_of(pack: str, side: Any, kind: str, step: int, step_bucket: int, trail_
 
 def keys_of(cell: Sequence[str]) -> Dict[str, str]:
     """relation -> lane id of a cell. The ids are their own namespace ("rel:..."), never a Set id."""
+    if len(cell) == 6:
+        # Grid-backed relations belong to the complete native Set including its Last-N path.
+        return {name: "rel-set:" + json.dumps([cell[5], name], separators=(",", ":")) for name in RELATIONS}
     pack, side, kind, rng, step = cell
     head = f"rel:{pack}:{side}"
     return {"overall": f"rel:*:{side}:overall", "indication": head + ":indication", "type": f"{head}:type:{kind}", "range": f"{head}:range:{rng}",
@@ -229,10 +233,10 @@ class Accumulator:
     (the stops of one TP step's Sets mostly share their target bar), so a lane walks far fewer events than rows."""
 
     def __init__(self) -> None:
-        self.cells: Dict[Tuple[str, str, str, str, str], Dict[Tuple[Any, float, float], List[float]]] = {}
-        self.members: Dict[Tuple[str, str, str, str, str], int] = {}
+        self.cells: Dict[Tuple[str, ...], Dict[Tuple[Any, float, float], List[float]]] = {}
+        self.members: Dict[Tuple[str, ...], int] = {}
 
-    def add(self, cell: Tuple[str, str, str, str, str], rows: Iterable[Tuple[float, float, Any, float]]) -> None:
+    def add(self, cell: Tuple[str, ...], rows: Iterable[Tuple[float, float, Any, float]]) -> None:
         """rows: (exit t, entry t, symbol, net) of ONE member Set's Main-Set orders."""
         self.members[cell] = self.members.get(cell, 0) + 1
         acc = self.cells.setdefault(cell, {})
@@ -254,13 +258,24 @@ class Accumulator:
                 lane = by.setdefault(ids[relation], {"relation": relation, "role": ROLE[relation], "pack": "*" if relation == "overall" else cell[0], "side": cell[1],
                                                      "value": {"overall": "", "indication": "", "type": cell[2], "range": cell[3], "step": cell[4]}[relation],
                                                      "sets": 0, "cells": []})
+                if len(cell) == 6:
+                    lane["parentSetId"] = cell[5]
                 lane["sets"] += self.members.get(cell, 0)
                 lane["cells"].append(acc)
         out: Dict[str, Dict[str, Any]] = {}
+        exact_verdicts = {}
         for lane_id, lane in by.items():
             cells = lane.pop("cells")
             rows = ((exit_t, entry_t, (symbol, entry_t), v[0], v[1]) for acc in cells for (symbol, entry_t, exit_t), v in acc.items())
-            lane.update(lane_state(rows, cfg))
+            owner = lane.get("parentSetId")
+            if owner is None:
+                verdict = lane_state(rows, cfg)
+            else:
+                # These projections have one exact parent and use identical closed observations.
+                if owner not in exact_verdicts:
+                    exact_verdicts[owner] = lane_state(rows, cfg)
+                verdict = exact_verdicts[owner]
+            lane.update(verdict)
             out[lane_id] = lane
         return out
 

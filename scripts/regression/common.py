@@ -58,6 +58,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov = json.load(open(os.path.join(PULSE, name)))
     # Historic deterministic fixtures keep their original explicit cost. New policy has separate tests.
     ov["positionCostPct"] = .12
+    ov["stageLastN"] = False  # retain the historical stage contract for the frozen fixtures
     # fixtures judge every window at one floor (setMinPf) unless they ask for the size classes (minPfBySize), which have their own checks
     ov["minPfBySize"] = False
     ov["directionMode"] = "both"  # fixtures run the combined Sets (pinned counts, golden); the direction checks and the split golden ask for "split"

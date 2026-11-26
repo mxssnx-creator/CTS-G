@@ -1,0 +1,20 @@
+{
+  "ts": "2026-11-21T20:06:33.119057+00:00",
+  "x01": {
+    "blockEnabled": true,
+    "blockMaxStack": 6,
+    "symbolCap": 120,
+    "histTestEnabled": false,
+    "is_testnet": false,
+    "is_live_trade": true
+  },
+  "x02": {
+    "blockEnabled": true,
+    "blockMaxStack": 6,
+    "symbolCap": 150,
+    "histTestEnabled": false
+  },
+  "block_on": true,
+  "openCount": null,
+  "armed_8581": false
+}

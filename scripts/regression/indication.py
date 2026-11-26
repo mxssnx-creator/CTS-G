@@ -396,8 +396,24 @@ def every_name_gets_the_history_its_timeframe_needs():
     from indication_extra import INDICATORS, window_of
     from indication_lib import _band_k, rows_for
     import math as _m
-    bad_w = [k for k in INDICATORS if (k.endswith("_t15") or k.startswith("g_")) and window_of(k) < rows_for(15)]
-    bad_w += [k for k in INDICATORS if k.endswith("_t5") and window_of(k) < rows_for(5)]
+    # Thin variants declare their own warm-up in completed timeframe bars.
+    def required(name, tf):
+        if name.startswith("rsi_reclaim_n"):
+            period = int(name.split("_")[2][1:])
+            return 8 * period * tf
+        if name.startswith("rsi_trend_n"):
+            _, _, period, trend, _ = name.split("_")
+            return max(8 * int(period[1:]), 3 * int(trend[3:])) * tf
+        if name.startswith("psar_"):
+            return 120 * tf
+        if name.startswith("bb_reclaim_n"):
+            return (int(name.split("_")[2][1:]) + 2) * tf
+        if name.startswith("kelt_cross_n"):
+            return (4 * int(name.split("_")[2][1:]) + 1) * tf
+        return rows_for(tf)
+
+    bad_w = [k for k in INDICATORS if (k.endswith("_t15") or k.startswith("g_")) and window_of(k) < required(k, 15)]
+    bad_w += [k for k in INDICATORS if k.endswith("_t5") and window_of(k) < required(k, 5)]
     reach = all(_band_k(n) < _m.sqrt(n - 1) for n in (5, 8)) and _band_k(14) == 2.0
     flat = [[100.0, 100.0, 100.0, 100.0, 1.0]] * 1500
     raised = []

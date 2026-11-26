@@ -121,9 +121,9 @@ def main() -> int:
     by_id = {st.id: st for st in book.by_idx}
     print(f"executed {len(trades)} positions [{time.time() - t0:.0f}s]", flush=True)
 
-    # each Set's Main-Set orders over the whole data, once. With the manual floors (minPfStepAuto off) a Set's chain does not depend on the
-    # instant it is read at; with learned floors it does, so each rebuild then reads the chain at its own instant (the engine's path, slower).
-    static = not getattr(book, "pf_step_auto", False)
+    # Legacy manual-floor chains can use one precomputed tape. The grid's
+    # current Base-qualified lanes and learned floors are time-dependent.
+    static = not (getattr(book, "pf_step_auto", False) or getattr(book, "stage_grid", None))
     main_rows = {}
     if static:
         for st in book.by_idx:

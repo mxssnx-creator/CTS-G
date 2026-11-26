@@ -21,7 +21,7 @@ import math
 from array import array
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from itertools import accumulate, islice, repeat
 from operator import le, neg
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -30,6 +30,8 @@ from config_num import num
 from lane_policy import expand_entries, negative_filter_ok
 import relation_lanes
 import axis_sets
+import stage_grid
+import auto_set_pf
 from modules import trailing_enabled, range_processing, additional_processing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
@@ -88,7 +90,8 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
-from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
+from indication_extra import (FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes,
+                              known as extra_known, thin_signals, window_of)
 from risk_variants import fixed_trail, parse_trail, trail_grid, trailing_stop
 from indication_config import source_name, expand as expand_indication_configs
 import signal_packs
@@ -1159,9 +1162,13 @@ def bar_signal(
     for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
         if pk in packs:
             row[pk] = _variant_signal(hist, ind_settings.get(vkey) or list(default))
+    extra = {p: source_name(p[len(EXTRA_INDICATOR_PREFIX):]) for p in packs
+             if p.startswith(EXTRA_INDICATOR_PREFIX) and p not in imported}
+    thin = thin_signals(hist, tuple(extra.values())) if extra else {}
     for pk in packs:
-        if pk.startswith(EXTRA_INDICATOR_PREFIX) and pk not in imported:
-            row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
+        if pk in extra:
+            source = extra[pk]
+            row[pk] = thin[source] if source in thin else _variant_signal(hist, [source])
         elif pk.startswith(signal_packs.PREFIX):
             row[pk] = signal_packs.signal(bars, i, ts, pk)
     return row
@@ -1460,6 +1467,8 @@ class SetState:
     neg_win_gp: float = 0.0
     neg_win_gl: float = 0.0
     stage: Dict[str, Any] = field(default_factory=dict)             # stage_verdicts of the last evaluation
+    exec_grid: Optional[stage_grid.GridResult] = None
+    held_exec_evidence: Dict[str, Tuple[Tuple[float, float], ...]] = field(default_factory=dict)
     sample_counts: Optional[Dict[str, int]] = None  # eligible own closes at the scored clock; None means not measured
     proc_replayed: bool = False     # proc comes from a replay pass (else processed_stream derives it from the held tape)
     last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
@@ -2352,6 +2361,9 @@ def scan_forked(book: "SetBook", symbol: str, bars, base_ts: float, warmup: int,
 
 class SetBook:
     def __init__(self) -> None:
+        self.stage_grid: Optional[stage_grid.StageGrid] = None
+        self._exec_candidates: Dict[Tuple[str, str], Dict[str, SetState]] = {}
+        self._held_exec_paths: Dict[str, Dict[str, int]] = {}
         self.enabled = True
         self.lookback = LOOKBACK_DEFAULT
         self.lookback_cfg = LOOKBACK_DEFAULT
@@ -2427,6 +2439,9 @@ class SetBook:
         self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
         self.pf_step_auto_high = STEP_PF_AUTO_HIGH_DEFAULT
         self.pf_range_floor: Dict[str, float] = {}      # minPfByRange: a flat minimum PF for every Set of a TP range (absent: the per-step floor)
+        self.pf_auto_defaults: Dict[str, float] = {}
+        self._grid_auto_key = None
+        self._grid_auto_models: dict[str, auto_set_pf.RollingFloors] = {}
         self.lane_order: Tuple[str, ...] = ("pos", "neg")
         self.trail_pick: str = KIND_ORDER_DEFAULT
         self.kind_order: Tuple[Tuple[str, ...], ...] = KIND_ORDERS[KIND_ORDER_DEFAULT]
@@ -2447,7 +2462,8 @@ class SetBook:
         self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
         self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
-        self.pf_set_auto = False
+        self.pf_set_auto = True
+        self.owned_auto_packs: set[str] = set()
         self.pf_set_auto_min = 10
         self.sl_auto = False
         self.sl_auto_min = 20
@@ -2560,24 +2576,47 @@ class SetBook:
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         # A malformed policy must not partially overwrite the active grid or economic settings.
-        expand_entries(ov.get("indicationConfigs", []))
+        configs = ov.get("indicationConfigs", [])
+        checked = expand_entries(configs)
+        stage_windows = stage_grid.StageGrid.from_settings(ov.get("stageLastN"))
+        exact = any((c.get("lanePolicy") or {}).get("windowPath") for c in checked if c.get("enabled", True))
+        prepared = expand_indication_configs(configs, extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS) if exact else None
+        if prepared is not None and not ov.get("lastNDisjoint", False):
+            range_windows = last_n_by_range_of(ov.get("lastNByRange"))
+            base_ratio = max(.1,min(1.,float(num(ov, "setGateShortMaxRatio", BASE_SHORT_MAX_RATIO))))
+            raw_ratio = _alias(ov, "mainShortMaxRatio", "mainAutoMaxRatio")
+            main_ratio = max(.1,min(1.,float(MAIN_SHORT_MAX_RATIO if raw_ratio is None else raw_ratio)))
+            for template in prepared["ranges"].values():
+                policy = template.get("lanePolicy") or {}
+                path = policy.get("windowPath", {})
+                if not ("baseShort" in path or "mainShort" in path):
+                    continue
+                for step in range(template["lo"],template["hi"]+1):
+                    windows = {**range_windows.get(tp_range_of(step), {}), **policy["lastN"]}
+                    base_long = int(windows.get("baseLong", ov.get("setGateWindow") or GATE_WINDOW_DEFAULT))
+                    main_long = int(windows.get("mainLong", num(ov, "mainGateN", MAIN_GATE_N_DEFAULT)))
+                    if path.get("baseShort",0) > max(1,int(base_long*base_ratio+1e-9)) or path.get("mainShort",0) > max(1,int(main_long*main_ratio+1e-9)):
+                        raise ValueError("Last-N window choice exceeds this parent's configured short/long ratio")
         with self._lock:
             previous = getattr(self, "_evaluation_config", None)
-            self._load(ov, cts)
-            signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
+            self.stage_grid = stage_windows
+            self._load(ov, cts, prepared)
+            signature = repr((self.stage_grid, self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
                               self.min_sl_distance_pct, self.micro_min_sl_pct, self.micro_min_trail_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
                               self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol, self.pf_auto_factor,
+                              self.pf_set_auto, self.pf_set_auto_min, self.pf_step_auto_low, self.pf_step_auto_high,
+                              self.pf_auto_defaults, self.pf_range_floor,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
             self._evaluation_config = signature
             if previous is not None and signature != previous:
-                # Until a complete pass under the new rules, no old row may validate
-                # a new signal/cost/hold configuration (including chunked refreshes).
+                # No row may validate new evaluation rules before it has been
+                # replayed under the configuration just loaded.
                 self._hist_rows.clear()
                 self._hist_inputs.clear()
                 self._hist_replay_key.clear()
@@ -2585,13 +2624,26 @@ class SetBook:
                 self._hist_replay_bar_at.clear()
                 self._sig_cache.clear()
                 self._history_snapshot_active = False
+                if self.stage_grid and self.hist_keep_last_complete:
+                    # Assemble the replacement universe before scoring it. A
+                    # chunk by itself can have a different qualifying Exec path.
+                    self._lookback_pending = True
+                    self._lookback_retry_fast = True
+                    self._lookback_progress_key = None
+                    self._lookback_progress_count = 0
                 self.progress.ready = False
                 self.last_run = 0.0
+                self._exec_candidates.clear()
+                self._grid_auto_key = None
+                self._grid_auto_models = {}
+                self.set_floor_auto.clear()
                 self.relation_state, self.relation_at = {}, 0.0      # lanes of the previous rules raise nothing
                 for st in self.by_idx:
                     st.last_error = "configuration changed; replay required"
                     st.hist, st.proc, st.exe, st.neg = [], [], [], []
                     st.main_evidence = None
+                    st.exec_grid = None
+                    st.held_exec_evidence.clear()
                     st.proc_replayed = False
                     st.n = st.proc_total = st.exe_total = st.neg_total = 0
                     st.gate_n = st.main_n = st.exe_n = st.neg_n = 0
@@ -2616,16 +2668,17 @@ class SetBook:
                     st.stage = {}
                     st.deact_reason = "error"
 
-    def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
+    def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None, prepared=None) -> None:
         cts = cts or {}
         self.normal_entries = range_processing(ov)["normal"]
         self.processing_overlay = dict(ov)
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback_cfg = max(120, min(LOOKBACK_MAX, int(num(ov, "histLookbackBars", LOOKBACK_DEFAULT))))
         # Collection grows for sparse scored Sets independently of the admission gate.
+        was_automatic = self.lookback_auto
         self.lookback_auto = bool(ov.get("histLookbackAuto", True))
         self.hist_keep_last_complete = bool(ov.get("histKeepLastComplete", False))
-        if not self.lookback_auto:
+        if not self.lookback_auto and (was_automatic or not (self.stage_grid and self.hist_keep_last_complete)):
             self._lookback_pending = False
             self._lookback_retry_fast = False
             self._lookback_progress_key = None
@@ -2803,9 +2856,10 @@ class SetBook:
             extra_names = []
         extra_names = sorted({str(x) for x in extra_names if extra_known(str(x))})
         # indicationConfigs: families x ranges x timeframes x relations, each entry with its own step range, SL ratios, types and pause
-        expanded = expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
+        expanded = prepared if prepared is not None else expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
         extra_names = sorted(set(extra_names) | set(expanded["names"]))
         self.pack_ranges = {EXTRA_INDICATOR_PREFIX + n: r for n, r in expanded["ranges"].items()}
+        self.owned_auto_packs = {pack for pack, meta in self.pack_ranges.items() if meta.get("lanePolicy")}
         self.gate_window_max = max([self.gate_window_max] + [int((r.get("lanePolicy") or {}).get("lastN", {}).get("baseLong", self.gate_window)) for r in self.pack_ranges.values()])
         self._config_pause = {EXTRA_INDICATOR_PREFIX + n: int(m) for n, m in expanded["pause"].items()}
         self.config_report = {"entries": expanded["entries"], "dropped": expanded["dropped"][:200], "names": len(expanded["names"])}
@@ -3032,19 +3086,21 @@ class SetBook:
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
         self.pf_step_auto_min = int(max(1, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))     # no minimum-orders gate (owner 2026-11-04): down to 1
         # In Set scope, a Set learns from its own causal pairs and uses its own manual value if evidence is insufficient.
-        self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "step").lower() == "set"
+        self.pf_set_auto = str(ov.get("minPfStepAutoScope") or "set").lower() != "step"
         # slAutoRange (owner 2026-11-14): every TP step (and direction) learns its own SL ratio range from the orders closed before the window it judges;
         # a base / Exit Set outside it is not valid (reason "slrange"); trailing Sets have no SL ratio grid. Absent = off (the manual grid alone).
         self.sl_auto = bool(ov.get("slAutoRange", False))
         self.sl_auto_min = int(max(1, min(100000, num(ov, "slAutoMin", 20))))
         self.sl_auto_tol = max(0.0, min(0.5, float(num(ov, "slAutoTol", 5)) / 100.0))
-        self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", 10))))
+        default_set_samples = auto_set_pf.DEFAULT_MIN_ADMITTED if self.stage_grid else 10
+        self.pf_set_auto_min = int(max(1, min(100000, num(ov, "minPfSetAutoMin", default_set_samples))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         self.pf_auto_factor = max(0.0, min(3.0, float(num(ov, "minPfAutoOrdersFactor", 0.0))))   # PF vs admitted orders in the Auto choice (0 = tolerance rule)
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
         self.pf_step_auto_high = max(self.pf_step_auto_low, min(2.0, float(num(ov, "minPfStepAutoHigh", STEP_PF_AUTO_HIGH_DEFAULT))))
         self.pf_range_floor = pf_range_floors_of(ov.get("minPfByRange"))
+        self.pf_auto_defaults = pf_range_floors_of(ov.get("autoPfDefaultByRange", auto_set_pf.DEFAULT_FALLBACKS))
         self._manual_floor_cache = {}
         mode = str(ov.get("pauseMode") or "auto").lower()
         self.pause_mode = mode if mode in PAUSE_MODES else "auto"
@@ -3483,12 +3539,13 @@ class SetBook:
         extra orders in today's PF windows.
         """
         upstream = bool(getattr(self, "main_on", False) or getattr(self, "neg_on", False))
-        depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
+        depth = len(stage_grid.STAGES) if getattr(self, "stage_grid", None) else (3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1))
         manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
         automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
         hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0),
                         int(getattr(self, "trail_hold_bars", 0) or 0))
-        return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
+        training = (auto_set_pf.TRAINING_HOURS + 1) * 60 if self.grid_auto_enabled() else 0
+        return int(max(depth * self.lookback + 2 * hold_bars, training) + getattr(self, "warmup", 0))
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
         """Join bars onto the symbol's history. tail=True: rows built from live ticks (or a short exchange window), joined only
@@ -3714,7 +3771,7 @@ class SetBook:
                 st.live_neg_n += 1
             else:
                 st.live_pos_n += 1
-            if self.hist_keep_last_complete and self._lookback_pending:
+            if self.stage_grid or (self.hist_keep_last_complete and self._lookback_pending):
                 # A live close must update execution evidence, but it must not
                 # make an old paper snapshot look freshly replayed.
                 st.deact_reason = self.gate_reason(st)
@@ -3837,7 +3894,9 @@ class SetBook:
                         aborted = True
                         break                       # never restore an old-rules chunk after load invalidated it
                     self._hist_rows[symbol] = packed
-                    self._hist_inputs[symbol] = inputs
+                    if self.hold_auto:
+                        # Only Auto Hold reconstructs entries from these inputs.
+                        self._hist_inputs[symbol] = inputs
                     self._hist_replay_key[symbol] = (lookback0, gen0)
                     prev_at = self._hist_replay_at.get(symbol)
                     self._hist_replay_at[symbol] = time.time()
@@ -3902,24 +3961,63 @@ class SetBook:
                 # close stamped at the same instant as evidence.
                 decision_upper = math.nextafter(now, float("-inf"))
                 try:
+                    evaluation_config = self._evaluation_config
                     if not (stale or defer_score):
                         try:
-                            self._learn_step_floors(tape_order, cutoff)       # the per-step minimum PF, learned before the window it will judge
+                            if self.grid_auto_enabled():
+                                self._learn_grid_floors(tape_order, now)
+                            else:
+                                self._learn_step_floors(tape_order, cutoff)
                         except Exception as exc:                              # never stops the scoring: the manual floors stand
-                            self.step_floor_auto, self.step_floor_report = {}, []
+                            self.step_floor_auto, self.step_floor_report, self.set_floor_auto = {}, [], {}
+                            self._grid_auto_key, self._grid_auto_models = None, {}
                             errors.append(f"step floors: {type(exc).__name__}: {exc}"[:160])
-                        try:
-                            self._learn_step_sl_ranges(tape_order, cutoff)    # the per-step SL ratio range, learned before the window it will judge
-                        except Exception as exc:                              # never stops the scoring: the manual grid stands
-                            self.step_sl_auto, self.step_sl_report = {}, []
-                            errors.append(f"step SL ranges: {type(exc).__name__}: {exc}"[:160])
+                        if self._topo_gen != gen0 or self._evaluation_config != evaluation_config:
+                            stale = aborted = True
+                        if not stale:
+                            try:
+                                self._learn_step_sl_ranges(tape_order, cutoff)
+                            except Exception as exc:
+                                self.step_sl_auto, self.step_sl_report = {}, []
+                                errors.append(f"step SL ranges: {type(exc).__name__}: {exc}"[:160])
                     rel_acc = relation_lanes.Accumulator() if self.relation_cfg.enabled and not (stale or defer_score) else None
                     rel_failed = False
-                    for st in ([] if stale or defer_score else self.by_idx):
+                    for cursor, st in enumerate([] if stale or defer_score else self.by_idx, 1):
                         try:
+                            if self.stage_grid:
+                                self.progress.set_id = st.id
+                                self.progress.sets_done = cursor - 1
+                                self.progress.pct = 90.0 + (cursor - 1) * 10.0 / len(self.by_idx)
+                                self.progress.elapsed_ms = (time.time() - t0) * 1000
                             full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
                             full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
-                            self.set_processed(st, full, now=now, relations=rel_acc)
+                            grid_result = None
+                            if self.stage_grid:
+                                if self.grid_auto_enabled() and self.auto_holds(st):
+                                    self._learn_held_grid_floor(st, full, now)
+                                grid_history = self.grid_history(st, full)
+                                held_paths = dict(self._held_exec_paths.get(st.id, {}))
+                                # This replay runs in the history worker. Keep its CPU work
+                                # outside the lock used by order management and entry picks.
+                                self._lock.release()
+                                try:
+                                    grid_result = grid_history.evaluate(now, streams=True, limit=PROC_KEEP)
+                                    held_evidence = {}
+                                    for identity in held_paths:
+                                        path = grid_history.grid.path(st.id, identity)
+                                        evidence = grid_history.active_real(path, now, PROC_KEEP)
+                                        if evidence is not None:
+                                            held_evidence[identity] = evidence
+                                finally:
+                                    self._lock.acquire()
+                                if self._topo_gen != gen0 or self._evaluation_config != evaluation_config:
+                                    stale = aborted = True
+                                    break
+                            if grid_result is None:
+                                self.set_processed(st, full, now=now, relations=rel_acc)
+                            else:
+                                st.held_exec_evidence = held_evidence
+                                self.set_processed(st, full, now=now, relations=rel_acc, grid_result=grid_result)
                             visible = [r for r in full if r[0] >= cutoff]
                             st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window_max):]]
                             st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
@@ -3947,7 +4045,7 @@ class SetBook:
             self.progress.errors = len(errors)
             self.progress.error = "; ".join(errors[:3])[:220]
             self.progress.symbols_done = len(names) if not aborted else self.progress.symbols_done
-            self.progress.sets_done = len(self.sets)
+            self.progress.sets_done = 0 if defer_score else len(self.sets)
             if not names:
                 self.progress.phase = "waiting"
                 self.progress.ready = False
@@ -3959,7 +4057,7 @@ class SetBook:
             else:
                 self.progress.phase = "rebuilding" if defer_score else "ready"
                 self.progress.pct = 90.0 if defer_score else 100.0
-                self.progress.ready = True
+                self.progress.ready = not defer_score or self._history_snapshot_usable()
                 with self._lock:
                     # A chunk is not the whole universe. After each growth step, wait
                     # until every usable expected symbol has been replayed at that
@@ -3975,6 +4073,7 @@ class SetBook:
                         scoring_stale = True
                         self.progress.phase = "partial"
                         self.progress.pct = 90.0
+                        self.progress.ready = False
                     if self._lookback_pending:
                         key = (lookback0, gen0, tuple(sorted(expected)))
                         if key != self._lookback_progress_key:
@@ -4299,8 +4398,10 @@ class SetBook:
         if not (self.pf_by_step and self.pf_step_auto):
             self.step_floor_auto, self.step_floor_report, self.set_floor_auto = {}, [], {}
             return
-        own_by_sig: Dict[int, List[Tuple[float, float]]] = {}
-        own_of: Dict[str, int] = {}
+        own_floor: Dict[str, float] = {}
+        # Identical causal observations may reuse a calculation after tuple equality is checked.
+        # A pooled tape fingerprint alone cannot establish an individual Set's evidence.
+        own_cache: Dict[Tuple[Tuple[float, float], ...], Optional[float]] = {}
         cf = cost_as_frac(self.cost_pct)
         n_win = self.pf_step_auto_n
         until = math.nextafter(float(learn_before), float("-inf"))
@@ -4313,34 +4414,34 @@ class SetBook:
             sig = 0
             for r in rows:
                 sig = hash((sig, auto_evidence_key(r[0], r[1], r[4], float(r[0]) - float(r[5]), st.side)))
-            own_of[st.id] = sig
-            if sig in seen:
-                continue                       # a copy of a Set already read (same orders): its pairs would only be counted again
-            seen.add(sig)
+            per_set = self.auto_pf_per_set(st)
+            if sig in seen and not per_set:
+                continue
             ts = [finite(r[0]) for r in rows]
             nets = [finite(r[4]) - cf for r in rows]
             gains, losses = prefix_sums(nets)
-            out = pairs.setdefault((self.auto_step_bucket(st), st.side), [])
-            first = len(out)
+            observations = []
             for k, r in enumerate(rows):
-                e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
+                e = bisect.bisect_left(ts, ts[k] - finite(r[5]))
                 if e < n_win:
                     continue
                 gp, gl = gains[e] - gains[e - n_win], losses[e] - losses[e - n_win]
                 if gl > 0:
-                    out.append((gp / gl, nets[k]))
+                    observations.append((gp / gl, nets[k]))
                 elif gp > 0:
-                    out.append((99.0, nets[k]))
-            own_by_sig[sig] = out[first:]
-        own_floor: Dict[str, float] = {}
-        if self.pf_set_auto:
-            memo: Dict[int, Optional[float]] = {}
-            for sid, sig in own_of.items():
-                if sig not in memo:
-                    got = learn_step_floor(own_by_sig.get(sig, ()), self.pf_set_auto_min, self.pf_step_auto_tol, self.step_auto_candidates(), self.pf_auto_factor)
-                    memo[sig] = got["floor"] if got else None
-                if memo[sig] is not None:
-                    own_floor[sid] = float(memo[sig])
+                    observations.append((99.0, nets[k]))
+            if per_set and observations:
+                evidence = tuple(observations)
+                if evidence not in own_cache:
+                    got = learn_step_floor(evidence, self.pf_set_auto_min, self.pf_step_auto_tol,
+                                           self.step_auto_candidates(), self.pf_auto_factor)
+                    own_cache[evidence] = got["floor"] if got else None
+                threshold = own_cache[evidence]
+                if threshold is not None:
+                    own_floor[st.id] = float(threshold)
+            if sig not in seen:
+                seen.add(sig)
+                pairs.setdefault((self.auto_step_bucket(st), st.side), []).extend(observations)
         self.set_floor_auto = own_floor
         learned: Dict[Tuple[int, int], float] = {}
         report: List[Dict[str, Any]] = []
@@ -4363,6 +4464,72 @@ class SetBook:
                     learned[(bucket, side)] = floor
                 report.append(row)
         self.step_floor_auto, self.step_floor_report = learned, report
+
+    def grid_auto_enabled(self) -> bool:
+        return bool(getattr(self, "stage_grid", None) and self.pf_by_step and self.pf_step_auto)
+
+    def _learn_grid_floors(self, tape_order: Sequence[str], now: float) -> None:
+        """Fit independent Set floors from the two causal folds ending at the last full hour."""
+        _, upper = auto_set_pf.training_window(now)
+        # The first chunk across an hour can still lack earlier closes on
+        # some symbols. Refit when that training prefix catches up, then
+        # ignore bars whose closes are at or after the hourly cutoff.
+        last_training_open = upper - 2 * BAR_S
+        training_sources = []
+        for symbol in tape_order:
+            bar_open = self._hist_replay_bar_at.get(symbol)
+            prefix = id(self._hist_rows[symbol]) if bar_open is None else min(bar_open, last_training_open)
+            training_sources.append((symbol, prefix))
+        key = (upper, tuple(training_sources), self._evaluation_config)
+        if key == self._grid_auto_key:
+            return
+        sources = tuple(self._hist_rows[symbol] for symbol in tape_order)
+        sets = [(st.id, self.grid_auto_fallback(st)[0]) for st in self.by_idx if not self.auto_holds(st)]
+        previous, minimum = self.pf_step_auto_n, self.pf_set_auto_min
+        tolerance, orders_factor, candidates = self.pf_step_auto_tol, self.pf_auto_factor, self.step_auto_candidates()
+        cost = cost_as_frac(self.cost_pct)
+        earliest = upper - self.history_bars() * BAR_S
+        own = {}
+        models = {}
+        # Per-symbol replay outputs are replaced as units. Reading these references
+        # outside the lock keeps the order manager running during an hourly refit.
+        self._lock.release()
+        try:
+            for sid, fallback in sets:
+                rows = sorted((row for source in sources for row in source.get(sid, ()) if earliest <= row[0] < upper), key=_row_t)
+                if len(rows) <= previous:
+                    continue
+                close = [row[0] for row in rows]
+                entry = [row[0] - row[5] for row in rows]
+                nets = [row[4] - cost for row in rows]
+                model = auto_set_pf.RollingFloors(close, entry, nets, previous, minimum, fallback,
+                                                 candidates, tolerance, orders_factor)
+                models[sid] = model
+                floor = model.learned(upper)
+                if floor is not None:
+                    own[sid] = floor
+        finally:
+            self._lock.acquire()
+        if self._evaluation_config == key[2]:
+            self.set_floor_auto, self.step_floor_auto, self.step_floor_report = own, {}, []
+            self._grid_auto_models = models
+            self._grid_auto_key = key
+
+    def _learn_held_grid_floor(self, st: SetState, rows: Sequence[tuple], now: float) -> None:
+        """Train on the Set's causal Auto Hold replay, matching the actual stage input."""
+        if st.id in self._grid_auto_models:
+            return
+        _, upper = auto_set_pf.training_window(now)
+        cost = cost_as_frac(self.cost_pct)
+        closed = [row for row in rows if row[0] < upper]
+        model = auto_set_pf.RollingFloors([r[0] for r in closed], [r[0] - r[5] for r in closed],
+                                         [r[4] - cost for r in closed], self.pf_step_auto_n,
+                                         self.pf_set_auto_min, self.grid_auto_fallback(st)[0],
+                                         self.step_auto_candidates(), self.pf_step_auto_tol, self.pf_auto_factor)
+        self._grid_auto_models[st.id] = model
+        learned = model.learned(upper)
+        if learned is not None:
+            self.set_floor_auto[st.id] = learned
 
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
         return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
@@ -4428,6 +4595,10 @@ class SetBook:
             return int(round(float(st.trail_arm) / TP_UNIT_PCT))
         return int(st.step)
 
+    def auto_pf_per_set(self, st: "SetState") -> bool:
+        """An explicit Last-N profile owns its floor even on a desk with pooled ordinary Sets."""
+        return bool(self.stage_grid) or self.pf_set_auto or st.pack in self.owned_auto_packs
+
     def auto_step_bucket(self, st: "SetState") -> int:
         """The shared Auto table ends at 3.5%; wider targets use its final bucket.
 
@@ -4478,23 +4649,38 @@ class SetBook:
         Auto off: the configuration's own manual floor, else 1 + TP% x ratio. A learned floor is capped by minPfStepAutoHigh, as the manual table is."""
         high = self.pf_step_auto_high
         auto = self.pf_by_step and self.pf_step_auto
-        if auto and self.pf_set_auto:
+        per_set = self.auto_pf_per_set(st)
+        if auto and per_set:
             own = self.set_floor_auto.get(st.id)
             if own is not None:
                 return min(float(own), high), "auto-set"
+            if self.stage_grid:
+                return self.grid_auto_fallback(st)
         mine = self.own_manual_floor(st)
         if mine is not None:
             return mine
-        if auto and not self.pf_set_auto:
+        if auto and not per_set:
             learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
                 return min(float(learned), high), "auto-step"
+        return self.manual_step_floor_for(st), "manual-step"
+
+    def grid_auto_fallback(self, st: "SetState") -> Tuple[float, str]:
+        mine = self.own_manual_floor(st)
+        if mine:
+            return mine
+        value = self.pf_auto_defaults.get(tp_range_of(self.step_bucket(st)))
+        if value is not None:
+            return min(self.pf_step_auto_high, max(self.pf_step_auto_low, value)), "auto-range-default"
+        return self.manual_step_floor_for(st), "manual-step"
+
+    def manual_step_floor_for(self, st: "SetState") -> float:
         bucket = self.step_bucket(st)
         key = (bucket, self.pf_step_ratio)          # a pure function of the step and the ratio, asked for several times per Set by every verdict and snapshot
         got = self._manual_floor_cache.get(key)
         if got is None:
             got = self._manual_floor_cache[key] = manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
-        return min(got, high), "manual-step"
+        return min(got, self.pf_step_auto_high)
 
     def step_floor(self, st: "SetState") -> float:
         """The one minimum PF of a Set under minPfByStep (floor_of without its source)."""
@@ -4504,7 +4690,7 @@ class SetBook:
         """The minimum PF a window of n orders of this pack asks. With minPfByStep (default), with a configuration of its own floor (Signals, lanePolicy) or
         with a learned own floor, a Set asks floor_of in every window and stage; else its size class when minPfBySize is on, else the pack's floor."""
         if st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None
-                               or (self.pf_set_auto and st.id in self.set_floor_auto)):
+                               or (self.auto_pf_per_set(st) and st.id in self.set_floor_auto)):
             return self.floor_of(st)[0]
         if is_signal_pack(pack):
             return self.signal_min_pf
@@ -4544,7 +4730,7 @@ class SetBook:
     def stage_params(self, pack: str, st: Optional["SetState"] = None) -> StageParams:
         """The chain's rules for a pack and, with minPfByStep, for the Set's TP step (its one floor for every window and stage)."""
         policy = (self.pack_ranges.get(pack) or {}).get("lanePolicy") or {}
-        by_step = bool(st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None or (self.pf_set_auto and st.id in self.set_floor_auto)))
+        by_step = bool(st is not None and (self.pf_by_step or self.own_manual_floor(st) is not None or (self.auto_pf_per_set(st) and st.id in self.set_floor_auto)))
         step_floor = self.floor_for(0, pack, st) if by_step else 0.0
         w = self.win(st)
         return StageParams(base_long=w.base_long, base_short=w.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
@@ -4591,11 +4777,90 @@ class SetBook:
     def _processed_of(self, st: SetState, full: Sequence[tuple]) -> List[Tuple[float, float]]:
         return self._chain_of(st, full)["main"]
 
+    def grid_history(self, st: SetState, rows: Sequence[tuple] = (), *,
+                     closes: Sequence[float] = (), entries: Sequence[float] = (),
+                     nets: Sequence[float] = ()) -> stage_grid.StageHistory:
+        params = self.stage_params(st.pack, st)
+        if rows:
+            cf = cost_as_frac(self.cost_pct)
+            closes = [finite(row[0]) for row in rows]
+            entries = [t - finite(row[5]) for t, row in zip(closes, rows)]
+            nets = [finite(row[4]) - cf for row in rows]
+        risk = None
+        if self.stop_cap_exceeded(st):
+            def risk(*_args):
+                return False
+        elif params.consistency > 0 or params.max_dd_s <= params.lookback_s:
+            def risk(times, values, gains, losses, decision, end, start):
+                return _base_tail_ok(times, values, gains, losses, decision, end, start,
+                                     params.max_dd_s, params.consistency)
+        main_filter = (lambda values: negative_filter_ok(values, params.negative_filter)) if params.negative_filter else None
+        need = max(params.negative_filter["windows"]) if params.negative_filter else 0
+        auto = (stage_grid.WindowAuto(self.grid_auto_fallback(st)[0], self.pf_set_auto_min,
+                                     tuple(self.step_auto_candidates()), self.pf_step_auto_tol, self.pf_auto_factor)
+                if self.grid_auto_enabled() else None)
+        return stage_grid.StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
+                                       params.floor_for, risk, main_filter, need, window_auto=auto)
+
+    def exec_lane_id(self, st: SetState) -> str:
+        result = st.exec_grid
+        return stage_grid.lane_id(st.id, result.path) if self.stage_grid and result and result.ready else ""
+
+    def register_exec_position(self, set_id: str, identity: str, change: int) -> None:
+        if not set_id or not identity:
+            return
+        with self._lock:
+            counts = self._held_exec_paths.setdefault(set_id, {})
+            size = counts.get(identity, 0) + change
+            if size > 0:
+                counts[identity] = size
+            else:
+                counts.pop(identity, None)
+                if not counts:
+                    self._held_exec_paths.pop(set_id, None)
+
+    def held_exec_stream(self, st: SetState, identity: str) -> Optional[Sequence[Tuple[float, float]]]:
+        with self._lock:
+            if self.base_validation_reason(st):
+                return None
+            if identity == self.exec_lane_id(st):
+                return st.exe
+            return st.held_exec_evidence.get(identity)
+
     def set_processed(self, st: SetState, full: Sequence[tuple], now: Optional[float] = None,
-                      relations: Optional["relation_lanes.Accumulator"] = None) -> None:
+                      relations: Optional["relation_lanes.Accumulator"] = None,
+                      grid_result: Optional[stage_grid.GridResult] = None) -> None:
         """The Set's chain in every replay pass: its Main Set (orders opened while Base passed), Real Set (opened while Main passed,
         judged on the Main Set) and Real Negative Set (opened while the Main Set's recent average was negative), and its Main short window.
         Every stage after Base reads these Sets, never the raw tape."""
+        if self.stage_grid:
+            if grid_result is None:
+                decision = now if now is not None else math.nextafter(full[-1][0], math.inf) if full else 0.0
+                grid_result = self.grid_history(st, full).evaluate(decision, streams=True, limit=PROC_KEEP)
+            # Keep the published decision and its figures. Main and Real
+            # already retain the orders they need below.
+            st.exec_grid = replace(grid_result, streams=(), row_ids=(), validated_base_ids=(),
+                                   stream_sizes=tuple(map(len, grid_result.streams)))
+            candidates = self._exec_candidates.setdefault((st.pack, st.kind), {})
+            if grid_result.ready:
+                candidates[st.id] = st
+            else:
+                candidates.pop(st.id, None)
+            streams = grid_result.streams
+            _, main, real = (streams + ((), (), ()))[:3]
+            st.proc = [(row.close, row.net) for row in main]
+            st.exe = [(row.close, row.net) for row in real]
+            st.neg, st.neg_total, st.neg_ent = [], 0, None
+            st.proc_total, st.exe_total = len(st.proc), len(st.exe)
+            st.exe_ent = array("d", (row.entry for row in real)) if self.axis_sets.enabled else None
+            st.main_evidence, st.main_short_win, st.proc_replayed = None, 0, True
+            if relations is not None and self.sl_auto_allows(st):
+                cf = cost_as_frac(self.cost_pct)
+                validated = (full[i] for i in grid_result.validated_base_ids)
+                relations.add(self.relation_cell(st), [(finite(r[0]), finite(r[0]) - finite(r[5]), r[1], finite(r[4]) - cf)
+                                                      for r in validated])
+            return
+        st.exec_grid = None
         ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on, now=now, relation_rows=relations is not None)
         if relations is not None:
             relations.add(self.relation_cell(st), ch["main_rows"])
@@ -4621,6 +4886,11 @@ class SetBook:
             before = bool(getattr(st, "score_before", False)) if now is None else False
         if before and anchor > 0:
             upper = math.nextafter(upper, float("-inf"))
+        if self.stage_grid:
+            coords = st.exec_grid.path if st.exec_grid else ()
+            return ([v for t, v in st.proc if cutoff <= t <= upper],
+                    [v for t, v in st.exe if cutoff <= t <= upper],
+                    [], coords[1].short if len(coords) > 1 else 0)
         if getattr(st, "proc_replayed", False):
             m, r, q, short_n = list(st.proc or []), list(st.exe or []), list(getattr(st, "neg", None) or []), int(st.main_short_win or self.win(st).main_n)
             evidence = st.main_evidence
@@ -4695,6 +4965,8 @@ class SetBook:
                 "sampleFull": enough, "proven": enough, "allow": not enough or pf + 1e-9 >= floor}
 
     def _execution_lanes(self, st: SetState) -> List[str]:
+        if self.stage_grid:
+            return ["pos"] if st.exec_grid and st.exec_grid.ready else []
         v = st.stage or {}
         plain = not (self.main_on or self.neg_on or self.realst_on)
         return [lane for lane, ready in (("pos", plain or v.get("pos")), ("neg", v.get("negl")))
@@ -4724,6 +4996,9 @@ class SetBook:
         st.score_at = anchor
         st.score_before = before
         tape = self._tape_at(st, anchor, before=before)              # strictly earlier at a decision clock
+        if self.stage_grid and not st.proc_replayed:
+            self.set_processed(st, [tuple(row.get(k) for k in _ROW_KEYS) for row in tape],
+                               now=anchor if before else None)
         cf = cost_as_frac(self.cost_pct)
         for i, row in enumerate(tape):
             try:
@@ -4834,6 +5109,16 @@ class SetBook:
                            and not (self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf))
         st.base_short_ok = (bool(w.base_short) and st.base_short_n >= (w.base_short if self.stage_full else 1)
                             and ((sum(sw)<0) if not self.base_short_positive else st.base_short_pf + 1e-9 >= self.floor_for(w.base_short, st.pack, st)))
+        if self.stage_grid and st.exec_grid and st.exec_grid.selected_evidence:
+            base, *derived = st.exec_grid.selected_evidence
+            st.gate_n, st.gate_gp, st.gate_gl = base
+            st.gate_pf = round(pf_of(st.gate_gp, st.gate_gl), 4)
+            if derived:
+                st.main_n, st.main_gp, st.main_gl = derived[0]
+                st.main_pf = round(pf_of(st.main_gp, st.main_gl), 4)
+            if len(derived) >= 2:
+                st.exe_n, st.exe_gp, st.exe_gl = derived[1]
+                st.exe_pf = round(pf_of(st.exe_gp, st.exe_gl), 4)
         st.source_n = len(tape)
         # one rule, recomputed on every evaluation: no sticky flags, no live-only deactivation
         st.active = not st.locked
@@ -4894,6 +5179,13 @@ class SetBook:
                 return "stale"
         if not self.sl_auto_allows(st):
             return "slrange"         # the Set's SL ratio is outside its TP step's learned range (slAutoRange)
+        if self.stage_grid:
+            if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_limit():
+                return "stale"
+            counts = st.exec_grid.counts if st.exec_grid else ()
+            if not counts or not counts[0].sample_full:
+                return "n<min"
+            return "" if counts[0].qualified else "pf<min"
         w = self.win(st)
         if st.gate_n < self.base_need(st):
             return "n<min"
@@ -4914,6 +5206,8 @@ class SetBook:
         reason = self.base_validation_reason(st)
         if reason:
             return reason
+        if self.stage_grid:
+            return self.grid_gate_reason(st)
         v = getattr(st, "stage", None) or {}
         positive = self._main_pf_pass(st) and (bool(v.get("real")) if self.realst_on else True)
         if (self.main_on or self.neg_on or self.realst_on) and not (positive or v.get("negl")):
@@ -4933,16 +5227,21 @@ class SetBook:
         step = int(round(st.trail_arm / TP_UNIT_PCT)) if st.kind == "trail" else st.step
         return tp_range_of(step)
 
+    def grid_gate_reason(self, st: SetState) -> str:
+        for stage_name, counts in zip(stage_grid.STAGES[1:], st.exec_grid.counts[1:]):
+            if not counts.qualified:
+                return stage_name if counts.sample_full else stage_name + "-samples"
+        return ""
+
     def gate_reason(self, st: SetState) -> str:
         """Entry readiness: PF/risk validation plus the Set's own minimal coordination."""
-        policy = range_processing(getattr(self, "processing_overlay", {}), self.processing_range(st))
-        if st.kind == "trail" and not policy["trailing"]:
+        if not self.processing_allows(st):
             return "type-disabled"
-        if st.kind in ("base", "trail") and not policy["normal"] and not additional_processing_enabled(getattr(self, "processing_overlay", {})):
-            return "type-disabled"  # calculation remains available to independently enabled adjustments
         reason = self.base_validation_reason(st)
         if reason:
             return reason
+        if self.stage_grid:
+            return self.grid_gate_reason(st)
         if self.base_min_n and not st.base_min_ok:
             return "minimal"         # the Base minimal window (setGateMinN): the newest results are not all positive / negative as asked
         v = getattr(st, "stage", None) or {}
@@ -4958,6 +5257,14 @@ class SetBook:
         if not self._execution_lanes(st):
             return "execution"       # actual fills fail their own window; never contaminate paper PF
         return ""
+
+    def processing_allows(self, st: SetState) -> bool:
+        overlay = getattr(self, "processing_overlay", {})
+        policy = range_processing(overlay, self.processing_range(st))
+        if st.kind == "trail" and not policy["trailing"]:
+            return False
+        # Keep parent evidence available to independently enabled adjustments.
+        return st.kind not in ("base", "trail") or policy["normal"] or additional_processing_enabled(overlay)
 
     def state_of(self, st: SetState) -> Tuple[str, str]:
         """One state: ready, waiting for coordination, invalid, locked or error."""
@@ -5101,10 +5408,19 @@ class SetBook:
         positive lane, the Real Negative Set on the negative one: its PF over its orders, the halves, the count, its recent R -- because that is the Set that
         was validated and executes, not the raw Base tape (which holds every order, the ones the stages rejected too). Without stages, or with rankByLane off,
         the Base tape's rank_key."""
+        if self.stage_grid and st.exec_grid and st.exec_grid.ready:
+            return self.exec_rank_key(st, st.exec_grid)
         if not (self.rank_by_lane and (self.main_on or self.neg_on or self.realst_on)):
             return self.rank_key(st)
         w_ = self.win(st)
         return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(w_.real_neg_n if lane == "neg" else w_.real_n, st.pack, st), st.max_dd_s)
+
+    @staticmethod
+    def exec_rank_key(st: SetState, result: stage_grid.GridResult) -> Tuple[float, int, int]:
+        # Equal evidence is common when two exit geometries settled the same
+        # orders. Use configuration order even after a Set loses and regains
+        # eligibility in the live candidate index.
+        return (*result.rank, -st.idx)
 
     def _of_pack_kind(self, pack: str, kind: str) -> List[SetState]:
         """The Sets of one pack and type in by_idx order, from an index rebuilt when the Set list changes. Found live on x02 (16,844 Sets, 2026-11-15):
@@ -5119,7 +5435,14 @@ class SetBook:
             idx = self._pk_index = (key, table)
         return idx[1].get((pack, kind), [])
 
+    def _eligible_exec(self, pack: str, kind: str, side: int):
+        candidates = self._exec_candidates.get((pack, kind), {})
+        return (st for st in candidates.values() if self.sets.get(st.id) is st
+                and (not side or st.side in (0, side)) and self.is_eligible(st))
+
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
+        if self.stage_grid:
+            return sorted(self._eligible_exec(pack, kind, side), key=self.lane_rank_key, reverse=True)
         rows = [s for s in self._of_pack_kind(pack, kind) if (not side or s.side in (0, side)) and self.is_eligible(s)]
         rows.sort(key=self.rank_key, reverse=True)
         return rows
@@ -5308,6 +5631,13 @@ class SetBook:
         """PF-validated stage populations; coordination readiness is counted separately."""
         with self._lock:
             out = {"base": 0, "main": 0, "negative": 0, "real": 0, "realNeg": 0}
+            if self.stage_grid:
+                out["exec"] = 0
+                for st in self.by_idx:
+                    if not self.base_validation_reason(st):
+                        for name, counts in zip(stage_grid.STAGES, st.exec_grid.counts):
+                            out[name] += int(counts.qualified > 0)
+                return out
             for st in self.by_idx:
                 if self.base_validation_reason(st):
                     continue
@@ -5324,11 +5654,15 @@ class SetBook:
         """The Set passes the Main stage: every Main window on its own (long, short, minimal) holds on its Main Set; a stage that is off passes."""
         if not self.main_on:
             return True
+        if self.stage_grid:
+            return bool(st.exec_grid and st.exec_grid.counts[1].qualified)
         v = st.stage or {}
         return bool(v.get("main") and (v.get("short") or not self.short_on) and (v.get("minimal", True) or not self.main_min_n))
 
     def _main_pf_pass(self, st: SetState) -> bool:
         """Main long and short PF gates, independently of minimal coordination."""
+        if self.stage_grid:
+            return bool(st.exec_grid and st.exec_grid.counts[1].qualified)
         if not self.main_on:
             return True
         v = st.stage or {}
@@ -5338,6 +5672,8 @@ class SetBook:
         """PF-validated lane, which may still be waiting for minimal coordination."""
         if self.validation_reason(st):
             return ""
+        if self.stage_grid:
+            return "pos"
         if not (self.main_on or self.neg_on or self.realst_on):
             return "pos"
         v = st.stage or {}
@@ -5366,9 +5702,11 @@ class SetBook:
         lanes = self._execution_lanes(st)
         return next((lane for lane in self.lane_order if lane in lanes and lane in allowed), "")
 
-    def relation_cell(self, st: SetState) -> Tuple[str, str, str, str, str]:
+    def relation_cell(self, st: SetState) -> Tuple[str, ...]:
         """The Set's relation cell (indication, direction, type, TP range, step): every relation lane it belongs to is a projection of it."""
-        return relation_lanes.cell_of(st.pack, st.side, st.kind, st.step, self.step_bucket(st), st.trail_arm)
+        cell = relation_lanes.cell_of(st.pack, st.side, st.kind, st.step, self.step_bucket(st), st.trail_arm)
+        policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
+        return (*cell, st.id) if policy.get("windowPath") else cell
 
     def relation_mult(self, st: Optional[SetState], lane: str = "pos") -> Tuple[float, List[str]]:
         """(volume multiple, the relations behind it) for an entry under this Set and lane: 1 + the ratios of the Set's relation lanes that pass now, at most
@@ -5424,6 +5762,19 @@ class SetBook:
         # one lock acquisition: a Set cannot change between the lookups
         # the positive lane (Base -> Main -> Real) first, then the Real Negative lane; within a lane by rank_key
         with self._lock:
+            if self.stage_grid:
+                if allowed_lanes is not None and "pos" not in allowed_lanes:
+                    return None
+                for kinds in self.kind_order_for(pack):
+                    candidates = (st for kind in kinds for st in self._eligible_exec(pack, kind, side))
+                    if predicate is None:
+                        chosen = max(candidates, key=self.lane_rank_key, default=None)
+                    else:
+                        chosen = next((st for st in sorted(candidates, key=self.lane_rank_key, reverse=True)
+                                       if predicate(st)), None)
+                    if chosen is not None:
+                        return chosen
+                return None
             allowed = {"pos", "neg"} if allowed_lanes is None else set(allowed_lanes)
             fixed = [x for x in (self._pick(pack, "base", side), self._pick(pack, "exit", side)) if x is not None]
             if not fixed and not (self.main_on or self.neg_on or self.realst_on):
@@ -5767,6 +6118,27 @@ class SetBook:
         finally:
             self.pf_history = saved
 
+    def stage_grid_report(self) -> Optional[Dict[str, Any]]:
+        if not self.stage_grid:
+            return None
+        totals = [stage_grid.StageCount() for _ in stage_grid.STAGES]
+        post = [stage_grid.Evidence() for _ in stage_grid.STAGES]
+        validated_base = stage_grid.Evidence()
+        for st in self.by_idx:
+            if st.exec_grid is None or st.last_error:
+                continue
+            for total, counts in zip(totals, st.exec_grid.counts):
+                total.add(counts)
+            for i, evidence in enumerate(st.exec_grid.post_evidence):
+                post[i] += evidence
+            if self.sl_auto_allows(st):
+                validated_base += st.exec_grid.validated_base
+        return {"config": self.stage_grid.settings(), "baseSets": len(self.by_idx),
+                "validatedBase": validated_base.report(),
+                "postStages": {name: evidence.report() for name, evidence in zip(stage_grid.STAGES, post)},
+                "stages": {name: total.report(capacity * len(self.by_idx))
+                           for name, total, capacity in zip(stage_grid.STAGES, totals, self.stage_grid.capacities())}}
+
     def _snapshot(self) -> Dict[str, Any]:
         rows = []
         for st in sorted(self.sets.values(), key=lambda s: (not self.is_eligible(s), -s.gate_pf, s.max_dd_s)):
@@ -5803,6 +6175,8 @@ class SetBook:
                     # the Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set
                     # (opened while Base and Main passed)
                     "mainId": st.id + MAIN_SUFFIX,
+                **({"execId": self.exec_lane_id(st),
+                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.path else {}),
                     "mainN": int(st.proc_total),
                     "mainPf": round(st.main_pf, 4),
                     "mainLastN": st.main_n,
@@ -5892,6 +6266,8 @@ class SetBook:
                 # while every gate passed), each with its orders and PF
                 "sd": st.side,
                 "mainId": st.id + MAIN_SUFFIX,
+                **({"execId": self.exec_lane_id(st),
+                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.path else {}),
                 "mainN": int(st.proc_total),
                 "mainWindowN": int(st.main_n),
                 "mainPf": round(st.main_pf, 4),
@@ -5924,9 +6300,10 @@ class SetBook:
             "stageContextBars": self.history_bars(),
             "normalEntriesEnabled": self.normal_entries,
             "portedSources": __import__("ported_indications").status() if _ported_pack_sources(self.packs) else {},
-            "lastNMode": "independent-configured-profiles" if any(r.get("lanePolicy") for r in self.pack_ranges.values()) else "adaptive-candidate-selection",
-            "independentLastNLanes": any(r.get("lanePolicy") for r in self.pack_ranges.values()),
-            "independentLastNSetCount": sum(bool(self.pack_ranges.get(st.pack, {}).get("lanePolicy")) for st in self.by_idx),
+            "stageGrid": self.stage_grid_report(),
+            "lastNMode": "independent-stage-grid" if self.stage_grid else "independent-configured-profiles" if any(r.get("lanePolicy") for r in self.pack_ranges.values()) else "adaptive-candidate-selection",
+            "independentLastNLanes": bool(self.stage_grid) or any(r.get("lanePolicy") for r in self.pack_ranges.values()),
+            "independentLastNSetCount": len(self.by_idx) if self.stage_grid else sum(bool(self.pack_ranges.get(st.pack, {}).get("lanePolicy")) for st in self.by_idx),
             "symbolBoundSetCount": sum(bool(self.pack_ranges.get(st.pack, {}).get("symbol")) for st in self.by_idx),
             "stageContextFullSymbols": sum(len(bars) >= self.history_bars() for bars in self.bars.values()),
             "stageContextShortSymbols": sum(len(bars) < self.history_bars() for bars in self.bars.values()),
@@ -5953,8 +6330,11 @@ class SetBook:
             "signalConfigs": dict(getattr(self, "signal_report", {}) or {}),
             "slRanges": {"auto": bool(getattr(self, "sl_auto", False)), "minOrders": int(getattr(self, "sl_auto_min", 20)),
                          "tolPct": round(100 * float(getattr(self, "sl_auto_tol", 0.05)), 2), "steps": list(getattr(self, "step_sl_report", []) or [])[:200]},
-            "setFloors": {"scope": "set" if getattr(self, "pf_set_auto", False) else "step", "learned": len(getattr(self, "set_floor_auto", {}) or {}),
-                          "defaults": max(0, len(self.by_idx) - len(getattr(self, "set_floor_auto", {}) or {})) if getattr(self, "pf_set_auto", False) else len(self.by_idx),
+            "setFloors": {"scope": "set" if self.stage_grid or getattr(self, "pf_set_auto", False) else "step", "learned": len(getattr(self, "set_floor_auto", {}) or {}),
+                          "defaults": max(0, len(self.by_idx) - len(self.set_floor_auto)),
+                          "trainingHours": auto_set_pf.TRAINING_HOURS if self.grid_auto_enabled() else None,
+                          "fallbackByRange": self.pf_auto_defaults,
+                          "independentProfilePacks": len(self.owned_auto_packs),
                           "minAdmitted": int(getattr(self, "pf_set_auto_min", 10))},
             "coverage": cover,
             "index": index,

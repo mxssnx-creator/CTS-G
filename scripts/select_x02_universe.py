@@ -18,7 +18,7 @@ sys.path.insert(0,str(ROOT/'server/pulse'))
 from bingx_fast import FastBingX,ErrorLog
 from set_engine import SetBook
 from pulse_trader import Pulse
-from x02_native_session import HOST,CONN,atomic_json,frozen_overlay,seed_history
+from x02_native_session import valid_history_bar, HOST,CONN,atomic_json,frozen_overlay,seed_history
 
 
 def ordinary_crypto_contract(row):
@@ -34,8 +34,9 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--exclude',nargs='+',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
-    ap.add_argument('--symbol-count',type=int,default=50,choices=range(1,101))
+    ap.add_argument('--symbol-count',type=int,default=50,choices=range(1,201))
     ap.add_argument('--overlay',type=Path,default=ROOT/'server/pulse/overlay-bingx-x02.json')
+    ap.add_argument('--history-hours',type=int,choices=range(1,73))
     ap.add_argument('--seed',type=Path,help='reuse recent, validated VST candles without re-downloading them')
     args=ap.parse_args()
     if args.out.exists():ap.error('choose a new market snapshot directory')
@@ -61,7 +62,7 @@ def main():
                        and row['symbol']not in excluded),key=lambda s:(-volume(s),s))
     count=args.symbol_count
     if len(candidates)<count:raise RuntimeError('fewer disjoint active contracts than requested')
-    raw=json.loads(args.overlay.read_text());book=SetBook();book.load(frozen_overlay(raw,candidates[:count],symbol_count=count))
+    raw=json.loads(args.overlay.read_text());book=SetBook();book.load(frozen_overlay(raw,candidates[:count],history_hours=args.history_hours,symbol_count=count))
     if args.seed:seed_history(book,args.seed,candidates,time.time())
     seeded=frozenset(book.bars)
     target=book.history_bars()+1
@@ -91,6 +92,7 @@ def main():
             clocks=closed[-len(bars):]
             if any(b-a!=60000 for a,b in zip(clocks,clocks[1:])):return symbol,None,'minute gap'
             if not book.usable(symbol):return symbol,None,book.bar_quality(symbol)
+            if not all(map(valid_history_bar, bars)):return symbol,None,'invalid OHLCV'
             return symbol,{'lastClosedBarAt':last,'bars':bars},''
         except Exception as exc:return symbol,None,type(exc).__name__
     selected={};rejected={};todo=iter(candidates)

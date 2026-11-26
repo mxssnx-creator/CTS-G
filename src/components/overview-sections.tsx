@@ -1,3 +1,4 @@
+import { STAGE_LABEL, STAGE_ORDER } from "@/lib/stage-grid";
 import type { ReactNode } from "react";
 import type { LiveStats, PfBase, StageFigure, WindowFigure, WindowKey } from "@/lib/live-stats";
 
@@ -32,8 +33,10 @@ export function OverviewSections({ stats }: { stats: LiveStats | null }) {
       <Card title="Indications" subtitle="per pack: Sets, validated share, effective PF after Base">
         <Indications pb={pb} />
       </Card>
-      <Card title="Strategies · Stages" subtitle="Base → Main → Real, each stage on its own Sets">
-        <Stages pb={pb} reasons={sets.counts?.reasons} />
+      <Card title="Strategies · Stages" subtitle={sets.stageGrid ? "Base Sets reaching each stage" : "Base → Main → Real, each stage on its own Sets"}>
+        {sets.stageGrid
+          ? <Grid rows={STAGE_ORDER.map((stage) => [STAGE_LABEL[stage], String(stats.execution?.sets.stages?.[stage] ?? "—")])} />
+          : <Stages pb={pb} reasons={sets.counts?.reasons} />}
       </Card>
     </section>
   );

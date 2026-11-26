@@ -1,10 +1,12 @@
+import { StageGridPanel, StageGridSettings } from "@/components/stage-grid";
+import execIndicationProfiles from "../../presets/exec-indication-profiles.json" with { type: "json" };
 import {VolumeRatioSliders} from "../../shared/cts-volume/sliders.tsx";
 import {PORTED_CATALOG,DEFAULT_TACTIC_SOURCES,DEFAULT_INVERSE_SOURCES} from "../../shared/cts-indications/catalog.ts";
 import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
 import { ROUND_AUTO_N_MAX, ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
 import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
-import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
+import { DEFAULT_LAST_N_LANES, WINDOW_GRID_FIELDS, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
 import { SignalConfigEditor } from "@/components/signal-config-editor";
 import { createFileRoute } from "@tanstack/react-router";
@@ -31,6 +33,7 @@ import {
   SL_SET_RATIOS,
   SL_TP_RATIOS,
   TRAIL_VARIANTS,
+  VOLUME_SIZING_DIVISOR,
   trailGiveFromArm,
   type CtsSettings,
   type PulseOverlay,
@@ -343,7 +346,8 @@ function SettingsPage() {
                 <KV k="Updated" v={String(cts?.updated_at ?? "—")} />
                 <KV k="Pulse running" v={stats?.paused ? "paused" : stats?.running && !stats?.halted ? "yes" : stats?.haltReason || "halted"} />
                 <KV k="Scan" v={`${fmtNum(stats?.scanMs, 1)} ms · cycle ${stats?.cycle ?? "—"}`} />
-                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 0.05))} />
+                <KV k="Configured volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 0.05))} />
+                <KV k="Effective volume factor" v={(stats?.sizingVolumeFactor ?? overlay.volumeFactor / VOLUME_SIZING_DIVISOR).toFixed(3)} />
                 <KV k="Unit" v={String(stats?.unit ?? (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED"))} />
               </Grid>
               <p className="text-sm text-muted">
@@ -368,10 +372,10 @@ function SettingsPage() {
                   min={0} max={5} step={0.001} unit="%"
                   hint="Maker requires confirmed maker liquidity; LIMIT alone is not evidence."
                   onChange={(v) => patch("makerFeeRate", v / 100)} />
-                <Num label="Slippage / fee ratio" value={overlay.slippageFeeRatio}
-                  min={0} max={10} step={0.05} unit="× fee"
-                  hint="0.1 = 10% of fees. Paper estimates only; actual fill prices already contain slippage."
-                  onChange={(v) => patch("slippageFeeRatio", v)} />
+                <Num label="Paper slippage allowance" value={overlay.slippageFeeRatio * 100}
+                  min={0} max={1000} step={1} unit="% of fees"
+                  hint="Default 10%. The actual execution return already reflects the fill price."
+                  onChange={(v) => patch("slippageFeeRatio", v / 100)} />
                 <Slider
                   label="Min PF"
                   value={overlay.minPf}
@@ -1231,6 +1235,12 @@ function SettingsPage() {
           )}
 
           {section === "stages" && (
+            <Card title="Stage Last-N lanes" hint="Base → Main → Real → Exec → Live">
+              <StageGridSettings value={overlay.stageLastN} onChange={(value) => patch("stageLastN", value)} />
+              <div className="mt-3"><StageGridPanel live={stats} /></div>
+            </Card>
+          )}
+          {section === "stages" && !overlay.stageLastN.enabled && (
             <Card title="Stage coordinates" hint="Base / Main / Real PositionCost floors">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -2099,7 +2109,7 @@ function SettingsPage() {
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
-                <Slider label="Execution last N (end of Real)" value={overlay.execGateN} min={0} max={60} step={5} hint="the newest N results of the lane's Real Set must pass the minimum PF again right before execution; 0 = off (10 .. 35 tested)" onChange={(v) => patch("execGateN", v)} />
+                {!overlay.stageLastN.enabled && <Slider label="Execution last N (end of Real)" value={overlay.execGateN} min={0} max={60} step={5} hint="the newest N results of the lane's Real Set must pass the minimum PF again right before execution; 0 = off (10 .. 35 tested)" onChange={(v) => patch("execGateN", v)} />}
                 <EnableSlider label="Absolute price-distance Sets" on={overlay.setPriceDistanceGrid} hint="Each stop and trailing gap gets its own Set and PF evidence. Existing cost and protection floors still apply." onChange={(value) => patch("setPriceDistanceGrid", value)} />
                 {overlay.setPriceDistanceGrid && <>
                   <CsvField label="SL distances (%)" value={overlay.setPriceSlDistances.join(", ")} hint="0.2–2.2% in 0.1% steps" onCommit={(value) => patch("setPriceSlDistances", priceDistancesOf(value.trim() ? value.split(/[,;\s]+/) : undefined, PRICE_SL_DISTANCES))} />
@@ -2183,7 +2193,7 @@ function SettingsPage() {
                   min={0.0125}
                   max={5}
                   step={0.0125}
-                  hint="Scales pulse notional (0.05 = the default, 0.0125 the lowest; the venue minimum lot still binds small entries). Independent per Live / VST."
+                  hint={`Effective sizing factor ×${(overlay.volumeFactor / VOLUME_SIZING_DIVISOR).toFixed(3)} before venue lot minimums; configurable down to 0.0125. Independent per Live / VST.`}
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num
@@ -2250,12 +2260,12 @@ function SettingsPage() {
                   onChange={(v) => patch("maxModeledStopLossPct", v)}
                 />
                 <KV
-                  k="Effective notional"
+                  k="Effective notional before venue minimum"
                   v={
                     Math.min(
                       (overlay.sizePctOfBalance ?? 0) > 0 && Number(stats?.equity) > 0
-                        ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 0)) / 100) * (overlay.volumeFactor || 0.05)
-                        : overlay.targetNotional * (overlay.volumeFactor || 0.05),
+                        ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 0)) / 100) * (overlay.volumeFactor / VOLUME_SIZING_DIVISOR)
+                        : overlay.targetNotional * (overlay.volumeFactor / VOLUME_SIZING_DIVISOR),
                       overlay.sizeMaxNotional ?? 25,
                     ).toFixed(2)
                   }
@@ -2520,7 +2530,9 @@ function PfWindowControls({
   return (
     <>
       <div className="col-span-full mt-1 font-mono text-[11px] text-muted">
-        Minimum PF by TP step · one floor per Set for every window of every stage (Base, Main, Real, Real Negative) and for the Axis / Block / DCA gates on that Set's own stream. The drawdown time and the minimum order count are Base-stage rules
+        {overlay.stageLastN.enabled
+          ? "Minimum PF by TP step sets the fallback for each Set. Auto PF can learn a separate floor for each parent lane and Last-N block from its own settled history."
+          : "Minimum PF by TP step sets one floor per Set for the legacy stages and the Axis, Block and DCA gates on that Set’s own stream."}
       </div>
       <Toggle
         label="Minimum PF by TP step (on: replaces the window-size classes below)"
@@ -2611,7 +2623,7 @@ function PfWindowControls({
         onChange={(v) => patch("setScratchEnabled", v)}
       />
       <Toggle
-        label="Auto: learn the best floor for every step 0.2-3.5%"
+        label={overlay.stageLastN.enabled ? "Auto PF · independent Stage and Last-N windows" : "Auto: learn the best floor for every step 0.2–3.5%"}
         on={byStep && overlay.minPfStepAuto !== false}
         onChange={(v) => patch("minPfStepAuto", v)}
       />
@@ -2633,7 +2645,7 @@ function PfWindowControls({
         hint="the Set's PF over its last N closed orders at entry (default 10) is what a floor is tried on"
         onChange={(v) => patch("minPfStepAutoN", v)}
       />
-      <Slider
+      {!overlay.stageLastN.enabled && <Slider
         label="Auto: orders a floor needs"
         value={overlay.minPfStepAutoMin}
         min={1}
@@ -2641,22 +2653,22 @@ function PfWindowControls({
         step={10}
         hint="admitted orders (one per distinct Set tape) a floor needs before Auto can choose it; with too few on a step Auto uses its direction's pooled floor, and only without any the manual value"
         onChange={(v) => patch("minPfStepAutoMin", v)}
-      />
-      <label className="flex items-center gap-2 text-xs">
+      />}
+      {!overlay.stageLastN.enabled && <label className="flex items-center gap-2 text-xs">
         <input
           type="checkbox"
           checked={overlay.minPfStepAutoScope === "set"}
           onChange={(e) => patch("minPfStepAutoScope", e.target.checked ? "set" : "step")}
         />
-        Auto floor per config Set. A Set with insufficient closes uses its configured manual floor or the manual TP-step formula.
-      </label>
+        Use per-Set Auto PF for ordinary Sets. Configured Last-N profiles always learn from their own closes and use their manual floor while warming up.
+      </label>}
       <Slider
         label="Auto per Set: orders a Set needs"
         value={overlay.minPfSetAutoMin}
         min={1}
         max={200}
         step={1}
-        hint="admitted orders of the Set itself before its own floor is used; fewer = the defaults"
+        hint={overlay.stageLastN.enabled ? "Each window learns from its own parent Set before the last completed hour. Both chronological halves need sample support. Otherwise its fallback applies." : "admitted orders of the Set itself before its own floor is used; fewer = the defaults"}
         onChange={(v) => patch("minPfSetAutoMin", v)}
       />
       <Slider
@@ -2665,7 +2677,7 @@ function PfWindowControls({
         min={0}
         max={3}
         step={0.05}
-        hint="0 = the lowest floor within the tolerance below of the best PF. Above 0 every candidate floor scores PF × (its admitted orders ÷ the most any floor admits) ^ factor and the best score wins: 0.5 weighs orders moderately, 1 = PF × orders share, higher favours more orders."
+        hint={overlay.stageLastN.enabled ? "Higher values favour candidates that keep more of the Set's own observations. At 0, Auto scores the weaker of the two historical periods." : "0 selects the lowest floor within the tolerance of the best PF. Higher values favour more orders."}
         onChange={(v) => patch("minPfAutoOrdersFactor", Math.max(0, Math.min(3, Math.round(v * 100) / 100)))}
       />
       <Slider
@@ -2674,7 +2686,7 @@ function PfWindowControls({
         min={1}
         max={20}
         step={1}
-        hint="Auto takes the LOWEST floor whose delivered PF is within this much of the best one: the most valid Sets and orders at nearly the best PF. It does not use the manual ratio."
+        hint={overlay.stageLastN.enabled ? "The required score improvement over this Set's fallback." : "Auto takes the lowest floor within this much of the best delivered PF."}
         onChange={(v) => patch("minPfStepAutoTol", v)}
       />
       <Slider
@@ -2695,7 +2707,18 @@ function PfWindowControls({
         hint="Caps the learned Auto floor and the manual 1 + TP % x ratio at this value in every stage (owner 2026-11-04: 1.27). A configuration's own manual floor (Signals 2.20, Micro range) is not capped. 2.00 = no cap."
         onChange={(v) => patch("minPfStepAutoHigh", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
       />
-      <StepPfTable overlay={overlay} stats={stats ?? null} />
+      {overlay.stageLastN.enabled ? (
+        <div className="col-span-full space-y-2">
+          {stats?.sets?.setFloors && <p className="text-xs text-muted">{stats.sets.setFloors.learned ?? 0} Sets using learned floors · {stats.sets.setFloors.defaults ?? 0} using defaults</p>}
+          <Grid>
+            {TP_RANGES.map(({ id, label, lo }) => (
+              <Num key={id} label={`${label} Auto PF fallback`} value={overlay.autoPfDefaultByRange[id] ?? manualStepPf(lo * TP_UNIT_PCT, overlay.minPfStepRatio)}
+                min={1} max={2} step={0.01} hint="Used when the Set has too few samples or Auto finds no improvement. Set-specific floors take precedence."
+                onChange={(value) => patch("autoPfDefaultByRange", { ...overlay.autoPfDefaultByRange, [id]: value })} />
+            ))}
+          </Grid>
+        </div>
+      ) : <StepPfTable overlay={overlay} stats={stats ?? null} />}
       <div className="col-span-full mt-2 font-mono text-[11px] text-muted">
         Minimum PF by last-N window size · used when the TP-step floor is off
       </div>
@@ -2818,6 +2841,12 @@ function LastNLaneEditor({value,onChange}:{value:LastNLane[];onChange:(value:Las
         {([['baseLong','Base N',30],['baseShort','Base secondary N (0 = off)',15],['mainLong','Main N',20],['realN','Real N',12],['realNegN','Real negative N',12]] as const).map(([key,label,fallback])=>
           <Slider key={key} label={label} value={p.lastN[key]??fallback} min={key==='baseShort'?0:1} max={200} step={1}
             onChange={v=>update(i,{lastN:{...p.lastN,[key]:v}})} />)}
+        {WINDOW_GRID_FIELDS.map(key => <CsvField key={key} label={`${key} independent windows`} value={(p.windowGrid?.[key] ?? []).join(", ")}
+          hint="Enter one or more sample counts. Empty uses the profile window." onCommit={text=>{
+            const windowGrid = {...p.windowGrid}, selected=numbers(text);
+            if (selected.length) windowGrid[key]=selected; else delete windowGrid[key];
+            update(i,{windowGrid:Object.keys(windowGrid).length ? windowGrid : undefined});
+          }} />)}
         <CsvField label="Main short candidates" value={(p.lastN.mainShort??[5,10]).join(', ')} hint="1–200; limited by the configured short/long ratio"
           onCommit={text=>update(i,{lastN:{...p.lastN,mainShort:numbers(text)}})} />
         <CsvField label="Negative recovery windows" value={(p.lastN.negWindows??[5,10]).join(', ')} hint="1–200; the negative lane still needs its own positive Real PF"
@@ -2855,8 +2884,25 @@ function IndicationConfigEditor({
 }) {
   const set = (i: number, part: Partial<IndicationConfig>) => onChange(indicationConfigList(value.map((e, k) => (k === i ? { ...e, ...part } : e))));
   const list = (t: string) => t.split(/[,;]/).map((x) => x.trim());
+  const profileGroups = [
+    { label: "Add RSI and Parabolic SAR profiles", profiles: execIndicationProfiles.rsiSar },
+    { label: "Add trend, retest and channel profiles", profiles: execIndicationProfiles.confirmed },
+    { label: "Add inverse Exec comparison profiles", profiles: execIndicationProfiles.inverseExec },
+    { label: "Add CTS-C technical profiles", profiles: execIndicationProfiles.ctsC },
+    { label: "Add standard indicators with short windows", profiles: execIndicationProfiles.common },
+  ];
   return (
     <div className="space-y-3" data-testid="indication-configs">
+      <div className="flex flex-wrap gap-2">
+        {profileGroups.map(({ label, profiles }) => {
+          const missing = profiles.filter((profile) => !value.some((entry) => entry.label === profile.label));
+          return missing.length ? (
+            <button key={label} type="button" className="rounded border border-border px-3 py-2 text-sm" onClick={() => onChange(indicationConfigList([
+              ...value, ...missing.map((profile) => ({ ...DEFAULT_INDICATION_CONFIG, ...profile, lastNLanes: [] })),
+            ]))}>{label}</button>
+          ) : null;
+        })}
+      </div>
       {value.map((e, i) => (
         <div key={i} className="space-y-2 rounded-lg border border-border bg-bg2 p-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -3476,7 +3522,7 @@ function LiveApplied({
     <div className="rounded-radius border border-border bg-surface px-4 py-3 font-mono text-xs" data-testid="live-applied">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={stats?.paused ? "text-warn" : stats?.running && !stats?.halted ? "text-primary" : "text-danger"}>
-          {stats?.paused ? "paused" : stats?.running && !stats?.halted ? "live" : stats?.halted ? "halted" : "offline"} {conn} · SL:TP {Number(sl).toFixed(2)} · tr {trail} · vol ×{Number(stats?.volumeFactor ?? overlay.volumeFactor ?? 1).toFixed(2)}
+          {stats?.paused ? "paused" : stats?.running && !stats?.halted ? "live" : stats?.halted ? "halted" : "offline"} {conn} · SL:TP {Number(sl).toFixed(2)} · tr {trail} · vol ×{(stats?.sizingVolumeFactor ?? overlay.volumeFactor / VOLUME_SIZING_DIVISOR).toFixed(3)}
         </span>
         <span className="text-muted">
           {dirty ? "unsaved overlay" : "applied"} · cycle {stats?.cycle ?? "—"} · {fmtNum(stats?.engine?.hotMs ?? stats?.scanMs, 0)}ms

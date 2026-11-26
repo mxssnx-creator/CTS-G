@@ -1,10 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { indicationConfigList, defaultOverlay, manualStepPf, overlayFromCts, pfRangeFloorsOf, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { indicationConfigList, defaultOverlay, DEFAULT_OVERLAY, manualStepPf, overlayFromCts, pfRangeFloorsOf, SIGNAL_RANGES, SIGNAL_SOURCES, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
+
+test("Settings can render default and legacy signal entries without missing selectors", () => {
+  assert.deepEqual(overlayFromCts(cts()).signalConfigs, DEFAULT_OVERLAY.signalConfigs);
+  for (const entry of DEFAULT_OVERLAY.signalConfigs) {
+    assert.equal(entry.enabled, true);
+    assert.deepEqual(entry.sources, SIGNAL_SOURCES);
+    assert.deepEqual(entry.ranges, SIGNAL_RANGES);
+  }
+  const legacy = [{ label: "legacy", enabled: false, timeframes: [15] }] as typeof DEFAULT_OVERLAY.signalConfigs;
+  const [entry] = overlayFromCts(cts(), { signalConfigs: legacy }).signalConfigs;
+  assert.equal(entry.enabled, false);
+  assert.deepEqual(entry.timeframes, [15]);
+  assert.deepEqual(entry.sources, SIGNAL_SOURCES);
+  assert.deepEqual(overlayFromCts(cts(), { signalConfigs: [] }).signalConfigs, []);
+});
 
 test("global and per-range Last-N retain the lowest requested windows", () => {
   for (const n of [1,2,3,5,8,10,200]) {
