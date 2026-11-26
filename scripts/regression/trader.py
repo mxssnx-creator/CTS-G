@@ -3138,15 +3138,15 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
 def volume_factor_is_bounded_and_defaults_to_the_minimum():
     """volumeFactor (owner: default and minimum 0.05): an overlay without it, with 0, a negative or an unreadable value sizes at 0.05, never at 1.0 (the
     earlier fallback, 20 x the default); a valid value is kept inside 0.05 .. 10; the sized notional follows it."""
-    got = {repr(raw): pt.volume_factor_of(raw) for raw in (None, 0, -1, "x", float("nan"), 0.05, 0.3, 1, 3, 99)}
-    want = {"None": 0.05, "0": 0.05, "-1": 0.05, "'x'": 0.05, "nan": 0.05, "0.05": 0.05, "0.3": 0.3, "1": 1.0, "3": 3.0, "99": 10.0}
+    got = {repr(raw): pt.volume_factor_of(raw) for raw in (None, 0, -1, "x", float("nan"), 0.01, 0.025, 0.05, 0.3, 1, 3, 99)}
+    want = {"None": 0.05, "0": 0.05, "-1": 0.05, "'x'": 0.05, "nan": 0.05, "0.01": 0.025, "0.025": 0.025, "0.05": 0.05, "0.3": 0.3, "1": 1.0, "3": 3.0, "99": 10.0}
     p = _bare_pulse()
     p.equity, p.size_pct, p.size_max = 1000.0, 1.0, 1e9
     sizes = {}
     for raw in (None, 0, 1, 2):
         p.volume_factor = pt.volume_factor_of(raw)
         sizes[repr(raw)] = round(p.sized_notional(), 6)
-    ok = got == want and sizes == {"None": 0.5, "0": 0.5, "1": 10.0, "2": 20.0} and pt.VOLUME_FACTOR_MIN == 0.05
+    ok = got == want and sizes == {"None": 0.5, "0": 0.5, "1": 10.0, "2": 20.0} and pt.VOLUME_FACTOR_MIN == 0.05 and pt.VOLUME_FACTOR_FLOOR == 0.025   # owner 2026-11-26: explicit values down to 0.025
     return ok, f"factors {got}; notional at 1 % of 1,000 USDT: {sizes}"
 
 def a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry():

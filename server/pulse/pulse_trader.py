@@ -152,7 +152,8 @@ def rank_self_test() -> Tuple[bool, str]:
     return ok, f"got={got}"
 
 TARGET_NOTIONAL = 2.15
-VOLUME_FACTOR_MIN = 0.05        # the volume factor's floor and its default (owner 2026-10-28): a missing, zero or broken value never sizes above it
+VOLUME_FACTOR_MIN = 0.05        # the volume factor's default (owner 2026-10-28): a missing, zero or broken value never sizes above it
+VOLUME_FACTOR_FLOOR = 0.025     # the lowest explicit value (owner 2026-11-26: "decrease vol factor by half" from 0.05); the venue minimum lot still binds most entries
 VOLUME_FACTOR_MAX = 10.0
 
 
@@ -164,7 +165,7 @@ def volume_factor_of(raw) -> float:
         return VOLUME_FACTOR_MIN
     if not math.isfinite(v) or v <= 0:
         return VOLUME_FACTOR_MIN
-    return max(VOLUME_FACTOR_MIN, min(VOLUME_FACTOR_MAX, v))
+    return max(VOLUME_FACTOR_FLOOR, min(VOLUME_FACTOR_MAX, v))
 LEVERAGE = 150
 USE_MAX_LEVERAGE = True
 MAX_OPEN = 0  # 0 = unlimited
