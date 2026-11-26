@@ -124,13 +124,26 @@ class StageGrid:
         return tuple(counts)
 
     @cached_property
+    def rules(self) -> dict[tuple[int, int], tuple[Window, ...]]:
+        return {(depth, long): self.windows(depth, long)
+                for depth in range(len(STAGES)) for long in (self.longs if depth else (0,))}
+
+    @cached_property
     def sample_bounds(self) -> dict[tuple[int, int], tuple[int, int]]:
         bounds = {}
-        for depth in range(len(STAGES)):
-            for base_long in self.longs if depth else (0,):
-                sizes = [window.need for window in self.windows(depth, base_long)]
-                bounds[depth, base_long] = min(sizes), max(sizes)
+        for key, choices in self.rules.items():
+            sizes = [window.need for window in choices]
+            bounds[key] = min(sizes), max(sizes)
         return bounds
+
+    @cached_property
+    def floor_sizes(self) -> frozenset[int]:
+        sizes = {n for options in self.options for n in (*options.shorts, *options.lasts)}
+        sizes.update(n for minimum, maximum in self.sample_bounds.values() for n in range(minimum, maximum + 1))
+        return frozenset(sizes.union(self.longs))
+
+    def insufficient(self) -> GridResult:
+        return GridResult((StageCount(evaluated=len(self.rules[0, 0])), *(StageCount() for _ in STAGES[1:])))
 
     def path(self, base_id: str, identity: str) -> Path:
         prefix = base_id + "/"
@@ -331,24 +344,49 @@ class _Tape:
         cached = self.learned_floors.get(key)
         if cached is not None:
             return cached
-        if self.decisions is None:
-            self.decisions = [self.indices(self.owner.entries[i]) for i in self.ids]
-        pairs = []
-        for i in range(first, stop):
-            lo, hi = self.decisions[i]
-            hi -= offset
-            if hi - lo < size:
-                continue
-            _, gain, loss = self.evidence(size, hi)
-            if kind == "negative":
-                gain, loss = loss, gain
-            if gain > 0 and (kind not in SIGN_MODES or gain - loss > NEG_EPS):
-                pairs.append((gain / loss if loss > 0 else math.inf, self.values[i]))
+        if np is not None and self.numeric is not None and stop - first >= 64:
+            pairs = self.vector_observations(first, stop, size, offset, kind)
+        else:
+            if self.decisions is None:
+                self.decisions = [self.indices(self.owner.entries[i]) for i in self.ids]
+            pairs = []
+            for i in range(first, stop):
+                lo, hi = self.decisions[i]
+                hi -= offset
+                if hi - lo < size:
+                    continue
+                _, gain, loss = self.evidence(size, hi)
+                if kind == "negative":
+                    gain, loss = loss, gain
+                if gain > 0 and (kind not in SIGN_MODES or gain - loss > NEG_EPS):
+                    pairs.append((gain / loss if loss > 0 else math.inf, self.values[i]))
         fit = auto_set_pf.fit(pairs, policy.minimum, fallback, policy.candidates, policy.tolerance,
                               policy.orders_factor)
         floor = fallback if fit is None else fit
         self.learned_floors[key] = floor
         return floor
+
+    def vector_observations(self, first: int, stop: int, size: int, offset: int, kind: str) -> list:
+        """Reuse the mask's entry bounds and prefix sums for the causal fit."""
+        starts, ends, gains, losses, _, _ = self.numeric
+        included = np.flatnonzero(ends[first:stop] - starts[first:stop] >= size + offset) + first
+        right = ends[included] - offset
+        left = right - size
+        gain, loss = gains[right] - gains[left], losses[right] - losses[left]
+        # Repair small differences exactly as the scalar evidence reader.
+        repair = ((losses[right] > 0) & (loss <= 1e-10 * losses[right])
+                  | (gains[right] > 0) & (gain <= 1e-10 * gains[right]))
+        for i in np.flatnonzero(repair):
+            _, gain[i], loss[i] = self.evidence(size, int(right[i]))
+        if kind == "negative":
+            gain, loss = loss, gain
+        qualified = gain > 0
+        if kind in SIGN_MODES:
+            qualified &= gain - loss > NEG_EPS
+        gain, loss = gain[qualified], loss[qualified]
+        ratios = np.full(len(gain), np.inf)
+        np.divide(gain, loss, out=ratios, where=loss > 0)
+        return list(zip(ratios.tolist(), (self.values[i] for i in included[qualified])))
 
     def test(self, size: int, end: int, kind: str, entry: float, offset: int = 0) -> Evidence | None:
         evidence = self.evidence(size, end)
@@ -436,6 +474,8 @@ class _Tape:
         first, ends, gains, losses, local_floors, entry_hours = self.numeric
         valid = ends - first >= offset + size
         rows = np.flatnonzero(valid)
+        if not rows.size:
+            return 0
         right = ends[rows] - offset
         left = right - size
         gain, loss = gains[right] - gains[left], losses[right] - losses[left]
@@ -510,9 +550,7 @@ class StageHistory:
                  window_auto: WindowAuto | None = None) -> None:
         self.grid, self.closes, self.entries, self.nets = grid, closes, entries, nets
         self.lookback, self.base_risk = lookback, base_risk
-        sizes = {n for options in grid.options for n in (*options.shorts, *options.lasts)}
-        sizes.update(n for minimum, maximum in grid.sample_bounds.values() for n in range(minimum, maximum + 1))
-        self.floors = {n: floor(n) for n in {*grid.longs, *sizes}}
+        self.floors = {n: floor(n) for n in grid.floor_sizes}
         self.entry_floor = entry_floor
         self.window_auto = window_auto
         self._entry_floors = None
@@ -522,7 +560,6 @@ class StageHistory:
         self._views: OrderedDict[Sequence[int], _Tape] = OrderedDict()
         self._children: OrderedDict[tuple[_Tape, int], _Tape] = OrderedDict()
         self._filter_masks: OrderedDict[_Tape, int] = OrderedDict()
-        self._rules = {(i, n): grid.windows(i, n) for i in range(len(STAGES)) for n in ((0,) if i == 0 else grid.longs)}
 
     @property
     def root(self) -> _Tape:
@@ -671,6 +708,9 @@ class StageHistory:
         return None
 
     def evaluate(self, now: float, *, streams: bool = False, limit: int | None = None) -> GridResult:
+        right = bisect_left(self.closes, now)
+        if right - bisect_left(self.closes, now - self.lookback, 0, right) < self.grid.sample_bounds[0, 0][0]:
+            return self.grid.insufficient()
         validated_base_mask = 0
         root = self._decision_tape(now)
         bounds = self.grid.sample_bounds
@@ -684,7 +724,7 @@ class StageHistory:
             nonlocal validated_base_mask
             counts = tuple(StageCount() for _ in STAGES[depth:])
             tally = counts[0]
-            choices = self._rules[depth, base_long]
+            choices = self.grid.rules[depth, base_long]
             tally.evaluated = len(choices)
             start, end = tape.indices(now)
             size = end - start

@@ -10,6 +10,7 @@ keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
 import copy
+import gzip
 import os
 import sys
 
@@ -19,6 +20,7 @@ import heapq
 import json
 import math
 from array import array
+from collections import defaultdict
 import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -315,25 +317,29 @@ RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward 
 RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
 
 
-def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]], keep_on_gap: bool = False) -> List[List[float]]:
+def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]], keep_on_gap: bool = False,
+               share_rows: bool = False) -> List[List[float]]:
     """Join a newer 1-minute window onto a stored series. Rows carry no timestamps, so the join finds where the new
     window's first row sits in the stored series and checks the overlap row by row. The stored history before that
     point is kept, and the new rows (including a still-forming last bar) replace the overlapped tail. With no overlap
     the new window stands, because a gap cannot be filled from rows that do not line up. keep_on_gap: a window that does not
     line up is dropped and the stored series kept (rows built from live ticks never equal the exchange's rows, and a short
     window of them must not replace a long history)."""
+    # Engine-owned normalised rows are only replaced, so a retained candle
+    # can be shared by the live frame and an in-flight replay.
+    row = (lambda value: value) if share_rows else list
     if not old:
-        return [list(r) for r in new]
-    head = list(new[0])
+        return [row(r) for r in new]
+    head = row(new[0])
     for p in range(len(old) - 1, -1, -1):
-        if list(old[p]) == head:
+        if row(old[p]) == head:
             span = min(len(new), len(old) - p)
-            if all(list(old[p + i]) == list(new[i]) for i in range(span - 1)):
-                return [list(r) for r in old[:p]] + [list(r) for r in new]
+            if all(row(old[p + i]) == row(new[i]) for i in range(span - 1)):
+                return [row(r) for r in old[:p]] + [row(r) for r in new]
             break
     if keep_on_gap and old:
-        return [list(r) for r in old]
-    return [list(r) for r in new]
+        return old if share_rows else [list(r) for r in old]
+    return [row(r) for r in new]
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -1189,16 +1195,25 @@ def save_signal_cache(path: str, salt: int, caches: Dict[str, Dict[int, Dict[str
     """Write the signal memo atomically ({symbol: {window key: {pack: (direction, confidence, why)}}} for one salt). Returns the entries written; any failure writes nothing."""
     import pickle
     import tempfile
+    tmp = None
     try:
-        blob = {"v": SIG_CACHE_VERSION, "salt": salt, "symbols": {sym: dict(c) for sym, c in caches.items() if c}}
+        blob = {"v": SIG_CACHE_VERSION, "salt": salt, "symbols": {sym: c for sym, c in caches.items() if c}}
         d = os.path.dirname(path) or "."
         fd, tmp = tempfile.mkstemp(prefix=".sigcache-", dir=d)
         with os.fdopen(fd, "wb") as fh:
-            pickle.dump(blob, fh, protocol=5)
+            with gzip.GzipFile(filename="", fileobj=fh, mode="wb", compresslevel=1, mtime=0) as compressed:
+                pickle.dump(blob, compressed, protocol=5)
         os.replace(tmp, path)
+        tmp = None
         return sum(len(c) for c in blob["symbols"].values())
     except Exception:
         return 0
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def load_signal_cache(path: str, salt: int) -> Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]]:
@@ -1206,7 +1221,13 @@ def load_signal_cache(path: str, salt: int) -> Dict[str, Dict[int, Dict[str, Tup
     import pickle
     try:
         with open(path, "rb") as fh:
-            blob = pickle.load(fh)
+            if fh.peek(2)[:2] == b"\x1f\x8b":
+                with gzip.GzipFile(fileobj=fh) as compressed:
+                    blob = pickle.load(compressed)
+                    if compressed.read(1):
+                        return {}
+            else:
+                blob = pickle.load(fh)
         if not isinstance(blob, dict) or blob.get("v") != SIG_CACHE_VERSION or blob.get("salt") != salt:
             return {}
         out = {}
@@ -1231,6 +1252,7 @@ def pack_signals(
     cache: Optional[Dict[int, Dict[str, Tuple[int, float, str]]]] = None,
     salt: int = 0,
     workers: int = 0,
+    publish_cache: Optional[Callable[[dict], None]] = None,
 ) -> Dict[str, List[Tuple[int, float, str]]]:
     """Causal signal per bar and pack: (direction, confidence, why). The only signal loop: the engine
     replay and the streaming simulator both call it, so a bar gets the same signal in both places.
@@ -1242,7 +1264,7 @@ def pack_signals(
     imported = _ported_pack_sources(packs)
     if imported:
         from ported_indications import batch
-        native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt) if len(imported)<len(packs) else {}   # workers stay 0 here: ported packs read the whole history
+        native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt,publish_cache=publish_cache) if len(imported)<len(packs) else {}   # workers stay 0 here: ported packs read the whole history
         calculated=batch(bars,list(imported.values()),base_ts,str(ind_settings.get("portedSymbol") or "ASSET-USDT"),ind_settings.get("portedPeers") or ())
         native.update({p:[(0,0.0,"")]*min(warmup,len(bars))+calculated[name][warmup:] for p,name in imported.items()})
         return native
@@ -1250,6 +1272,7 @@ def pack_signals(
     signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in packs}
     hs = [hash(tuple(b)) for b in bars] if cache is not None else None
     used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    made_new_key = False
     sig_w = signal_window(packs, ind_settings)      # the memo key covers every bar a pack reads
     pre: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
     if workers and n - warmup >= 96:
@@ -1287,14 +1310,18 @@ def pack_signals(
         for p in packs:
             signals[p][i] = row.get(p, _NO_SIGNAL)
         if key is not None:
+            made_new_key = True
             # memory (2026-11-14): most packs do not signal on most bars; the memo row keeps only those that did (x02: about 7,000 bars x 100 symbols x
             # 44 packs were held as full dicts and the engine grew past 1.7 GB); the reasons are interned so equal texts share one string
             used[key] = {p: (v if not v[2] else (v[0], v[1], sys.intern(v[2]))) for p, v in row.items() if v != _NO_SIGNAL}
         if on_step and i % 50 == 0:
             on_step()
-    if cache is not None:
-        cache.clear()
-        cache.update(used)
+    if cache is not None and (made_new_key or len(cache) != len(used)):
+        if publish_cache:
+            publish_cache(used)
+        else:
+            cache.clear()
+            cache.update(used)
     return signals
 
 def stop_gap_price(side: int, stop: float, open_price: float) -> float:
@@ -1551,15 +1578,20 @@ class RowCols:
     """One Set's replay rows of one symbol, stored as columns (about 34 bytes a row instead of about 200 for a tuple of eight with its
     float objects): exit time, pnl, pnl_pct and hold as doubles, side and reason as one-byte codes, symbol and Set id once. It reads
     as the sequence of row tuples it replaces (len, iteration, index), so every reader of the replay rows stays as it was."""
-    __slots__ = ("t", "pnl", "pct", "hold", "side", "reason", "symbol", "set_id")
+    __slots__ = ("t", "pnl", "pct", "hold", "side", "reason", "symbol", "set_id", "ordered")
 
     def __init__(self, rows: Sequence[Dict[str, Any]]) -> None:
         self.t, self.pnl, self.pct, self.hold = array("d"), array("d"), array("d"), array("d")
         self.side, self.reason = bytearray(), bytearray()
         self.symbol = str(rows[0]["symbol"]) if rows else ""
         self.set_id = str(rows[0]["set_id"]) if rows else ""
+        self.ordered = True
+        previous = -math.inf
         for r in rows:
-            self.t.append(float(r["t"]))
+            t = float(r["t"])
+            self.ordered = self.ordered and previous <= t
+            self.t.append(t)
+            previous = t
             self.pnl.append(float(r["pnl"]))
             self.pct.append(float(r["pnl_pct"]))
             self.hold.append(float(r["hold_s"]))
@@ -1573,7 +1605,20 @@ class RowCols:
         other.t, other.pnl, other.pct, other.hold = self.t, self.pnl, self.pct, self.hold
         other.side, other.reason, other.symbol = self.side, self.reason, self.symbol
         other.set_id = str(set_id)
+        other.ordered = getattr(self, "ordered", False)
         return other
+
+    def same_rows(self, other: RowCols) -> bool:
+        return (self.symbol, self.set_id, self.t, self.pnl, self.pct, self.hold, self.side, self.reason) == (
+            other.symbol, other.set_id, other.t, other.pnl, other.pct, other.hold, other.side, other.reason)
+
+    def same_training_rows(self, other: RowCols, start: float, end: float) -> bool:
+        if not getattr(self, "ordered", False) or not getattr(other, "ordered", False):
+            return False
+        a, b = bisect.bisect_left(self.t, start), bisect.bisect_left(self.t, end)
+        x, y = bisect.bisect_left(other.t, start), bisect.bisect_left(other.t, end)
+        return b - a == y - x and all(memoryview(left)[a:b] == memoryview(right)[x:y]
+                                      for left, right in ((self.t, other.t), (self.pct, other.pct), (self.hold, other.hold)))
 
     def __len__(self) -> int:
         return len(self.t)
@@ -2545,7 +2590,8 @@ class SetBook:
         self.by_idx: List[SetState] = []
         self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
         self.sig_cache_path = ""             # signalCachePath: where the signal memo is kept between restarts ("" = memory only)
-        self._sig_meta = {"loaded": False, "saved_at": 0.0, "salt": 0}   # shared with the replay copies (copy.copy keeps the reference): flags set during a replay reach the book
+        self._sig_meta = {"loaded": False, "saved_at": 0.0, "salt": 0, "revision": 0,
+                          "saved_key": None, "writing": False}    # replay copies share the memo and its write state
         # shared Set state is touched by the replay thread and the trading thread: one re-entrant lock
         self._lock = threading.RLock()
         self._replay_local = threading.local()
@@ -2557,9 +2603,14 @@ class SetBook:
         # history is re-simulated from actual entry opportunities, not spliced.
         self._hist_inputs: Dict[str, Dict[str, Any]] = {}
         self._hist_replay_key: Dict[str, Tuple[int, int]] = {}
+        self._hist_replay_source: Dict[str, tuple] = {}
+        self._stage_score_keys: Dict[str, tuple] = {}
+        self._stage_score_scope: tuple = ()
         self._hist_replay_at: Dict[str, float] = {}
         self._hist_replay_bar_at: Dict[str, Optional[float]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
+        self._bar_frames: Dict[str, Tuple[List[List[float]], object]] = {}
+        self._bar_quality_cache: Dict[str, tuple] = {}
         # open time (s) of the newest row of self.bars[symbol] when that row is a completed exchange minute; absent when the
         # series ends in rows of unknown time (live ticks). Live entries read a signal only on the bar this names.
         self.bar_t: Dict[str, float] = {}
@@ -2605,6 +2656,7 @@ class SetBook:
                               self.min_sl_distance_pct, self.micro_min_sl_pct, self.micro_min_trail_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
+                              self.trail_armed_free, self.pack_ranges,
                               self.hold_auto_min, self.hold_auto_max,
                               self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol, self.pf_auto_factor,
                               self.pf_set_auto, self.pf_set_auto_min, self.pf_step_auto_low, self.pf_step_auto_high,
@@ -2619,9 +2671,12 @@ class SetBook:
                 self._hist_rows.clear()
                 self._hist_inputs.clear()
                 self._hist_replay_key.clear()
+                self._hist_replay_source.clear()
+                self._stage_score_keys.clear()
                 self._hist_replay_at.clear()
                 self._hist_replay_bar_at.clear()
                 self._sig_cache.clear()
+                self._sig_meta["revision"] += 1
                 self._history_snapshot_active = False
                 if self.stage_grid and self.hist_keep_last_complete:
                     # Assemble the replacement universe before scoring it. A
@@ -3477,6 +3532,18 @@ class SetBook:
         (no trade in the minute) or that jumps by more than histMaxJumpPct in one minute (a broken print, as the demo venue
         shows on illiquid names) would validate Sets on prices nobody could trade."""
         rows = self.bars.get(symbol) or []
+        frame = self._bar_frames.get(symbol)
+        if frame and frame[0] is rows:
+            key = (frame[1], self.min_bars, self.max_flat_share, self.max_jump)
+            cached = self._bar_quality_cache.get(symbol)
+            if cached and cached[0] == key:
+                return cached[1]
+            result = self._check_bar_quality(rows)
+            self._bar_quality_cache[symbol] = key, result
+            return result
+        return self._check_bar_quality(rows)
+
+    def _check_bar_quality(self, rows: Sequence[Sequence[float]]) -> str:
         if len(rows) < self.min_bars:
             return "short"
         flat = 0
@@ -3557,8 +3624,16 @@ class SetBook:
             first_new = float(last_t) - (len(cleaned) - 1) * BAR_S if last_t is not None else None
             if watching and old_last is not None and first_new is not None and first_new > old_last + BAR_S + 1e-6:
                 self._history_snapshot_active = False
-            joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.history_bars() :]
-            self.bars[symbol] = joined
+            frame = self._bar_frames.get(symbol)
+            joined = _join_bars(old, cleaned, keep_on_gap=tail, share_rows=bool(frame and frame[0] is old))
+            capacity = self.history_bars()
+            if len(joined) > capacity:
+                joined = joined[-capacity:]
+            if joined != old:
+                # Ingestion replaces a completed frame; replay readers can
+                # keep the old object until they finish reading it.
+                self.bars[symbol] = joined
+                self._bar_frames[symbol] = (joined, object())
             bar_t = self.__dict__.setdefault("bar_t", {})
             if last_t is not None and joined and joined[-1] == cleaned[-1]:
                 bar_t[symbol] = float(last_t)
@@ -3612,6 +3687,8 @@ class SetBook:
         for s in list(self.bars):
             if s not in want:
                 self.bars.pop(s, None)
+                self._bar_frames.pop(s, None)
+                self._bar_quality_cache.pop(s, None)
                 self.__dict__.setdefault("bar_t", {}).pop(s, None)
                 n += 1
         return n
@@ -3622,6 +3699,8 @@ class SetBook:
             if self._lookback_pending and symbol in self._history_snapshot_symbols:
                 self._history_snapshot_active = False
             self.bars.pop(symbol, None)
+            self._bar_frames.pop(symbol, None)
+            self._bar_quality_cache.pop(symbol, None)
             self.bar_t.pop(symbol, None)
 
     def clamp_bars(self, max_n: int) -> int:
@@ -3630,6 +3709,8 @@ class SetBook:
         for s, bars in list(self.bars.items()):
             if len(bars) > cap:
                 self.bars[s] = bars[-cap:]
+                self._bar_frames.pop(s, None)
+                self._bar_quality_cache.pop(s, None)
                 n += 1
         return n
 
@@ -3786,9 +3867,10 @@ class SetBook:
         the Set (last_error) and the others are still scored. A chunked refresh (symbols=...) replaces only
         its own symbols' rows, so the other symbols keep their rows and no Set is scored on a partial tape.
         """
-        if not self.enabled or self._running:
-            return
-        self._running = True
+        with self._lock:
+            if not self.enabled or self._running:
+                return
+            self._running = True
         t0 = time.time()
         # one origin per minute: every chunk replayed in the same minute shares it, so the rows agree
         now = now if now is not None else float(int(t0 // BAR_S) * BAR_S)
@@ -3797,7 +3879,14 @@ class SetBook:
             # market view at its decision clock, including peer indications;
             # later symbols must not see candles that arrived mid-pass.
             with self._lock:
-                market = {s: list(rows) for s, rows in self.bars.items()}
+                market, versions = {}, {}
+                for symbol, rows in self.bars.items():
+                    prior = self._bar_frames.get(symbol)
+                    if prior and prior[0] is rows:
+                        market[symbol] = rows
+                        versions[symbol] = prior[1]
+                    else:
+                        market[symbol] = list(rows)
                 dated = dict(self.bar_t)
                 for s, rows in market.items():
                     last = dated.get(s)
@@ -3806,10 +3895,7 @@ class SetBook:
                         market[s] = rows[:-drop] if drop else rows
                         dated[s] = last - drop * BAR_S
                 self._replay_local.market = (market, dated)
-            if symbols is None:
-                names = [s for s in self.bars if self.usable(s)]
-            else:
-                names = [s for s in symbols if self.usable(s)]
+            names = [s for s in (market if symbols is None else symbols) if s in market and self.usable(s)]
             # the symbols that already hold the most orders go first: a pass that is cut short (load) still refreshed the
             # tapes the Sets are judged on most; the sort is stable, so a first pass keeps the given order
             names.sort(key=lambda s: -sum(len(v) for v in (self._hist_rows.get(s) or {}).values()))
@@ -3837,9 +3923,18 @@ class SetBook:
                 replay_book.bars = market
                 replay_book.bar_t = dated
                 replay_book._scan_packed = True     # this loop stores packed columns, so _replay_symbol may hand them over from forked scans
+                frames = {s: (versions.get(s), dated[s], len(market[s])) for s in dated if s in market}
+                peer_symbols = _ported_peer_symbols(self.packs) if _ported_pack_sources(self.packs) else ()
+                peer_frames = tuple((s, frames[s]) for s in market if s in frames
+                                    and (peer_symbols is None or s in peer_symbols))
+                peers_known = all(frame[0] is not None for _, frame in peer_frames)
+                source_keys = {s: (gen0, lookback0, frames[s], peer_frames) for s in names
+                               if s in frames and frames[s][0] is not None and peers_known}
+                reused = {s for s, key in source_keys.items()
+                          if s in self._hist_rows and self._hist_replay_source.get(s) == key}
             prefetch = getattr(self, '_prefetch_replay', None)
             if prefetch is not None:
-                prefetch(replay_book, names, now)
+                prefetch(replay_book, [s for s in names if s not in reused], now)
             sym_failed = 0
             aborted = False
             for i, symbol in enumerate(names):
@@ -3851,34 +3946,40 @@ class SetBook:
                 self.progress.symbols_done = i
                 self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                 self.progress.elapsed_ms = (time.time() - t0) * 1000
-                per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
                 replay_bar_at = dated.get(symbol)
-                try:
-                    inputs = replay_book._replay_symbol(symbol, per_set, now, on_step=on_step)
-                except Exception as exc:  # one symbol never stops the others
-                    sym_failed += 1
-                    errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
-                    continue
-                packed: Dict[str, RowCols] = (inputs.pop("packed", None) if isinstance(inputs, dict) else None) or {}
-                alias = (inputs.get("tape_alias") if isinstance(inputs, dict) else None) or {}      # a stub or an older producer returns nothing: no sharing
-                for sid, rows in per_set.items():
-                    if rows and sid not in alias:
-                        packed[sid] = RowCols(rows)
-                for sid, first in alias.items():
-                    # exactly another key's orders: the same columns under this Set's id (rows carry their Set's id, also on a hold-candidate tape "<id>@h<m>")
-                    if per_set.get(sid) and first in packed and len(per_set[sid]) == len(packed[first]):
-                        packed[sid] = packed[first].share(sid.split(HOLD_KEY, 1)[0])
-                    elif per_set.get(sid):
-                        packed[sid] = RowCols(per_set[sid])
-                per_set = {}                          # rows are kept as columns (RowCols): about a sixth of the memory of tuples
+                packed = inputs = None
+                if symbol not in reused:
+                    # Normal replay producers add only Sets with orders.
+                    per_set: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+                    try:
+                        inputs = replay_book._replay_symbol(symbol, per_set, now, on_step=on_step)
+                    except Exception as exc:  # one symbol never stops the others
+                        sym_failed += 1
+                        errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
+                        continue
+                    packed = (inputs.pop("packed", None) if isinstance(inputs, dict) else None) or {}
+                    alias = (inputs.get("tape_alias") if isinstance(inputs, dict) else None) or {}
+                    for sid, rows in per_set.items():
+                        if rows and sid not in alias:
+                            packed[sid] = RowCols(rows)
+                    for sid, first in alias.items():
+                        if per_set.get(sid) and first in packed and len(per_set[sid]) == len(packed[first]):
+                            packed[sid] = packed[first].share(sid.split(HOLD_KEY, 1)[0])
+                        elif per_set.get(sid):
+                            packed[sid] = RowCols(per_set[sid])
+                    per_set = {}
                 with self._lock:
                     if self._topo_gen != gen0:
                         aborted = True
                         break                       # never restore an old-rules chunk after load invalidated it
-                    self._hist_rows[symbol] = packed
-                    if self.hold_auto:
-                        # Only Auto Hold reconstructs entries from these inputs.
-                        self._hist_inputs[symbol] = inputs
+                    if packed is not None:
+                        self._replace_paper_rows(symbol, packed)
+                        if symbol in source_keys:
+                            self._hist_replay_source[symbol] = source_keys[symbol]
+                        else:
+                            self._hist_replay_source.pop(symbol, None)
+                        if self.hold_auto:
+                            self._hist_inputs[symbol] = inputs
                     self._hist_replay_key[symbol] = (lookback0, gen0)
                     prev_at = self._hist_replay_at.get(symbol)
                     self._hist_replay_at[symbol] = time.time()
@@ -3899,13 +4000,18 @@ class SetBook:
             with self._lock:
                 live = {s for s in self.bars if self.usable(s)}
                 for s in [s for s in self._hist_rows if s not in live]:
+                    self._replace_paper_rows(s, {})
                     del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
                     self._hist_inputs.pop(s, None)
                     self._hist_replay_key.pop(s, None)
+                    self._hist_replay_source.pop(s, None)
                     self._hist_replay_at.pop(s, None)
                     self._hist_replay_bar_at.pop(s, None)
-                for s in [s for s in self._sig_cache if s not in live]:
+                dropped_memos = [s for s in self._sig_cache if s not in live]
+                for s in dropped_memos:
                     del self._sig_cache[s]          # and so do their signal memo entries
+                if dropped_memos:
+                    self._sig_meta["revision"] += 1
                 stale = self._topo_gen != gen0      # the Set map changed mid-pass: the rows above mix two grids
                 if stale:
                     aborted = True                  # keep each Set's last complete scores; the next pass redoes them
@@ -3938,6 +4044,10 @@ class SetBook:
                     self._history_snapshot_active = False
                     self._history_snapshot_promoting = True
                 tape_order = sorted(expected.intersection(self._hist_rows) if self.hist_keep_last_complete else self._hist_rows)
+                score_scope = (gen0, lookback0, tuple(tape_order))
+                if score_scope != self._stage_score_scope:
+                    self._stage_score_keys.clear()
+                    self._stage_score_scope = score_scope
                 # Equal exit times order by symbol, whatever the replay order was.
                 # A paper entry at this decision clock cannot use an unordered
                 # close stamped at the same instant as evidence.
@@ -3966,19 +4076,40 @@ class SetBook:
                     rel_failed = False
                     for cursor, st in enumerate([] if stale or defer_score else self.by_idx, 1):
                         try:
+                            score_key = None
+                            params = None
+                            held_paths = ()
                             if self.stage_grid:
                                 self.progress.set_id = st.id
                                 self.progress.sets_done = cursor - 1
                                 self.progress.pct = 90.0 + (cursor - 1) * 10.0 / len(self.by_idx)
                                 self.progress.elapsed_ms = (time.time() - t0) * 1000
+                                held_paths = tuple(self._held_exec_paths.get(st.id, {}))
+                                if rel_acc is None and not self.auto_holds(st):
+                                    params = self.stage_params(st.pack, st)
+                                    score_key = self._paper_stage_key(st, params, tape_order, now, context_cutoff, cutoff, held_paths)
+                                if (score_key is not None and score_key == self._stage_score_keys.get(st.id)
+                                        and st.proc_replayed and not st.last_error):
+                                    # Published tapes are still exact. Freshness
+                                    # and time-based display stats are current.
+                                    self._score_one(st, now=max(now, st.score_at) if st.live else now)
+                                    if cursor % 32 == 0:
+                                        self._lock.release()
+                                        try:
+                                            time.sleep(0)
+                                        finally:
+                                            self._lock.acquire()
+                                        if self._topo_gen != gen0 or self._evaluation_config != evaluation_config:
+                                            stale = aborted = True
+                                            break
+                                    continue
                             full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
                             full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
                             grid_result = None
                             if self.stage_grid:
                                 if self.grid_auto_enabled() and self.auto_holds(st):
                                     self._learn_held_grid_floor(st, full, now)
-                                grid_history = self.grid_history(st, full)
-                                held_paths = dict(self._held_exec_paths.get(st.id, {}))
+                                grid_history = self.grid_history(st, full, params=params)
                                 # This replay runs in the history worker. Keep its CPU work
                                 # outside the lock used by order management and entry picks.
                                 self._lock.release()
@@ -4005,7 +4136,12 @@ class SetBook:
                             st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                             self._score_one(st, now=max(now, st.score_at) if st.live else now)
                             st.n = len(visible)           # paper count in the evaluation window
+                            if score_key is not None:
+                                self._stage_score_keys[st.id] = score_key
+                            else:
+                                self._stage_score_keys.pop(st.id, None)
                         except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
+                            self._stage_score_keys.pop(st.id, None)
                             st.last_error = f"{type(exc).__name__}: {exc}"[:160]
                             st.deact_reason = "error"
                             errors.append(f"set {st.id}: {st.last_error}")
@@ -4115,20 +4251,97 @@ class SetBook:
     def _save_sig_cache_maybe(self, force: bool = False) -> None:
         """Keep the signal memo on disk (overlay signalCachePath) so a restart replays only the bars it has not seen: at most every 10 minutes (the first save 2 minutes after
         the first complete pass), in a background thread over a shallow copy, never in the replay's way. Nothing here can change a signal: the memo is keyed by the window's content."""
-        path = self.sig_cache_path
-        if not path or not self._sig_cache:
-            return
-        now = time.time()
-        meta = self._sig_meta
-        if not force and now - meta["saved_at"] < (600.0 if meta["saved_at"] else 120.0):
-            return
-        meta["saved_at"] = now
-        snap = {sym: dict(c) for sym, c in self._sig_cache.items() if c}
-        salt = meta["salt"]
-        threading.Thread(target=save_signal_cache, args=(path, salt, snap), name="sigcache-save", daemon=True).start()
+        with self._lock:
+            path = self.sig_cache_path
+            meta = self._sig_meta
+            if not path or not self._sig_cache or meta["writing"]:
+                return
+            salt = meta["salt"]
+            key = path, salt, meta["revision"]
+            now = time.time()
+            if not force and (key == meta["saved_key"] or now - meta["saved_at"] < 600):
+                return
+            snap = {sym: c for sym, c in self._sig_cache.items() if c}
+            if not snap:
+                return
+            meta["saved_at"], meta["writing"] = now, True
+
+        def save():
+            try:
+                if save_signal_cache(path, salt, snap):
+                    with self._lock:
+                        meta["saved_key"] = key
+            finally:
+                with self._lock:
+                    meta["writing"] = False
+
+        try:
+            threading.Thread(target=save, name="sigcache-save", daemon=True).start()
+        except RuntimeError:
+            with self._lock:
+                meta["writing"] = False
+
+    def _publish_signal_cache(self, symbol: str, prior: dict, updated: dict) -> None:
+        # Readers and the background writer can keep the previous
+        # immutable memo. Replacing it does not copy an entire universe.
+        with self._lock:
+            if self._sig_cache.get(symbol) is prior:
+                self._sig_cache[symbol] = updated
+                self._sig_meta["revision"] += 1
 
     def _replay_market(self):
         return getattr(self._replay_local, 'market', (self.bars, self.bar_t))
+
+    def _replace_paper_rows(self, symbol: str, packed: Dict[str, RowCols]) -> None:
+        prior = self._hist_rows.get(symbol, {})
+        training_end = self._grid_auto_key[0] if self._grid_auto_key else None
+        training_start = training_end - self.history_bars() * BAR_S if training_end is not None else None
+        if self._stage_score_keys or training_end is not None:
+            for sid in prior.keys() | packed.keys():
+                old, new = prior.get(sid), packed.get(sid)
+                if isinstance(old, RowCols) and new is not None:
+                    if old.same_rows(new):
+                        packed[sid] = old
+                        continue
+                self._stage_score_keys.pop(sid, None)
+                if training_end is not None:
+                    if old is not None and new is not None:
+                        changed = not isinstance(old, RowCols) or not old.same_training_rows(new, training_start, training_end)
+                    else:
+                        part = old or new
+                        if isinstance(part, RowCols) and getattr(part, "ordered", False):
+                            changed = bisect.bisect_left(part.t, training_start) != bisect.bisect_left(part.t, training_end)
+                        else:
+                            changed = any(training_start <= r[0] < training_end for r in part or ())
+                    if changed:
+                        self._grid_auto_key = None
+                        training_end = None
+        self._hist_rows[symbol] = packed
+
+    def _paper_stage_key(self, st: SetState, params: StageParams, symbols: Sequence[str], now: float,
+                         context_cutoff: float, cutoff: float, held_paths: tuple) -> tuple | None:
+        gate_cutoff = now - params.lookback_s
+        left = shown = gate = right = 0
+        first_visible = math.inf
+        for symbol in symbols:
+            cols = self._hist_rows[symbol].get(st.id)
+            if cols is None:
+                continue
+            if not isinstance(cols, RowCols) or not getattr(cols, "ordered", False):
+                return None
+            a = bisect.bisect_left(cols.t, context_cutoff)
+            b = bisect.bisect_left(cols.t, now, a)
+            c = bisect.bisect_left(cols.t, gate_cutoff, a, b)
+            left += a
+            right += b
+            gate += c
+            shown += bisect.bisect_left(cols.t, cutoff, a, b)
+            if c < b:
+                first_visible = min(first_visible, cols.t[c])
+        # The same boundary sums on unchanged, ordered columns mean the same
+        # membership: a moving boundary crosses rows in one direction only.
+        clock = self.grid_clock_key(params, now, first_visible) if held_paths or right - gate >= self.stage_grid.sample_bounds[0, 0][0] else None
+        return (left, shown, gate, right, clock, params.lookback_s, params.floor, params.size_floors, params.long_floor, held_paths)
 
     def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
         market, dated = self._replay_market()
@@ -4144,7 +4357,10 @@ class SetBook:
         self._sig_meta["salt"] = salt
         if self.sig_cache_path and not self._sig_meta["loaded"]:
             self._sig_meta["loaded"] = True
-            for sym, c in load_signal_cache(self.sig_cache_path, salt).items():
+            restored = load_signal_cache(self.sig_cache_path, salt)
+            if restored and not self._sig_cache:
+                self._sig_meta["saved_key"] = self.sig_cache_path, salt, self._sig_meta["revision"]
+            for sym, c in restored.items():
                 self._sig_cache.setdefault(sym, c)        # a saved window answers exactly what the same window answered before the restart
         cache = self._sig_cache.setdefault(symbol, {})
         settings=dict(self.ind_settings)
@@ -4152,7 +4368,9 @@ class SetBook:
         if _ported_pack_sources(self.packs):
             peer_symbols=_ported_peer_symbols(self.packs)
             settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<latest_close]} for s,rs in market.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=dated.get(s)) is not None]
-        signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt, workers=self.replay_workers)
+        signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt,
+                               workers=self.replay_workers,
+                               publish_cache=lambda updated: self._publish_signal_cache(symbol, cache, updated))
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
@@ -4460,9 +4678,14 @@ class SetBook:
         training_sources = []
         for symbol in tape_order:
             bar_open = self._hist_replay_bar_at.get(symbol)
-            prefix = id(self._hist_rows[symbol]) if bar_open is None else min(bar_open, last_training_open)
+            if symbol in self._hist_replay_source:
+                # Publishing a new tape invalidates this fit only if its
+                # already-closed training rows actually changed.
+                prefix = None
+            else:
+                prefix = id(self._hist_rows[symbol]) if bar_open is None else min(bar_open, last_training_open)
             training_sources.append((symbol, prefix))
-        key = (upper, tuple(training_sources), self._evaluation_config)
+        key = (upper, tuple(training_sources), self._evaluation_config, self.history_bars())
         if key == self._grid_auto_key:
             return
         sources = tuple(self._hist_rows[symbol] for symbol in tape_order)
@@ -4470,7 +4693,7 @@ class SetBook:
         previous, minimum = self.pf_step_auto_n, self.pf_set_auto_min
         tolerance, orders_factor, candidates = self.pf_step_auto_tol, self.pf_auto_factor, self.step_auto_candidates()
         cost = cost_as_frac(self.cost_pct)
-        earliest = upper - self.history_bars() * BAR_S
+        earliest = upper - key[3] * BAR_S
         own = {}
         models = {}
         # Per-symbol replay outputs are replaced as units. Reading these references
@@ -4478,7 +4701,8 @@ class SetBook:
         self._lock.release()
         try:
             for sid, fallback in sets:
-                rows = sorted((row for source in sources for row in source.get(sid, ()) if earliest <= row[0] < upper), key=_row_t)
+                rows = self._merge_paper_rows((source.get(sid, ()) for source in sources),
+                                              earliest, math.nextafter(upper, -math.inf))
                 if len(rows) <= previous:
                     continue
                 close = [row[0] for row in rows]
@@ -4514,7 +4738,20 @@ class SetBook:
             self.set_floor_auto[st.id] = learned
 
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
-        return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
+        return self._merge_paper_rows((self._hist_rows[s].get(key, ()) for s in tape_order), cutoff, until)
+
+    @staticmethod
+    def _merge_paper_rows(parts, cutoff: float, until: Optional[float]) -> List[tuple]:
+        rows = []
+        for part in parts:
+            if isinstance(part, RowCols) and getattr(part, "ordered", False):
+                start = bisect.bisect_left(part.t, cutoff)
+                end = len(part) if until is None else bisect.bisect_right(part.t, until, start)
+                rows.extend(part[i] for i in range(start, end))
+            else:
+                rows.extend(row for row in part if row[0] >= cutoff and (until is None or row[0] <= until))
+        rows.sort(key=_row_t)
+        return rows
 
     def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float, until: Optional[float] = None,
                      scoring_cutoff: Optional[float] = None) -> List[tuple]:
@@ -4761,8 +4998,9 @@ class SetBook:
 
     def grid_history(self, st: SetState, rows: Sequence[tuple] = (), *,
                      closes: Sequence[float] = (), entries: Sequence[float] = (),
-                     nets: Sequence[float] = ()) -> stage_grid.StageHistory:
-        params = self.stage_params(st.pack, st)
+                     nets: Sequence[float] = (), params: StageParams | None = None) -> stage_grid.StageHistory:
+        if params is None:
+            params = self.stage_params(st.pack, st)
         if rows:
             cf = cost_as_frac(self.cost_pct)
             closes = [finite(row[0]) for row in rows]
@@ -4783,6 +5021,14 @@ class SetBook:
                 if self.grid_auto_enabled() else None)
         return stage_grid.StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
                                        params.floor_for, risk, main_filter, need, window_auto=auto)
+
+    def grid_clock_key(self, params: StageParams, now: float, first_visible: float) -> tuple:
+        """Time inputs that can change a verdict with the same closed evidence."""
+        hour = auto_set_pf.training_window(now)[1] if self.grid_auto_enabled() else None
+        # No Base long window can reach a drawdown limit before its
+        # oldest visible close can reach it. Consistency is tape-only.
+        drawdown = now if params.max_dd_s <= params.lookback_s and now - first_visible >= params.max_dd_s else None
+        return hour, drawdown
 
     def exec_lane_id(self, st: SetState) -> str:
         result = st.exec_grid
@@ -4816,6 +5062,7 @@ class SetBook:
         judged on the Main Set) and Real Negative Set (opened while the Main Set's recent average was negative), and its Main short window.
         Every stage after Base reads these Sets, never the raw tape."""
         if self.stage_grid:
+            self._stage_score_keys.pop(st.id, None)
             if grid_result is None:
                 decision = now if now is not None else math.nextafter(full[-1][0], math.inf) if full else 0.0
                 grid_result = self.grid_history(st, full).evaluate(decision, streams=True, limit=PROC_KEEP)
