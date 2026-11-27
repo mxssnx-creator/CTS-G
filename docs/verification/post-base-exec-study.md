@@ -73,3 +73,30 @@ python3 scripts/post_base_exec.py --data validation --cache validation.pkl.gz \
 python3 scripts/render_post_base_exec.py --development development.json \
   --validation validation.json --out CTS-G-Post-Base-Exec-PF.html
 ```
+
+## Measured results
+
+Each period completed 684 cases across 5,456 native Sets and 30 symbols.
+The baseline rows below permit all 60 final-window choices with Axis
+and Block off. Profitable hours use all 24 forward hours.
+
+| Base minimum PF | Final minimum PF | Development PF | Closes | Profitable hours | Validation PF | Closes | Profitable hours |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.5 | 2.0 | 0.695 | 865 | 5/24 (20.8%) | 0.692 | 721 | 7/24 (29.2%) |
+| 1.5 | 2.5 | 0.697 | 862 | 6/24 (25.0%) | 0.695 | 726 | 8/24 (33.3%) |
+| 2.0 | 2.0 | 0.649 | 801 | 5/24 (20.8%) | 0.734 | 699 | 9/24 (37.5%) |
+| 2.0 | 2.5 | 0.649 | 791 | 5/24 (20.8%) | 0.744 | 708 | 9/24 (37.5%) |
+| 2.5 | 2.0 | 0.678 | 770 | 8/24 (33.3%) | 0.709 | 627 | 9/24 (37.5%) |
+| 2.5 | 2.5 | 0.690 | 753 | 8/24 (33.3%) | 0.713 | 625 | 8/24 (33.3%) |
+
+Across the 360 isolated signed-window cases, 0 reached PF above 1
+with at least 30 closes in each period.
+
+The Axis and Block selection rule confirmed 0 settings. The
+rule requires a development PF lift over the matching baseline, a settled
+drawdown within 110% of the baseline, enough resizes or adds, and PF above
+1 in both periods with the same criteria applied on validation.
+
+Verification included four study regressions, 34 native stage-grid checks,
+31 stage regressions and 10 Block regressions. Hourly, Set-path and symbol
+close counts reconcile for every reported case.

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Render a self-contained comparison of two completed Base → Exec studies."""
 import argparse
+import base64
+import gzip
+import hashlib
 from itertools import product
 import json
 import math
@@ -63,6 +66,21 @@ def paired(development, validation):
             selected.append({"basePf": base_floor, "execPf": exec_floor, "family": label,
                              "case": case_key(best) if best else None, "confirmed": bool(passed)})
     return selected
+
+
+def encode_details(periods):
+    """Keep exact path and symbol tables lazy, sharing identical strategy outcomes."""
+    encoded, ids = [], {}
+    for period in periods:
+        for row in period["cases"]:
+            detail = json.dumps({k: row.pop(k) for k in ("paths", "bySymbol")},
+                                separators=(",", ":"), allow_nan=False).encode("utf-8")
+            digest = hashlib.sha256(detail).digest()
+            if digest not in ids:
+                ids[digest] = len(encoded)
+                encoded.append(base64.b64encode(gzip.compress(detail, compresslevel=4, mtime=0)).decode("ascii"))
+            row["detail"] = ids[digest]
+    return encoded
 
 
 TEMPLATE = r"""<!doctype html>
@@ -147,6 +165,16 @@ const R=JSON.parse(document.getElementById("payload").textContent), D=R.periods,
       floorPairs=[1.5,2,2.5].flatMap(b=>[2,2.5].map(e=>[b,e]));
 const execWindow=w=>w[0]+" "+w[1]+" / "+w[2]+" "+w[3];
 const baseWindow=w=>w[0]+" / "+w[1]+" "+w[4]+" / "+w[2]+" "+w[3];
+function strategyLabel(r){
+  const a=r.axisSettings, b=r.blockSettings;
+  const axis=a?"Axis "+(a.combos?"singles and pairs":"singles")+", "+num(a.vmax)+"× cap":"Axis off";
+  if(!b)return axis+" / Block off";
+  if(r.block==="overlay")return axis+" / Overlay Block";
+  const count=b.blockCounts[0], shared=b.blockStackType==="shared";
+  const sizing=shared?pct(100*b.blockSharedTotal)+" total":pct(100*count.ratio)+" each";
+  const relation=b.blockRelations.map(x=>x[0].toUpperCase()+x.slice(1)).join(" + ");
+  return axis+" / "+(shared?"Shared":"Additive")+" Block, "+num(count.step)+" costs, "+sizing+", "+relation;
+}
 const sign=s=>s[0];
 const path=(d,x)=>{const [st,b,e]=x, bw=d.baseWindows[b], ew=d.execWindows[e];
   return esc(d.sets[st][0])+"/base:"+bw[0]+"-"+bw[1]+sign(bw[4])+"-"+bw[2]+sign(bw[3])+
@@ -166,7 +194,7 @@ table("selection",["Base / Final PF","Family","Development pick","Dev Execute PF
   const picked=s.case?maps.map(m=>m.get(JSON.stringify(s.case))):[];
   const activity=r=>num(r.adds)+" / "+num(r.axisResized);
   return [f(s.basePf)+" / "+f(s.execPf),s.family,
-    picked.length?esc(picked[0].axis+" / "+picked[0].block):"No qualifying pick",
+    picked.length?esc(strategyLabel(picked[0])):"No qualifying pick",
     picked.length?pfmt(picked[0]):"—",picked.length?activity(picked[0]):"—",
     picked.length?pfmt(picked[1]):"—",picked.length?activity(picked[1]):"—",
     s.confirmed?sty("Confirmed","good"):picked.length?"Below confirmation rule":"—"];}));
@@ -175,9 +203,11 @@ $("provenance").innerHTML=D.map(d=>"<p><strong>"+esc(d.label)+"</strong> · "+da
   (d.source?' <a href="'+esc(d.source)+'">BingX candle endpoint</a>':"")+"</p>").join("");
 table("hashes",["Symbol",...D.map(d=>esc(d.label)+" SHA-256")],D[0].symbols.map(s=>[esc(s),...D.map(d=>esc(d.inputHashes[s]))]));
 $("patch").textContent=JSON.stringify(D[0].overlayPatch,null,2);
-function detail(d,r,b){
+let detailRequest=0;
+async function detail(d,r,b){
+  const request=++detailRequest;
   document.querySelectorAll("button.case").forEach(el=>el.setAttribute("aria-pressed",String(el.dataset.key===phaseKey(r))));
-  const label=r.window===null?"Portfolio · "+r.axis+" / "+r.block:execWindow(d.execWindows[r.window]);
+  const label=r.window===null?"Portfolio · "+strategyLabel(r):execWindow(d.execWindows[r.window]);
   $("detail-heading").textContent=label;
   const targetHours=r.hourly.filter(h=>h.gain>0&&(h.loss===0||h.pf>=r.execPf)).length;
   $("detail-summary").textContent="Execute PF "+pf(r)+" · "+num(r.opened)+" opens · "+num(r.closed)+" closes · "+
@@ -195,10 +225,19 @@ function detail(d,r,b){
       num(b.eligible[i]),num(b.execFull[k][i]),num(b.execPassed[j][k][i])]));
   const vals=r=>[num(r.closed),num(r.held),num(r.long),num(r.short),pfmt(r),nfmt(r.net),num(r.adds)];
   const tail=["Closes","Held","Long closes","Short closes","Exec PF","Net","Settled adds"];
-  table("paths",["Set path",...tail],r.paths.map(x=>[path(d,x),...vals(x[3])]));
-  table("symbols",["Symbol",...tail],r.bySymbol.map(x=>[esc(x[0]),...vals(x[1])]));
   $("parameter-details").hidden=!(r.axisSettings||r.blockSettings);
   $("params").textContent=JSON.stringify({axis:r.axisSettings??null,block:r.blockSettings??null},null,2);
+  for(const id of ["paths","symbols"])$(id).textContent="Loading settlement details…";
+  try{
+    const compressed=Uint8Array.from(atob(R.details[r.detail]),c=>c.charCodeAt(0));
+    const stream=new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
+    const unpacked=await new Response(stream).json();
+    if(request!==detailRequest)return;
+    table("paths",["Set path",...tail],unpacked.paths.map(x=>[path(d,x),...vals(x[3])]));
+    table("symbols",["Symbol",...tail],unpacked.bySymbol.map(x=>[esc(x[0]),...vals(x[1])]));
+  }catch(error){
+    if(request===detailRequest)for(const id of ["paths","symbols"])$(id).textContent="Settlement details could not be opened in this browser.";
+  }
 }
 function sets(d,b){
   const q=$("set-search").value.trim().toLowerCase(), valid=new Map(b.baseSets);
@@ -219,7 +258,7 @@ function refresh(){
   table("matrix",[wide?"Axis / Block":"Short / Last","Set-minutes with full samples","Coverage","Qualified","Opens","Closes",
     "Execute PF","Net","Good hours","Drawdown","Adds","Axis resizes"],cases.map(r=>{
     const k=r.window??d.execWindows.length, n=sum(b.execFull[k]);
-    const label=wide?r.axis+" / "+r.block:execWindow(d.execWindows[k]);
+    const label=wide?strategyLabel(r):execWindow(d.execWindows[k]);
     return ['<button class="case" type="button" aria-pressed="false" data-key="'+esc(phaseKey(r))+'">'+esc(label)+"</button>",
       num(n),eligible?pct(100*n/eligible):"—",num(sum(b.execPassed[j][k])),num(r.opened),num(r.closed),pfmt(r),nfmt(r.net),
       pct(r.hourSuccessPct),punit(r.settledDrawdown),num(r.adds),num(r.axisResized)];}));
@@ -246,7 +285,9 @@ def main():
     args = parser.parse_args()
     runs = [json.loads(p.read_text()) for p in (args.development, args.validation)]
     selection = paired(*runs)
-    payload = json.dumps({"periods": runs, "selection": selection}, separators=(",", ":"), allow_nan=False)
+    details = encode_details(runs)
+    payload = json.dumps({"periods": runs, "selection": selection, "details": details},
+                         separators=(",", ":"), allow_nan=False)
     args.out.write_text(TEMPLATE.replace("__PAYLOAD__", payload.replace("<", r"\u003c")), encoding="utf-8")
     print(f"{len(runs[0]['cases'])} cases per period · {args.out.stat().st_size:,} bytes")
 
