@@ -668,16 +668,20 @@ def micro_tactics_fire_on_their_pattern_are_causal_and_leave_group_votes_alone()
         later = rows + [[rows[-1][3], rows[-1][3] * 1.5, rows[-1][3] * 0.5, rows[-1][3], 9e9]]
         if L.LIB[name](rows) != got or L.LIB[name](rows[:]) != got or got != L.LIB[name](list(later[:-1])):
             bad.append((name, "not causal", got))
-    # every micro name exists at every range and timeframe, and the voted groups hold none of them
+    # Every micro name keeps its declared lookbacks. Voted groups include none of them.
+    from trend_reversal import TACTICS
     micro = [f for f, (g, _) in L.FAMILIES.items() if g.startswith("micro")]
-    missing = [f"{f}_{suf}" for f in micro for suf in ("n5_t1", "n8_t5", "n14_t15", "n21_t30", "c8", "x14") if f"{f}_{suf}" not in L.LIB]
+    reversal = {"trrev" + tactic for tactic in TACTICS}
+    classic_micro = [f for f in micro if f not in reversal]
+    missing = [f"{f}_{suf}" for f in classic_micro for suf in ("n5_t1", "n8_t5", "n14_t15", "n21_t30", "c8", "x14") if f"{f}_{suf}" not in L.LIB]
+    missing.extend(f"{f}_n10_t1" for f in reversal if f"{f}_n10_t1" not in L.LIB)
     members = {g: sorted(f for f, (gg, _) in L.FAMILIES.items() if gg == g) for g in ("trend", "break", "revert", "volume")}
     leaked = [f for f in micro if any(f in m for m in members.values())]
     # the all-family vote is built without the micro families: its member count equals the voted groups' families
     voted = sum(len(m) for m in members.values()) + sum(1 for f, (g, _) in L.FAMILIES.items() if g in ("price",))
     allfam = sum(1 for f, (g, _) in L.FAMILIES.items() if not g.startswith("micro"))
-    ok = not bad and not missing and not leaked and len(micro) == 14 and voted == allfam
-    return ok, f"{len(cases)} patterns fire as written{(' bad ' + str(bad)) if bad else ''}; {len(micro)} micro families at every range/timeframe (missing {missing[:3]}); voted groups unchanged (leaked {leaked}); all-vote families {allfam}"
+    ok = not bad and not missing and not leaked and len(classic_micro) == 14 and reversal.issubset(micro) and voted == allfam
+    return ok, f"{len(cases)} patterns fire as written{(' bad ' + str(bad)) if bad else ''}; {len(micro)} micro families on their declared grids (missing {missing[:3]}); voted groups unchanged (leaked {leaked}); all-vote families {allfam}"
 
 
 CHECKS = [

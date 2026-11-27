@@ -157,16 +157,20 @@ def the_signal_memo_preserves_utc_alignment():
 
 
 def slow_timeframes_read_two_warm_ups():
-    """Owner 2026-11-14 ("make also 15, 30 min work"): every Signals pack reads at least two warm-ups of its own timeframe bars, so a 30 min EMA of 55 is warm
-    when it signals (the 1,920-row window gave a 30 min pack 64 bars)."""
+    """Slow legacy Signals retain two warm-ups. Finite-window reversal Signals require the current and previous states."""
     short = []
     for src in ss.SOURCES:
         for rng in ss.RANGES:
             for tf in ss.TIMEFRAMES:
                 pk = sp.pack_name(src, rng, tf)
-                if sp.window_minutes(pk) // tf < 2 * ss.warmup_bars(src, rng) + 2:
+                warmup = ss.warmup_bars(src, rng)
+                actual = sp.window_minutes(pk)
+                if src in ss.REVERSAL_SOURCES:
+                    if actual != (warmup + 1) * tf:
+                        short.append(pk)
+                elif actual < (2 * warmup + 2) * tf:
                     short.append(pk)
-    return not short, f"packs under two warm-ups: {short[:5]}"
+    return not short, f"packs outside their completed-bar warm-up contract: {short[:5]}"
 
 
 CHECKS = [
