@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
 from itertools import product
 import math
@@ -52,6 +52,9 @@ class StageOptions(NamedTuple):
     lasts: tuple[int, ...]
     last_modes: tuple[str, ...]
     short_modes: tuple[str, ...]
+    enabled: bool = True
+    min_pf: float | None = None
+    negative_shorts: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -93,23 +96,58 @@ class StageGrid:
         for stage in STAGES:
             config = raw.get(stage, {})
             is_base = stage == "base"
-            if not isinstance(config, dict) or set(config) - {"short", "last", "lastModes", "shortModes", "long" if is_base else "longModes"}:
+            if not isinstance(config, dict) or set(config) - {
+                "enabled", "minPf", "negativeShort", "short", "last", "lastModes", "shortModes",
+                "long" if is_base else "longModes",
+            }:
                 raise ValueError(f"Invalid stageLastN.{stage} options")
+            enabled = config.get("enabled", True)
+            if not isinstance(enabled, bool) or (is_base and not enabled):
+                raise ValueError(f"Invalid stageLastN.{stage}.enabled")
+            min_pf = config.get("minPf")
+            if min_pf is not None and (
+                isinstance(min_pf, bool) or not isinstance(min_pf, (int, float))
+                or not math.isfinite(float(min_pf)) or min_pf < 1.0
+            ):
+                raise ValueError(f"Invalid stageLastN.{stage}.minPf")
+            if not enabled:
+                stages.append(StageOptions((), (), (), ("positive",), ("positive",), False,
+                                           float(min_pf) if min_pf is not None else None, ()))
+                continue
             if is_base:
                 longs = counts(config, "long", BASE_LONG)
             long_modes = () if is_base else modes(config, "longModes", ("none", "inherit"), stage)
             shorts = counts(config, "short", LATE_SHORT if stage in ("real", "exec") else SHORT)
             short_modes = modes(config, "shortModes", SIGN_MODES, stage)
+            negative_shorts = None
+            if "negativeShort" in config:
+                raw_negative = config["negativeShort"]
+                if not isinstance(raw_negative, (tuple, list)) or any(
+                    type(n) is not int or n not in shorts for n in raw_negative
+                ) or len(set(raw_negative)) != len(raw_negative):
+                    raise ValueError(f"Invalid stageLastN.{stage}.negativeShort")
+                negative_shorts = tuple(sorted(raw_negative))
             stages.append(StageOptions(long_modes, shorts, counts(config, "last", LAST),
-                                       modes(config, "lastModes", SIGN_MODES, stage), short_modes))
+                                       modes(config, "lastModes", SIGN_MODES, stage), short_modes, True,
+                                       float(min_pf) if min_pf is not None else None, negative_shorts))
         return cls(longs, tuple(stages))
 
     @lru_cache(maxsize=128)
     def windows(self, depth: int, base_long: int) -> tuple[Window, ...]:
-        modes, shorts, lasts, last_modes, short_modes = self.options[depth]
+        option = self.options[depth]
+        modes, shorts, lasts, last_modes, short_modes = option[:5]
+        if not option.enabled:
+            return (Window(0, 0, 0, "positive", "positive"),)
         longs = self.longs if depth == 0 else tuple(base_long if mode == "inherit" else 0 for mode in modes)
-        return tuple(Window(long, short, last, last_mode, short_mode)
-                     for long, short, last, last_mode, short_mode in product(longs, shorts, lasts, last_modes, short_modes))
+        out = []
+        for long, short, last, last_mode in product(longs, shorts, lasts, last_modes):
+            selected_short_modes = short_modes
+            if option.negative_shorts is not None:
+                selected_short_modes = tuple(mode for mode in short_modes if mode != "negative")
+                if short in option.negative_shorts:
+                    selected_short_modes += ("negative",)
+            out.extend(Window(long, short, last, last_mode, short_mode) for short_mode in selected_short_modes)
+        return tuple(out)
 
     def capacities(self) -> tuple[int, ...]:
         product_so_far = 1
@@ -135,7 +173,7 @@ class StageGrid:
     @cached_property
     def floor_sizes(self) -> frozenset[int]:
         sizes = {n for options in self.options for n in (*options.shorts, *options.lasts)}
-        sizes.update(n for minimum, maximum in self.sample_bounds.values() for n in range(minimum, maximum + 1))
+        sizes.update(n for minimum, maximum in self.sample_bounds.values() for n in range(max(1, minimum), maximum + 1))
         return frozenset(sizes.union(self.longs))
 
     def insufficient(self) -> GridResult:
@@ -162,11 +200,22 @@ class StageGrid:
         return tuple(out)
 
     def settings(self) -> dict:
-        return {"enabled": True, **{
-            stage: {"short": option.shorts, "last": option.lasts, "lastModes": option.last_modes, "shortModes": option.short_modes,
-                    **({"long": self.longs} if not option.long_modes else {"longModes": option.long_modes})}
-            for stage, option in zip(STAGES, self.options)
-        }}
+        out = {"enabled": True}
+        for stage, option in zip(STAGES, self.options):
+            if not option.enabled:
+                out[stage] = {"enabled": False}
+                if option.min_pf is not None:
+                    out[stage]["minPf"] = option.min_pf
+                continue
+            config = {"short": option.shorts, "last": option.lasts,
+                      "lastModes": option.last_modes, "shortModes": option.short_modes}
+            if option.negative_shorts is not None:
+                config["negativeShort"] = option.negative_shorts
+            if option.min_pf is not None:
+                config["minPf"] = option.min_pf
+            config.update({"long": self.longs} if not option.long_modes else {"longModes": option.long_modes})
+            out[stage] = config
+        return out
 
 
 def lane_id(base_set_id: str, path: Path) -> str:
@@ -240,8 +289,7 @@ class StageOrder(NamedTuple):
 
 
 @dataclass(frozen=True, slots=True)
-class GridResult:
-    counts: tuple[StageCount, ...]
+class GridRoute:
     path: Path = ()
     evidence: Evidence = field(default_factory=Evidence)
     streams: tuple[tuple[StageOrder, ...], ...] = ()
@@ -262,10 +310,9 @@ class GridResult:
     def rank(self) -> tuple[float, int]:
         return evidence_rank(self.evidence)
 
-    def report(self, grid: StageGrid, set_id: str) -> dict:
+    def report(self, set_id: str) -> dict:
         ids = [lane_id(set_id, self.path[:depth]) for depth in range(len(self.path) + 1)]
-        return {"stages": {s: n.report(total) for s, n, total in zip(STAGES, self.counts, grid.capacities())},
-                "id": ids[-1] if self.path else None,
+        return {"id": ids[-1] if self.path else None,
                 "parentIds": dict(zip(STAGES, ids[:-1])),
                 "setIds": dict(zip(STAGES, ids[1:])),
                 "windows": path_settings(self.path),
@@ -277,6 +324,46 @@ class GridResult:
                                     for s, floors in zip(STAGES, self.selected_floors)},
                 "validatedBase": self.validated_base.report(),
                 "postStages": {s: ev.report() for s, ev in zip(STAGES, self.post_evidence)}}
+
+
+@dataclass(frozen=True, slots=True)
+class GridResult:
+    counts: tuple[StageCount, ...]
+    # A base Set publishes every fully qualified path. Per-route candidates
+    # carry one path and leave this tuple empty.
+    routes: tuple[GridRoute, ...] = ()
+    path: Path = ()
+    evidence: Evidence = field(default_factory=Evidence)
+    streams: tuple[tuple[StageOrder, ...], ...] = ()
+    row_ids: tuple[tuple[int, ...], ...] = ()
+    selected_evidence: tuple[Evidence, ...] = ()
+    post_evidence: tuple[Evidence, ...] = ()
+    selected_blocks: tuple[tuple[Evidence, ...], ...] = ()
+    validated_base: Evidence = field(default_factory=Evidence)
+    validated_base_ids: tuple[int, ...] = ()
+    stream_sizes: tuple[int, ...] = ()
+    selected_floors: tuple[tuple[float, ...], ...] = ()
+
+    @property
+    def ready(self) -> bool:
+        return len(self.path) == len(STAGES) if self.path else any(route.ready for route in self.routes)
+
+    @property
+    def rank(self) -> tuple[float, int]:
+        if self.routes:
+            return max((route.rank for route in self.routes), default=(0.0, 0))
+        return evidence_rank(self.evidence)
+
+    def report(self, grid: StageGrid, set_id: str) -> dict:
+        routes = self.routes or ((GridRoute(
+            path=self.path, evidence=self.evidence, stream_sizes=self.stream_sizes or tuple(map(len, self.streams)),
+            selected_evidence=self.selected_evidence, post_evidence=self.post_evidence,
+            selected_blocks=self.selected_blocks, validated_base=self.validated_base,
+            selected_floors=self.selected_floors,
+        ),) if self.path else ())
+        return {"stages": {s: n.report(total) for s, n, total in zip(STAGES, self.counts, grid.capacities())},
+                "routeCount": len(routes),
+                "paths": [route.report(set_id) for route in routes]}
 
 
 def evidence_rank(evidence: Evidence) -> tuple[float, int]:
@@ -307,7 +394,7 @@ class _Tape:
         )
         self.decisions = None
         self.numeric = None
-        self.masks: dict[tuple[int, int, str], int] = {}
+        self.masks: dict[tuple[int, int, str, float | None], int] = {}
         self.learned_floors: dict[tuple[int, int, str, float], float] | None = None
 
     def indices(self, now: float) -> tuple[int, int]:
@@ -324,7 +411,9 @@ class _Tape:
             gain = math.fsum(v for v in self.values[start:end] if v > 0)
         return Evidence(size, gain, loss)
 
-    def floor(self, size: int, offset: int, kind: str, when: float) -> float:
+    def floor(self, size: int, offset: int, kind: str, when: float, floor_override: float | None = None) -> float:
+        if floor_override is not None:
+            return floor_override
         policy = self.owner.window_auto
         fallback = self.owner.floor_at(size, when) if policy is None else policy.fallback
         if policy is None or self.sign or size == 1 or len(self.ids) < size + offset + policy.minimum:
@@ -384,7 +473,8 @@ class _Tape:
         np.divide(gain, loss, out=ratios, where=loss > 0)
         return list(zip(ratios.tolist(), (self.values[i] for i in included[qualified])))
 
-    def test(self, size: int, end: int, kind: str, entry: float, offset: int = 0) -> Evidence | None:
+    def test(self, size: int, end: int, kind: str, entry: float, offset: int = 0,
+             floor_override: float | None = None) -> Evidence | None:
         evidence = self.evidence(size, end)
         gain, loss = evidence.gain, evidence.loss
         if kind in SIGN_MODES:
@@ -397,7 +487,7 @@ class _Tape:
             if net <= NEG_EPS:
                 return None
             if loss > 0:
-                threshold = self.floor(size, offset, kind, entry)
+                threshold = self.floor(size, offset, kind, entry, floor_override)
                 if math.isclose(gain, loss * threshold, rel_tol=1e-8):
                     values = self.values[end - size:end]
                     positive = math.fsum(v for v in values if v > 0)
@@ -407,7 +497,7 @@ class _Tape:
                 if gain < loss * threshold:
                     return None
             return evidence
-        floor = self.floor(size, offset, kind, entry)
+        floor = self.floor(size, offset, kind, entry, floor_override)
         if loss > 0:
             if math.isclose(gain, loss * floor, rel_tol=1e-8):
                 # A borderline result must be independent of any older prefix.
@@ -425,8 +515,8 @@ class _Tape:
             return None
         return evidence
 
-    def mask(self, size: int, offset: int, kind: str) -> int:
-        key = (size, offset, kind)
+    def mask(self, size: int, offset: int, kind: str, floor_override: float | None = None) -> int:
+        key = (size, offset, kind, floor_override)
         if key in self.masks:
             return self.masks[key]
         always = (self.sign > 0 and (kind in ("positive", "pf") or kind == "risk" and not self.owner.base_risk)
@@ -436,11 +526,13 @@ class _Tape:
         if always:
             # With a uniform sign the only remaining test is having all of the
             # disjoint blocks. Every equivalent mask reuses one count query.
-            key = (size + offset, 0, "samples")
-            if key in self.masks:
-                return self.masks[key]
+            sample_key = (size + offset, 0, "samples", None)
+            if sample_key in self.masks:
+                mask = self.masks[sample_key]
+                self.masks[key] = mask
+                return mask
         if np is not None and len(self.ids) >= 96 and not always:
-            mask = self.vector_mask(size, offset, kind)
+            mask = self.vector_mask(size, offset, kind, floor_override)
             self.masks[key] = mask
             return mask
         if self.decisions is None:
@@ -448,13 +540,15 @@ class _Tape:
         bits = bytearray((len(self.ids) + 7) // 8)
         for j, (start, end) in enumerate(self.decisions):
             end -= offset
-            if end - start >= size and (always or self.test(size, end, kind, self.owner.entries[self.ids[j]], offset) is not None):
+            if end - start >= size and (
+                always or self.test(size, end, kind, self.owner.entries[self.ids[j]], offset, floor_override) is not None
+            ):
                 bits[j // 8] |= 1 << (j % 8)
         mask = int.from_bytes(bits, "little")
         self.masks[key] = mask
         return mask
 
-    def vector_mask(self, size: int, offset: int, kind: str) -> int:
+    def vector_mask(self, size: int, offset: int, kind: str, floor_override: float | None = None) -> int:
         if self.numeric is None:
             times = np.asarray(self.times)
             entries = np.fromiter((self.owner.entries[i] for i in self.ids), dtype=np.float64, count=len(self.ids))
@@ -475,7 +569,9 @@ class _Tape:
         right = ends[rows] - offset
         left = right - size
         gain, loss = gains[right] - gains[left], losses[right] - losses[left]
-        if entry_hours is not None:
+        if floor_override is not None:
+            floors = np.full(len(rows), floor_override)
+        elif entry_hours is not None:
             # Every entry in this hour uses the same strict training prefix of
             # this parent and block. Resolve it once, even when it falls back.
             hours, hour_ids = entry_hours
@@ -504,11 +600,14 @@ class _Tape:
         verify = (good | borderline) if kind == "risk" and self.owner.base_risk else borderline
         for j in np.flatnonzero(verify):
             row = self.ids[rows[j]]
-            good[j] = self.test(size, int(right[j]), kind, self.owner.entries[row], offset) is not None
+            good[j] = self.test(size, int(right[j]), kind, self.owner.entries[row], offset, floor_override) is not None
         valid[rows] = good
         return int.from_bytes(np.packbits(valid, bitorder="little").tobytes(), "little")
 
     def passes(self, w: Window, depth: int, now: float) -> bool:
+        option = self.owner.grid.options[depth]
+        if not option.enabled:
+            return True
         start, end = self.indices(now)
         if end - start < w.need:
             return False
@@ -516,16 +615,22 @@ class _Tape:
             self.values[max(start, end - self.owner.filter_need):end]
         ):
             return False
-        return (all(self.test(n, end - offset, kind, now, offset) is not None
+        return (all(self.test(n, end - offset, kind, now, offset, option.min_pf) is not None
                     for n, offset, kind in window_blocks(w, depth) if n)
-                and self.test(w.need, end, "pf", now) is not None)
+                and self.test(w.need, end, "pf", now, floor_override=option.min_pf) is not None)
 
     def child_mask(self, w: Window, depth: int) -> int:
-        mask = self.mask(w.last, 0, w.last_mode) & self.mask(w.short, w.last, "pf" if w.short_mode == "positive" else "negative")
+        option = self.owner.grid.options[depth]
+        if not option.enabled:
+            return (1 << len(self.ids)) - 1
+        floor = option.min_pf
+        mask = self.mask(w.last, 0, w.last_mode, floor) & self.mask(
+            w.short, w.last, "pf" if w.short_mode == "positive" else "negative", floor
+        )
         if mask and w.long:
-            mask &= self.mask(w.long, w.last + w.short, "risk" if depth == 0 else "pf")
+            mask &= self.mask(w.long, w.last + w.short, "risk" if depth == 0 else "pf", floor)
         if mask:
-            mask &= self.mask(w.need, 0, "pf")
+            mask &= self.mask(w.need, 0, "pf", floor)
         if mask and depth == 1 and self.owner.main_filter:
             mask &= self.owner.filter_mask(self)
         return mask
@@ -674,10 +779,18 @@ class StageHistory:
         evidence, floors = [], []
         for depth, w in enumerate(path):
             _, end = tape.indices(now)
+            option = self.grid.options[depth]
+            if not option.enabled:
+                evidence.append((Evidence(), Evidence(), Evidence()))
+                floors.append((0.0, 0.0, 0.0, option.min_pf or 0.0))
+                if depth + 1 < len(path):
+                    tape = self.child(tape, tape.child_mask(w, depth))
+                continue
             blocks = tuple(reversed(window_blocks(w, depth)))
             evidence.append(tuple(tape.evidence(n, end - offset) if n else Evidence() for n, offset, _ in blocks))
-            floors.append((*tuple(tape.floor(n, offset, kind, now) if n else 0.0 for n, offset, kind in blocks),
-                           tape.floor(w.need, 0, "pf", now)))
+            floors.append((*tuple(tape.floor(n, offset, kind, now, option.min_pf) if n else 0.0
+                                 for n, offset, kind in blocks),
+                           tape.floor(w.need, 0, "pf", now, option.min_pf)))
             if depth + 1 < len(path):
                 tape = self.child(tape, tape.child_mask(w, depth))
         return tuple(evidence), tuple(floors)
@@ -724,13 +837,29 @@ class StageHistory:
             tally.evaluated = len(choices)
             start, end = tape.indices(now)
             size = end - start
+            option = self.grid.options[depth]
+            if not option.enabled:
+                tally.sample_full = tally.qualified = 1
+                evidence = tape.evidence(size, end)
+                tally.orders, tally.gain, tally.loss = evidence
+                neutral = choices[0]
+                if depth == len(STAGES) - 1:
+                    return GridResult(counts, (GridRoute(path=(neutral,), evidence=evidence),))
+                if depth == len(STAGES) - 2 and self.window_auto is None:
+                    max_window = bounds[depth + 1, base_long][1]
+                    ids = self.latest_members(tape, (1 << len(tape.ids)) - 1, start, end, max_window)
+                    next_result = last_stage(ids, base_long)
+                else:
+                    next_result = walk(depth + 1, tape, base_long)
+                for dest, source in zip(counts[1:], next_result.counts):
+                    dest.add(source)
+                return GridResult(counts, tuple(replace(route, path=(neutral, *route.path))
+                                                for route in next_result.routes))
             if size < bounds[depth, base_long][0]:
                 return GridResult(counts)
-            results: dict[tuple[int, int, str], Evidence | None] = {}
-            paths: dict[tuple[int, int], tuple[Window, int]] = {}
-            picked_path: Path = ()
-            picked_evidence = Evidence()
-            picked_key = (0, (0.0, 0))
+            results: dict[tuple[int, int, str, float | None], Evidence | None] = {}
+            paths: dict[tuple[int, int], list[Window]] = {}
+            qualified_routes: list[GridRoute] = []
             filter_ok = depth != 1 or not self.main_filter or self.main_filter(
                 tape.values[max(start, end - self.filter_need):end]
             )
@@ -744,15 +873,15 @@ class StageHistory:
                 for n, offset, kind in window_blocks(w, depth):
                     if not n:
                         continue
-                    key = (n, offset, kind)
+                    key = (n, offset, kind, option.min_pf)
                     if key not in results:
-                        results[key] = tape.test(n, end - offset, kind, now, offset)
+                        results[key] = tape.test(n, end - offset, kind, now, offset, option.min_pf)
                     if results[key] is None:
                         break
                 else:
-                    key = (w.need, 0, "pf")
+                    key = (w.need, 0, "pf", option.min_pf)
                     if key not in results:
-                        results[key] = tape.test(w.need, end, "pf", now)
+                        results[key] = tape.test(w.need, end, "pf", now, floor_override=option.min_pf)
                     evidence = results[key]
                     if evidence is None:
                         continue
@@ -763,15 +892,12 @@ class StageHistory:
                     tally.gain += evidence.gain
                     tally.loss += evidence.loss
                     if depth == len(STAGES) - 1:
-                        candidate_key = (1, evidence_rank(evidence))
-                        if candidate_key > picked_key:
-                            picked_path, picked_evidence, picked_key = (w,), evidence, candidate_key
+                        qualified_routes.append(GridRoute(path=(w,), evidence=evidence))
                         continue
                     key = (w.long if depth == 0 else base_long, tape.child_mask(w, depth))
-                    first, copies = paths.get(key, (w, 0))
-                    paths[key] = (first, copies + 1)
+                    paths.setdefault(key, []).append(w)
 
-            for (long, mask), (first, copies) in paths.items():
+            for (long, mask), parents in paths.items():
                 if streams and depth == 0:
                     validated_base_mask |= mask
                 if depth == len(STAGES) - 2 and self.window_auto is None:
@@ -781,28 +907,18 @@ class StageHistory:
                 else:
                     next_result = walk(depth + 1, self.child(tape, mask), long)
                 for dest, source in zip(counts[1:], next_result.counts):
-                    dest.add(source, copies)
-                candidate_key = (1 + len(next_result.path), next_result.rank)
-                if candidate_key > picked_key:
-                    picked_path = (first, *next_result.path)
-                    picked_evidence, picked_key = next_result.evidence, candidate_key
-            return GridResult(counts, picked_path, picked_evidence)
+                    dest.add(source, len(parents))
+                for parent in parents:
+                    qualified_routes.extend(replace(route, path=(parent, *route.path))
+                                            for route in next_result.routes)
+            return GridResult(counts, tuple(qualified_routes))
 
         try:
             result = walk(0, root, 0)
         finally:
             walk.cache_clear()
             last_stage.cache_clear()
-        if streams and result.path:
-            row_ids, post = [], []
-            for tape in self.related_tapes(result.path, root):
-                start, end = tape.indices(now)
-                post.append(tape.evidence(end - start, end))
-                shown = start if limit is None else max(start, end - limit)
-                row_ids.append(tuple(tape.ids[shown:end]))
-            row_ids = tuple(row_ids)
-            blocks, floors = self.selected_blocks(result.path, now, root)
-            selected = tuple(sum(group, Evidence()) for group in blocks)
+        if streams and result.routes:
             low, high = root.indices(now)
             # A Base position can belong to several qualifying First Stage Sets.
             # Preserve its exact membership in each path, but contribute it once
@@ -811,6 +927,21 @@ class StageHistory:
             base_net = [self.nets[i] for i in base_ids]
             base = Evidence(len(base_ids), math.fsum(x for x in base_net if x > 0),
                             math.fsum(-x for x in base_net if x < 0))
-            return GridResult(result.counts, result.path, result.evidence, self.read_streams(row_ids), row_ids,
-                              selected, tuple(post), blocks, base, base_ids, selected_floors=floors)
+            routes = []
+            for route in result.routes:
+                row_ids, post = [], []
+                for tape in self.related_tapes(route.path, root):
+                    start, end = tape.indices(now)
+                    post.append(tape.evidence(end - start, end))
+                    shown = start if limit is None else max(start, end - limit)
+                    row_ids.append(tuple(tape.ids[shown:end]))
+                row_ids = tuple(row_ids)
+                blocks, floors = self.selected_blocks(route.path, now, root)
+                selected = tuple(sum(group, Evidence()) for group in blocks)
+                routes.append(replace(route, streams=self.read_streams(row_ids), row_ids=row_ids,
+                                      selected_evidence=selected, post_evidence=tuple(post),
+                                      selected_blocks=blocks, stream_sizes=tuple(map(len, row_ids)),
+                                      selected_floors=floors))
+            return GridResult(result.counts, routes=tuple(routes), validated_base=base,
+                              validated_base_ids=base_ids)
         return result

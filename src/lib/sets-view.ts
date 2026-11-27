@@ -13,7 +13,9 @@ import type { PfBase, WindowFigure, WindowKey } from "./live-stats.ts";
 
 /** One Set of `sets.index`. The gate-window fields are what the pooled PF needs; the others fill the table. */
 export type SetIndexRow = {
+  /** Older server snapshots returned one route; new snapshots list every route. */
   execId?: string;
+  execIds?: string[];
   stageGrid?: StageGridSelection;
   i: number;
   id: string;

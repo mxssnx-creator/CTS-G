@@ -91,7 +91,7 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
     <section className="space-y-3 rounded-md border border-border bg-surface p-4" aria-label="Independent Last-N stages">
       <div>
         <h2 className="text-sm font-semibold">Base → Main → Real → Exec → Live</h2>
-        <p className="text-xs text-muted">{count.format(grid.baseSets)} Base Sets · sample coverage among reached lanes</p>
+        <p className="text-xs text-muted">{count.format(grid.baseSets)} Base Sets · {count.format(grid.qualifiedPaths ?? 0)} independently qualified paths · sample coverage among reached lanes</p>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[37rem] text-left text-xs">
@@ -130,7 +130,7 @@ export function StageGridPanel({ live }: { live?: LiveStats | null }) {
           </tbody>
         </table>
       </div>
-      {grid.postStages && <p className="text-xs text-muted">Post-stage PF uses closed paper positions. Base includes each validated close once per Set. Main, Real and Exec follow each Set’s selected path.</p>}
+      {grid.postStages && <p className="text-xs text-muted">Post-stage PF pools route observations; the same paper close can appear in multiple independent paths. Base counts each validated close once per Set. Every qualified Main, Real and Exec window path is published and processed independently.</p>}
       {executed && (
         <p className="text-xs text-muted">
           Live mirrors Exec · {count.format(executed.activePositions)} active positions · {count.format(executed.activeFilledOrders)} filled orders on active positions

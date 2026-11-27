@@ -234,37 +234,42 @@ function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "nor
                   <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.mainShortN ?? "—"}`}</td>
                   <td className="py-1.5">{r.stageGrid ? (
                     <details>
-                      <summary className={r.execId ? "cursor-pointer text-primary" : "cursor-pointer text-muted"}>
-                        {r.execId ? "Exec" : r.why || "Related Sets"}
+                      <summary className={r.execIds?.length || r.execId ? "cursor-pointer text-primary" : "cursor-pointer text-muted"}>
+                        {r.execIds?.length ? `${r.execIds.length} independent Exec paths` : r.execId ? "Exec" : r.why || "Related Sets"}
                       </summary>
-                      {STAGE_ORDER.map((name) => {
-                        const grid = r.stageGrid;
-                        const w = grid?.windows[name];
-                        const post = postStageEvidence(grid, name);
-                        const blocks = grid?.selectedBlocks?.[name];
-                        const total = grid?.selectedWindows?.[name];
-                        const totalFloor = grid?.selectedFloors?.[name]?.total;
-                        const related = [grid?.parentIds[name], grid?.setIds?.[name]].filter(Boolean).join(" → ");
-                        return w ? <div key={name} title={related} className="whitespace-nowrap">
-                          {STAGE_LABEL[name]} {w.long || "—"} / {w.short}{w.shortMode === "negative" ? "−" : "+"} / {w.last}{w.lastMode === "negative" ? "−" : "+"}
-                          {blocks && <div className="text-muted">
-                            {(["long", "short", "last"] as const).flatMap((k) => {
-                              const evidence = blocks[k];
-                              if (!evidence) return [];
-                              const pf = evidence.pf?.toFixed(2) ?? (evidence.gain > 0 && evidence.loss === 0 ? "no losses" : "—");
-                              const floor = grid?.selectedFloors?.[name]?.[k];
-                              const negative = k === "short" ? w.shortMode === "negative" : k === "last" && w.lastMode === "negative";
-                              return [`${k} PF ${pf}${floor == null ? "" : negative ? ` (loss/gain ≥ ${floor.toFixed(2)})` : ` (≥ ${floor.toFixed(2)})`}`];
-                            }).join(" · ")}
-                          </div>}
-                          {total && totalFloor != null && <div className="text-muted">
-                            Window PF {total.pf?.toFixed(2) ?? (total.gain > 0 && total.loss === 0 ? "No losses" : "—")} ≥ {totalFloor.toFixed(2)}
-                          </div>}
-                          {post && <div className="text-muted">
-                            {post.orders} paper closes · PF {post.pf?.toFixed(2) ?? (post.gain > 0 && post.loss === 0 ? "No losses" : "—")}
-                          </div>}
-                        </div> : null;
-                      })}
+                      {(r.stageGrid.paths?.length ? r.stageGrid.paths : [r.stageGrid]).map((path, pathIndex) => (
+                        <div key={path.id ?? pathIndex} className="mt-1 border-l border-border pl-2">
+                          <div className="whitespace-nowrap text-primary">Path {pathIndex + 1}{path.id ? ` · ${path.id}` : ""}</div>
+                          {path.execution && <div className="text-muted">Live closes {path.execution.n ?? 0} / {path.execution.lastN ?? "—"} · PF {path.execution.pf?.toFixed(2) ?? "—"} · {path.execution.allow ? "entry allowed" : "entry gated"}</div>}
+                          {STAGE_ORDER.map((name) => {
+                            const w = path.windows?.[name];
+                            const post = postStageEvidence(path, name);
+                            const blocks = path.selectedBlocks?.[name];
+                            const total = path.selectedWindows?.[name];
+                            const totalFloor = path.selectedFloors?.[name]?.total;
+                            const related = [path.parentIds?.[name], path.setIds?.[name]].filter(Boolean).join(" → ");
+                            return w ? <div key={name} title={related} className="whitespace-nowrap">
+                              {STAGE_LABEL[name]} {w.long || "—"} / {w.short}{w.shortMode === "negative" ? "−" : "+"} / {w.last}{w.lastMode === "negative" ? "−" : "+"}
+                              {blocks && <div className="text-muted">
+                                {(["long", "short", "last"] as const).flatMap((k) => {
+                                  const evidence = blocks[k];
+                                  if (!evidence) return [];
+                                  const pf = evidence.pf?.toFixed(2) ?? (evidence.gain > 0 && evidence.loss === 0 ? "no losses" : "—");
+                                  const floor = path.selectedFloors?.[name]?.[k];
+                                  const negative = k === "short" ? w.shortMode === "negative" : k === "last" && w.lastMode === "negative";
+                                  return [`${k} PF ${pf}${floor == null ? "" : negative ? ` (loss/gain ≥ ${floor.toFixed(2)})` : ` (≥ ${floor.toFixed(2)})`}`];
+                                }).join(" · ")}
+                              </div>}
+                              {total && totalFloor != null && <div className="text-muted">
+                                Window PF {total.pf?.toFixed(2) ?? (total.gain > 0 && total.loss === 0 ? "No losses" : "—")} ≥ {totalFloor.toFixed(2)}
+                              </div>}
+                              {post && <div className="text-muted">
+                                {post.orders} paper closes · PF {post.pf?.toFixed(2) ?? (post.gain > 0 && post.loss === 0 ? "No losses" : "—")}
+                              </div>}
+                            </div> : null;
+                          })}
+                        </div>
+                      ))}
                     </details>
                   ) : r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
                 </tr>

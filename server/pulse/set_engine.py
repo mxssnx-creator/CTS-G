@@ -3720,9 +3720,10 @@ class SetBook:
     def _live_key(self, sid: str, row: Dict[str, Any]) -> str:
         """One key per live close per Set. Client id when present, else symbol, side, time and gross move."""
         cid = row.get("client_id") or ""
+        route = str(row.get("exec_lane_id") or "")
         if cid:
-            return f"{sid}|{cid}"
-        return f"{sid}|{row['symbol']}|{row['side']}|{row['t']:.3f}|{row['pnl_pct']:.10f}"
+            return f"{sid}|{route}|{cid}"
+        return f"{sid}|{route}|{row['symbol']}|{row['side']}|{row['t']:.3f}|{row['pnl_pct']:.10f}"
 
     def on_live_close(self, rec: Any) -> None:
         with self._lock:
@@ -3795,6 +3796,7 @@ class SetBook:
             "reason": str(get("reason") or ""),
             "client_id": str(get("client_id") or get("clientId") or ""),
             "lane": lane,
+            "exec_lane_id": str(get("exec_lane_id") or ""),
             # Aggregate net cannot be attributed to the base when add-on fills
             # changed its cost basis. Old records without component fees use an
             # explicit configured estimate for that base only.
@@ -5054,8 +5056,10 @@ class SetBook:
         with self._lock:
             if self.base_validation_reason(st):
                 return None
-            if identity == self.exec_lane_id(st):
-                return st.exe
+            candidates = self._exec_candidates.get((st.pack, st.kind), {})
+            candidate = candidates.get(identity)
+            if candidate is not None and candidate.id == st.id and candidate.exe:
+                return candidate.exe
             return st.held_exec_evidence.get(identity)
 
     def set_processed(self, st: SetState, full: Sequence[tuple], now: Optional[float] = None,
@@ -5069,22 +5073,53 @@ class SetBook:
             if grid_result is None:
                 decision = now if now is not None else math.nextafter(full[-1][0], math.inf) if full else 0.0
                 grid_result = self.grid_history(st, full).evaluate(decision, streams=True, limit=PROC_KEEP)
-            # Keep the published decision and its figures. Main and Real
-            # already retain the orders they need below.
-            st.exec_grid = replace(grid_result, streams=(), row_ids=(), validated_base_ids=(),
-                                   stream_sizes=tuple(map(len, grid_result.streams)))
             candidates = self._exec_candidates.setdefault((st.pack, st.kind), {})
-            if grid_result.ready:
-                candidates[st.id] = st
-            else:
-                candidates.pop(st.id, None)
-            streams = grid_result.streams
-            _, main, real = (streams + ((), (), ()))[:3]
-            st.proc = [(row.close, row.net) for row in main]
-            st.exe = [(row.close, row.net) for row in real]
+            for key, candidate in tuple(candidates.items()):
+                if candidate.id == st.id:
+                    candidates.pop(key, None)
+            published_routes = []
+            for route in grid_result.routes:
+                route_grid = stage_grid.GridResult(
+                    counts=grid_result.counts, path=route.path, evidence=route.evidence,
+                    selected_evidence=route.selected_evidence, post_evidence=route.post_evidence,
+                    selected_blocks=route.selected_blocks, validated_base=grid_result.validated_base,
+                    stream_sizes=route.stream_sizes, selected_floors=route.selected_floors,
+                )
+                streams = route.streams
+                _, main, real = (streams + ((), (), ()))[:3]
+                candidate = replace(
+                    st, exec_grid=route_grid,
+                    proc=[(row.close, row.net) for row in main],
+                    exe=[(row.close, row.net) for row in real],
+                    neg=[], proc_total=len(main), exe_total=len(real), neg_total=0,
+                    exe_ent=array("d", (row.entry for row in real)) if self.axis_sets.enabled else None,
+                    main_evidence=None, main_short_win=0, proc_replayed=True,
+                    active=not st.locked, last_error="", evaluated_at=time.time(),
+                )
+                if route.selected_evidence:
+                    base, *derived = route.selected_evidence
+                    candidate.gate_n, candidate.gate_gp, candidate.gate_gl = base
+                    candidate.gate_pf = round(pf_of(candidate.gate_gp, candidate.gate_gl), 4)
+                    if derived:
+                        candidate.main_n, candidate.main_gp, candidate.main_gl = derived[0]
+                        candidate.main_pf = round(pf_of(candidate.main_gp, candidate.main_gl), 4)
+                    if len(derived) >= 2:
+                        candidate.exe_n, candidate.exe_gp, candidate.exe_gl = derived[1]
+                        candidate.exe_pf = round(pf_of(candidate.exe_gp, candidate.exe_gl), 4)
+                identity = self.exec_lane_id(candidate)
+                if identity:
+                    candidates[identity] = candidate
+                    published_routes.append(replace(route, streams=(), row_ids=()))
+            # Keep every path's policy and evidence on the Base Set. Execution
+            # reads only the exact route candidate; no route is promoted to a
+            # hidden single winner.
+            st.exec_grid = replace(grid_result, streams=(), row_ids=(), validated_base_ids=(),
+                                   routes=tuple(published_routes), stream_sizes=())
+            st.proc, st.exe, st.neg = [], [], []
             st.neg, st.neg_total, st.neg_ent = [], 0, None
-            st.proc_total, st.exe_total = len(st.proc), len(st.exe)
-            st.exe_ent = array("d", (row.entry for row in real)) if self.axis_sets.enabled else None
+            st.proc_total = max((len(route.streams[1]) for route in grid_result.routes if len(route.streams) > 1), default=0)
+            st.exe_total = max((len(route.streams[2]) for route in grid_result.routes if len(route.streams) > 2), default=0)
+            st.exe_ent = None
             st.main_evidence, st.main_short_win, st.proc_replayed = None, 0, True
             if relations is not None and self.sl_auto_allows(st):
                 cf = cost_as_frac(self.cost_pct)
@@ -5178,6 +5213,7 @@ class SetBook:
         w_ = self.win(st)
         real_n = w_.real_neg_n if lane == "neg" else w_.real_n
         rows = sorted((r for r in st.live if str(r.get("lane") or "pos") == lane
+                       and (not self.stage_grid or r.get("exec_lane_id") == self.exec_lane_id(st))
                        and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-real_n:]
         nets = [row_net_pnl_pct(r, self.cost_pct) for r in rows]
         gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
@@ -5198,7 +5234,7 @@ class SetBook:
 
     def _execution_lanes(self, st: SetState) -> List[str]:
         if self.stage_grid:
-            return ["pos"] if st.exec_grid and st.exec_grid.ready else []
+            return ["pos"] if st.exec_grid and st.exec_grid.ready and self.execution_stats(st, "pos")["allow"] else []
         v = st.stage or {}
         plain = not (self.main_on or self.neg_on or self.realst_on)
         return [lane for lane, ready in (("pos", plain or v.get("pos")), ("neg", v.get("negl")))
@@ -5463,6 +5499,13 @@ class SetBook:
         for stage_name, counts in zip(stage_grid.STAGES[1:], st.exec_grid.counts[1:]):
             if not counts.qualified:
                 return stage_name if counts.sample_full else stage_name + "-samples"
+        if st.exec_grid.path:
+            if not self._execution_lanes(st):
+                return "execution"
+        else:
+            candidates = self._exec_candidates.get((st.pack, st.kind), {})
+            if not any(candidate.id == st.id and self._execution_lanes(candidate) for candidate in candidates.values()):
+                return "execution"
         return ""
 
     def gate_reason(self, st: SetState) -> str:
@@ -5669,7 +5712,8 @@ class SetBook:
 
     def _eligible_exec(self, pack: str, kind: str, side: int):
         candidates = self._exec_candidates.get((pack, kind), {})
-        return (st for st in candidates.values() if self.sets.get(st.id) is st
+        return (st for st in candidates.values() if (base := self.sets.get(st.id)) is not None
+                and base.idx == st.idx and self.exec_lane_id(st)
                 and (not side or st.side in (0, side)) and self.is_eligible(st))
 
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
@@ -5680,7 +5724,7 @@ class SetBook:
         return rows
 
     def _pick(self, pack: str, kind: str = "base", side: int = 0) -> Optional[SetState]:
-        if self.use_historic_gate:
+        if self.stage_grid or self.use_historic_gate:
             ranked = self.valid_for(pack, kind, side)
             return ranked[0] if ranked else None
         # gate disabled (legacy): any active set of this pack and kind, ranked the same way
@@ -6356,20 +6400,33 @@ class SetBook:
         totals = [stage_grid.StageCount() for _ in stage_grid.STAGES]
         post = [stage_grid.Evidence() for _ in stage_grid.STAGES]
         validated_base = stage_grid.Evidence()
+        qualified_paths = 0
         for st in self.by_idx:
             if st.exec_grid is None or st.last_error:
                 continue
+            qualified_paths += len(st.exec_grid.routes)
             for total, counts in zip(totals, st.exec_grid.counts):
                 total.add(counts)
-            for i, evidence in enumerate(st.exec_grid.post_evidence):
-                post[i] += evidence
+            for route in st.exec_grid.routes:
+                for i, evidence in enumerate(route.post_evidence):
+                    post[i] += evidence
             if self.sl_auto_allows(st):
                 validated_base += st.exec_grid.validated_base
         return {"config": self.stage_grid.settings(), "baseSets": len(self.by_idx),
+                "qualifiedPaths": qualified_paths,
                 "validatedBase": validated_base.report(),
                 "postStages": {name: evidence.report() for name, evidence in zip(stage_grid.STAGES, post)},
                 "stages": {name: total.report(capacity * len(self.by_idx))
                            for name, total, capacity in zip(stage_grid.STAGES, totals, self.stage_grid.capacities())}}
+
+    def stage_grid_set_report(self, st: SetState) -> Dict[str, Any]:
+        report = st.exec_grid.report(self.stage_grid, st.id)
+        candidates = self._exec_candidates.get((st.pack, st.kind), {})
+        for path in report["paths"]:
+            candidate = candidates.get(path["id"])
+            if candidate is not None:
+                path["execution"] = self.execution_stats(candidate, "pos")
+        return report
 
     def _snapshot(self) -> Dict[str, Any]:
         rows = []
@@ -6407,8 +6464,8 @@ class SetBook:
                     # the Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set
                     # (opened while Base and Main passed)
                     "mainId": st.id + MAIN_SUFFIX,
-                **({"execId": self.exec_lane_id(st),
-                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.path else {}),
+                    **({"execIds": [stage_grid.lane_id(st.id, route.path) for route in st.exec_grid.routes],
+                    "stageGrid": self.stage_grid_set_report(st)} if self.stage_grid and st.exec_grid and st.exec_grid.routes else {}),
                     "mainN": int(st.proc_total),
                     "mainPf": round(st.main_pf, 4),
                     "mainLastN": st.main_n,
@@ -6498,8 +6555,8 @@ class SetBook:
                 # while every gate passed), each with its orders and PF
                 "sd": st.side,
                 "mainId": st.id + MAIN_SUFFIX,
-                **({"execId": self.exec_lane_id(st),
-                    "stageGrid": st.exec_grid.report(self.stage_grid, st.id)} if self.stage_grid and st.exec_grid and st.exec_grid.path else {}),
+                **({"execIds": [stage_grid.lane_id(st.id, route.path) for route in st.exec_grid.routes],
+                    "stageGrid": self.stage_grid_set_report(st)} if self.stage_grid and st.exec_grid and st.exec_grid.routes else {}),
                 "mainN": int(st.proc_total),
                 "mainWindowN": int(st.main_n),
                 "mainPf": round(st.main_pf, 4),

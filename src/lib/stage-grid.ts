@@ -71,11 +71,12 @@ export type StageGridFigures = {
 type StageEvidence = Pick<StageGridFigures, "orders" | "gain" | "loss" | "pf">;
 export type StageGridReport = {
   baseSets: number;
+  qualifiedPaths?: number;
   stages: Record<StageName, StageGridFigures>;
   postStages?: Record<StageName, StageEvidence>;
   validatedBase?: StageEvidence;
 };
-export type StageGridSelection = {
+export type StageGridPathSelection = {
   windows: Partial<Record<StageName, { long: number; short: number; last: number; shortMode: SignMode; lastMode: SignMode }>>;
   id?: string;
   parentIds: Partial<Record<StageName, string>>;
@@ -85,7 +86,13 @@ export type StageGridSelection = {
   selectedFloors?: Partial<Record<StageName, Partial<Record<"long" | "short" | "last" | "total", number>>>>;
   validatedBase?: StageEvidence;
   postStages?: Partial<Record<StageName, StageEvidence>>;
+  execution?: { n?: number; lastN?: number; pf?: number | null; minPf?: number; allow?: boolean; sampleFull?: boolean };
 };
+export type StageGridSelection = {
+  stages?: Record<StageName, StageGridFigures>;
+  routeCount?: number;
+  paths?: StageGridPathSelection[];
+} & Partial<StageGridPathSelection>;
 
 export function postStageEvidence(grid: Pick<StageGridSelection, "postStages" | "validatedBase"> | undefined, stage: StageName) {
   if (stage === "base" && grid?.validatedBase) return grid.validatedBase;
