@@ -210,8 +210,8 @@ test("indication range configurations are normalised the way the engine expands 
   const out = overlayFromCts(
     cts({
       indicationConfigs: [
-        { label: "fast", families: "donch, kelt", ranges: "8, 99, 14", timeframes: [1, 7, "c", "x"], relations: ["", "T5"], stepMin: 12, stepMax: 3, slRatios: [1, 9], types: ["base", "nope"], pause: 15 },
-        { enabled: false, pause: "auto" },
+        { label: "fast", families: "donch, kelt", ranges: "8, 99, 14", timeframes: [1, 7, "c", "x"], relations: ["", "T5"], stepMin: 12, stepMax: 3, slRatios: [1, 9], types: ["base", "nope"], pause: 15, signalIntervalMinutes: 3, holdMinutes: 25 },
+        { enabled: false, pause: "auto", signalIntervalMinutes: 7, holdMinutes: 721 },
         "junk",
       ],
     }),
@@ -225,8 +225,12 @@ test("indication range configurations are normalised the way the engine expands 
   assert.deepEqual(out[0].slRatios, [1], "SL ratios outside 0.5-3.5 are dropped");
   assert.deepEqual(out[0].types, ["base"]);
   assert.equal(out[0].pause, 15);
+  assert.equal(out[0].signalIntervalMinutes, 3);
+  assert.equal(out[0].holdMinutes, 25);
   assert.equal(out[1].enabled, false);
   assert.equal(out[1].pause, "auto");
+  assert.equal(out[1].signalIntervalMinutes, undefined);
+  assert.equal(out[1].holdMinutes, undefined);
   assert.equal(out[2].label, "entry 3", "an unreadable entry becomes the default entry");
   assert.deepEqual(overlayFromCts(cts()).indicationConfigs, []);
 });

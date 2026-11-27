@@ -195,6 +195,7 @@ export const PAUSE_CANDIDATES_DEFAULT = [2, 3, 5, 8, 12, 20, 30, 45, 60];
 export const PAUSE_MAX = 240;
 export const SET_TYPES = ["base", "exit", "trail"] as const;
 export const INDICATION_TIMEFRAMES = [1, 5, 15, 30] as const;
+export const INDICATION_SIGNAL_INTERVALS = [1, 3, 5, 15, 30] as const;
 /** One range configuration of the additional indications; mirrors server/pulse/indication_config.py (the engine expands and validates it). */
 export type IndicationConfig = {
   lastNLanes?: LastNLane[];
@@ -212,6 +213,8 @@ export type IndicationConfig = {
   slRatios: number[];
   types: string[];
   pause: "auto" | number;
+  signalIntervalMinutes?: number;
+  holdMinutes?: number;
   /** The entry's own (thin) trailing arm range in steps of 0.1 %; 0 = every arm up to stepMax (server: indication_config trailStepMin / trailStepMax). */
   trailStepMin: number;
   trailStepMax: number;
@@ -1378,6 +1381,8 @@ export function indicationConfigList(v: unknown): IndicationConfig[] {
     const relRaw: unknown[] = Array.isArray(e.relations) ? e.relations : typeof e.relations === "string" ? e.relations.split(/[,;]/) : [""];
     const rel = relRaw.map((x) => String(x ?? "").trim());
     const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.25 && x <= 3.5);
+    const interval = Number(e.signalIntervalMinutes);
+    const hold = Number(e.holdMinutes);
     return {
       label: String(e.label ?? `entry ${i + 1}`).slice(0, 60),
       lastNLanes: lastNLanes(e.lastNLanes),
@@ -1396,6 +1401,9 @@ export function indicationConfigList(v: unknown): IndicationConfig[] {
       slRatios: ratios.length ? [...new Set(ratios)] : [...DEFAULT_INDICATION_CONFIG.slRatios],
       types: types.length ? types : [...DEFAULT_INDICATION_CONFIG.types],
       pause: e.pause === "auto" || e.pause === undefined ? "auto" : pauseMinutes(e.pause, 0),
+      ...((INDICATION_SIGNAL_INTERVALS as readonly number[]).includes(interval) && interval > 1
+        ? { signalIntervalMinutes: interval } : {}),
+      ...(Number.isInteger(hold) && hold > 0 && hold <= 720 ? { holdMinutes: hold } : {}),
       ...trailSpan(e.trailStepMin, e.trailStepMax),
     };
   });

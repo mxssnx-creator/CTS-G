@@ -1136,6 +1136,11 @@ def _ported_peer_symbols(packs):
     return {match.group(1).upper()+"-USDT" for source in ids if (match:=re.match(r"inverse-pair-(btc|eth)-",source))}
 
 
+def _signal_due(settings: Dict[str, Any], pack: str, close_time: float) -> bool:
+    interval = (settings.get("signalIntervals") or {}).get(pack, 1)
+    return interval == 1 or close_time % (BAR_S * interval) == 0
+
+
 def bar_signal(
     bars: Sequence[Sequence[float]],
     i: int,
@@ -1147,13 +1152,24 @@ def bar_signal(
     """The signal of every pack on bar i, read from the closed bars up to and including i (each pack its own window).
     The one per-bar rule: the replay (pack_signals) and the live entries (SetBook.entry_signal) both call it, so a live
     entry is taken on exactly the bar and direction the Sets were validated on."""
+    row: Dict[str, Tuple[int, float, str]] = {}
+    if ind_settings.get("signalIntervals"):
+        due = []
+        for pack in packs:
+            if _signal_due(ind_settings, pack, ts):
+                due.append(pack)
+            else:
+                row[pack] = _NO_SIGNAL
+        if not due:
+            return row
+        packs = due
     imported = _ported_pack_sources(packs)
     if imported:
         from ported_indications import batch
         result=batch(bars[:i+1],list(imported.values()),ts-i*BAR_S,
                      str(ind_settings.get("portedSymbol") or "ASSET-USDT"),ind_settings.get("portedPeers") or (),asynchronous=ported_async)
         ind_settings["_portedPending"] = any(series.pending for series in result.values())
-    row: Dict[str, Tuple[int, float, str]] = {p:result[name][-1] for p,name in imported.items()}
+        row.update({p: result[name][-1] for p, name in imported.items()})
     hw = signal_window(packs, ind_settings)
     hist = bars[max(0, i + 1 - hw) : i + 1]          # the longest window: the extra indicators slice their own from it
     if "general" in packs:
@@ -1266,10 +1282,22 @@ def pack_signals(
         from ported_indications import batch
         native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt,publish_cache=publish_cache) if len(imported)<len(packs) else {}   # workers stay 0 here: ported packs read the whole history
         calculated=batch(bars,list(imported.values()),base_ts,str(ind_settings.get("portedSymbol") or "ASSET-USDT"),ind_settings.get("portedPeers") or ())
-        native.update({p:[(0,0.0,"")]*min(warmup,len(bars))+calculated[name][warmup:] for p,name in imported.items()})
+        for pack, name in imported.items():
+            values = calculated[name][warmup:]
+            if pack in (ind_settings.get("signalIntervals") or {}):
+                values = [value if _signal_due(ind_settings, pack, base_ts + i * BAR_S) else _NO_SIGNAL
+                          for i, value in enumerate(values, warmup)]
+            native[pack] = [_NO_SIGNAL] * min(warmup, len(bars)) + values
         return native
     n = len(bars)
     signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in packs}
+    intervals = ind_settings.get("signalIntervals") or {}
+    cadence = tuple({intervals[p] * BAR_S for p in packs}) if all(p in intervals for p in packs) else ()
+
+    def between_closes(index: int) -> bool:
+        close_time = base_ts + index * BAR_S
+        return not any(close_time % period == 0 for period in cadence)
+
     hs = [hash(tuple(b)) for b in bars] if cache is not None else None
     used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
     made_new_key = False
@@ -1281,6 +1309,8 @@ def pack_signals(
         seen = set()
         todo = []
         for i in range(warmup, n):
+            if cadence and between_closes(i):
+                continue
             if cache is not None:
                 k = hash((salt, base_ts + i * BAR_S, tuple(hs[max(0, i + 1 - sig_w) : i + 1])))
                 if k in used or k in cache or k in seen:
@@ -1290,6 +1320,10 @@ def pack_signals(
         from signal_pool import compute as _pool_compute
         pre = _pool_compute(bars, todo, packs, ind_settings, base_ts, sig_w, workers, on_step) or {}
     for i in range(warmup, n):
+        if cadence and between_closes(i):
+            if on_step and i % 50 == 0:
+                on_step()
+            continue
         key = None
         if cache is not None:
             lo_w = max(0, i + 1 - sig_w)
@@ -2528,6 +2562,7 @@ class SetBook:
         self.pause_pack: Dict[str, int] = {}          # manual minutes per pack (indication); wins over auto and fixed
         self.pause_off: set = set()                   # packs an indicationConfigs entry set to no pause (0)
         self.pack_ranges: Dict[str, Dict[str, Any]] = {}      # pack -> {"lo", "hi", "ratios", "kinds"}: the Sets of an indication built from indicationConfigs
+        self.configured_hold_max = 0
         self.config_report: Dict[str, Any] = {"entries": [], "dropped": [], "names": 0}
         self.signal_report: Dict[str, Any] = {"enabled": False, "packs": 0, "entries": [], "dropped": []}
         self.pause_now: Dict[Tuple[str, str, int], int] = {}    # (pack, symbol, side) -> minutes the Auto Mode chose at the end of the last replay
@@ -2900,6 +2935,7 @@ class SetBook:
         expanded = prepared if prepared is not None else expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
         extra_names = sorted(set(extra_names) | set(expanded["names"]))
         self.pack_ranges = {EXTRA_INDICATOR_PREFIX + n: r for n, r in expanded["ranges"].items()}
+        self.configured_hold_max = max((meta.get("holdMinutes", 0) for meta in self.pack_ranges.values()), default=0)
         self.owned_auto_packs = {pack for pack, meta in self.pack_ranges.items() if meta.get("lanePolicy")}
         self.gate_window_max = max([self.gate_window_max] + [int((r.get("lanePolicy") or {}).get("lastN", {}).get("baseLong", self.gate_window)) for r in self.pack_ranges.values()])
         self._config_pause = {EXTRA_INDICATOR_PREFIX + n: int(m) for n, m in expanded["pause"].items()}
@@ -3203,6 +3239,10 @@ class SetBook:
             **{key: [str(x) for x in (ov.get(key) or default) if extra_known(x)] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
             "extraIndicators": extra_names,
         }
+        intervals = {pack: meta["signalIntervalMinutes"] for pack, meta in self.pack_ranges.items()
+                     if "signalIntervalMinutes" in meta}
+        if intervals:
+            self.ind_settings["signalIntervals"] = intervals
         with self._lock:
             self._rebuild_sets()
 
@@ -3591,6 +3631,8 @@ class SetBook:
         upstream = bool(getattr(self, "main_on", False) or getattr(self, "neg_on", False))
         depth = len(stage_grid.STAGES) if getattr(self, "stage_grid", None) else (3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1))
         manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
+        if getattr(self, "hold_on", True):
+            manual = max(manual, getattr(self, "configured_hold_max", 0))
         automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
         hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic, int(getattr(self, "exit_set_hold_bars", 0) or 0),
                         int(getattr(self, "trail_hold_bars", 0) or 0))
@@ -3647,19 +3689,25 @@ class SetBook:
 
     def entry_signals(self, symbol: str, bar_open_t: float) -> List[Tuple[str, int, float, str]]:
         """Every qualified replay signal for the completed minute, strongest first, with its own pack intact."""
+        close_time = float(bar_open_t) + BAR_S
         with self._lock:
             if self.__dict__.get("bar_t", {}).get(symbol) != float(bar_open_t) or not self.symbol_ok(symbol):
                 return []
-            bars = list(self.bars.get(symbol) or [])
             packs = list(self.packs)
             settings = dict(self.ind_settings)
+            if settings.get("signalIntervals"):
+                packs = [pack for pack in packs if _signal_due(settings, pack, close_time)]
+                if not packs:
+                    self.__dict__.setdefault("_entry_pending", {})[symbol] = None
+                    return []
+            bars = list(self.bars.get(symbol) or [])
             settings["portedSymbol"]=symbol
             if _ported_pack_sources(packs):
                 peer_symbols=_ported_peer_symbols(packs)
                 settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<=bar_open_t]} for s,rs in self.bars.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=self.bar_t.get(s)) is not None]
         if len(bars) < max(self.min_bars, self.warmup + 1):
             return []
-        row = bar_signal(bars, len(bars) - 1, packs, settings, float(bar_open_t) + BAR_S,ported_async=True)
+        row = bar_signal(bars, len(bars) - 1, packs, settings, close_time, ported_async=True)
         self.__dict__.setdefault("_entry_pending", {})[symbol] = (
             float(bar_open_t) if settings.get("_portedPending") else None)
         hits: List[Tuple[str, int, float, str]] = []
@@ -5756,6 +5804,9 @@ class SetBook:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
         if st.kind == "trail" and not getattr(self, "trail_time_exit", True):
             return HOLD_NEVER
+        configured = (getattr(self, "pack_ranges", {}).get(st.pack) or {}).get("holdMinutes")
+        if getattr(self, "hold_on", True) and configured:
+            return int(configured)
         if st.kind == "trail" and getattr(self, "trail_hold_bars", 0):
             return int(self.trail_hold_bars)  # trailHoldBars: the trailing Sets' own max hold (minutes)            # trailTimeExit off (owner 2026-11-15 "for trailing no max hold time"): a trailing Set leaves only by its stop / trail (and its TP when honoured)
         table = getattr(self, "step_hold", None) or {}

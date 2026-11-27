@@ -22,7 +22,7 @@
     "test": "node scripts/run-all-tests.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test:strategy-features": "python3 scripts/test_strategy_switches.py && python3 scripts/test_ported_indications.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts",
+    "test:strategy-features": "python3 scripts/test_strategy_switches.py && python3 scripts/test_ported_indications.py && python3 scripts/test_indication_sweep.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts",
     "test:lastn-blocks": "node --experimental-strip-types --test shared/cts-lastn/blocks.test.ts"
   },
   "dependencies": {

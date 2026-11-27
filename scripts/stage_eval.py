@@ -944,13 +944,21 @@ class AutoFloors:
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
             refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None,
-            candidate_filter=None, max_open: int = 0) -> List[Dict[str, Any]]:
+            candidate_filter=None, max_open: int = 0, indexed_exits: bool = True) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
-    this often inside the hour (the live engine refreshes every histRefreshS, 120 s). max_open mirrors a venue session's position cap."""
+    this often inside the hour (the live engine refreshes every histRefreshS, 120 s). max_open mirrors a venue session's position cap.
+    A sparse replay can walk each opened position directly and avoid building all symbol exit indices."""
     cfg = lane_cfg(book)
-    accs = {s: se.BarIndex(bars[s]) for s in names}
-    idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
+    accs = {s: se.BarIndex(bars[s]) for s in names} if indexed_exits else {}
+    clock_indices = {}
+    idx_of = {}
+    for symbol in names:
+        clock = times[symbol]
+        key = id(clock)
+        if key not in clock_indices:
+            clock_indices[key] = {t: i for i, t in enumerate(clock)}
+        idx_of[symbol] = clock_indices[key]
     end_of = {s: bisect.bisect_left(times[s], float(hours[-1]) + 3600) for s in names}
     grid_enabled = bool(getattr(book, "stage_grid", None))
     axis_sizing = None
@@ -1143,7 +1151,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 lane = se.SetLane(st, s)
                 end = end_of[s]
                 # The explicit candidate admits only this bar. Later signals on the same tape cannot reopen it.
-                tr = lane.scan(i, end, bars[s], dirs[pack], confs[pack], True, cfg, (i,), accs[s])
+                tr = lane.scan(i, end, bars[s], dirs[pack], confs[pack], True, cfg, (i,), accs.get(s))
                 if not tr:
                     if lane.open is not None:
                         # An unfinished position still occupies its symbol.  Do not

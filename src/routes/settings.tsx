@@ -52,6 +52,7 @@ import {
   DEFAULT_INDICATION_CONFIG,
   GATE_MIN_PF_DEFAULT,
   INDICATION_TIMEFRAMES,
+  INDICATION_SIGNAL_INTERVALS,
   indicationConfigList,
   MAX_SYMBOLS,
   minMode,
@@ -2923,6 +2924,15 @@ function IndicationConfigEditor({
               hint={`${INDICATION_TIMEFRAMES.join(" / ")} minutes; c = vote over 1/5/15, x = over 1/5/15/30`}
               onCommit={(t) => set(i, { timeframes: t.split(/[,;\s]+/).filter(Boolean).map((x) => (x === "c" || x === "x" ? x : Number(x))) as IndicationConfig["timeframes"] })}
             />
+            <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+              <span className="font-mono text-xs text-muted">Evaluate on UTC close</span>
+              <select className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                value={e.signalIntervalMinutes ?? 1} onChange={(event) => set(i, { signalIntervalMinutes: Number(event.target.value) })}>
+                {INDICATION_SIGNAL_INTERVALS.map((minutes) => <option key={minutes} value={minutes}>{minutes} min</option>)}
+              </select>
+            </label>
+            <CsvField label="Hold limit (minutes)" value={e.holdMinutes === undefined ? "" : String(e.holdMinutes)}
+              hint="1–720, blank uses the Set's hold settings" onCommit={(text) => set(i, { holdMinutes: Number(text) })} />
             <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; trend T5 / B15 / M30; RSI regime RS5 / rs5 (dip); drawdown DR240 / dr240; recovery RC240 / rc240; VWAP VW240 / vw240; past PR480 / YD1440; average MA60 / ma60; I inverts. Upper case with the direction, lower case against it." onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
             <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.25–3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
             <Slider label="TP step from" value={e.stepMin} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMin).toFixed(1)}%`} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
