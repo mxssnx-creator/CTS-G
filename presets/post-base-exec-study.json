@@ -1,0 +1,15 @@
+{
+  "reversionVariants": ["cci_c8", "cci_c14"],
+  "flowVariants": ["obv_c8", "obv_c14"],
+  "multiVariants": ["emax_c8", "rsimom_c8", "obv_c8"],
+  "signalConfigs": [
+    {
+      "label": "CTS-G 5m Signals",
+      "timeframes": [5],
+      "stepMin": 5,
+      "stepMax": 12,
+      "slRatios": [0.5, 0.75, 1],
+      "types": ["base", "trail"]
+    }
+  ]
+}
