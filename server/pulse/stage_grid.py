@@ -25,7 +25,6 @@ LATE_SHORT = (*SHORT, 20, 24, 28, 30)
 EXEC_SHORT = LATE_SHORT
 LAST = (1, 2, 3, 4, 5)
 SIGN_MODES = ("positive", "negative")
-NEGATIVE_SHORT_MAX = 12
 NEG_EPS = 1e-12
 BLOCK_NAMES = ("long", "short", "last")
 # Bound each fit on busy Sets. Both halves still need independent sample support.
@@ -101,8 +100,6 @@ class StageGrid:
             long_modes = () if is_base else modes(config, "longModes", ("none", "inherit"), stage)
             shorts = counts(config, "short", LATE_SHORT if stage in ("real", "exec") else SHORT)
             short_modes = modes(config, "shortModes", SIGN_MODES, stage)
-            if short_modes == ("negative",) and min(shorts) > NEGATIVE_SHORT_MAX:
-                raise ValueError(f"Negative Short requires 4, 8 or 12 in stageLastN.{stage}")
             stages.append(StageOptions(long_modes, shorts, counts(config, "last", LAST),
                                        modes(config, "lastModes", SIGN_MODES, stage), short_modes))
         return cls(longs, tuple(stages))
@@ -112,8 +109,7 @@ class StageGrid:
         modes, shorts, lasts, last_modes, short_modes = self.options[depth]
         longs = self.longs if depth == 0 else tuple(base_long if mode == "inherit" else 0 for mode in modes)
         return tuple(Window(long, short, last, last_mode, short_mode)
-                     for long, short, last, last_mode, short_mode in product(longs, shorts, lasts, last_modes, short_modes)
-                     if short_mode == "positive" or short <= NEGATIVE_SHORT_MAX)
+                     for long, short, last, last_mode, short_mode in product(longs, shorts, lasts, last_modes, short_modes))
 
     def capacities(self) -> tuple[int, ...]:
         product_so_far = 1

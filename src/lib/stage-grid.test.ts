@@ -24,7 +24,7 @@ test("stage settings preserve independent sign and inherited Long selections", (
   assert.deepEqual(settings.main.last, [1, 3]);
   assert.deepEqual(settings.main.lastModes, ["negative"]);
   assert.deepEqual(settings.real.longModes, ["inherit"]);
-  assert.deepEqual(settings.exec.shortModes, ["positive"]);
+  assert.deepEqual(settings.exec.shortModes, ["negative"]);
   assert.deepEqual(stageGridOf(settings), settings);
   assert.equal(stageGridOf(false).enabled, false);
 });

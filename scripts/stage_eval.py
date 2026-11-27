@@ -1004,12 +1004,16 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
         return ok_, key_, (other_lanes(book, tapes, st, now, ok_) if both_lanes and isinstance(ok_, str) and ok_ else [])
 
-    def rank_at(now: float):
+    eligible_sets = [st for st in book.by_idx
+                     if only_steps is None or (st.kind != "trail" and st.step in only_steps)]
+    sets_by_pack = {}
+    for st in eligible_sets:
+        sets_by_pack.setdefault(st.pack, []).append(st)
+
+    def rank_at(now: float, sets):
         ranked_: Dict[Tuple[str, str], List[Any]] = {}
         valid_ = 0
-        for st in book.by_idx:
-            if only_steps is not None and (st.kind == "trail" or st.step not in only_steps):
-                continue                      # an evaluation of one step's Sets alone
+        for st in sets:
             ok, key, extra = verdict(st, now)
             if ok:
                 valid_ += 1
@@ -1026,16 +1030,17 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         if auto.apply(book, float(h)):
             cache.clear()                                # a verdict cached under the previous hour's floors is not this hour's
             axis_cache.clear()
-        ranked, valid_n = rank_at(float(h) + 60.0)
+        ranked, valid_n = rank_at(float(h) + 60.0, eligible_sets)
         executed.append({"hour": h, "valid": valid_n, "total": len(book.by_idx)})
         ranked_t = float(h) + 60.0
+        ranked_packs: set[str] | None = None
         for minute in range(60):
             t = int(h) + minute * 60
             entry_t = float(t + 60)
             while active_ends and active_ends[0] <= entry_t:
                 heappop(active_ends)
             if refresh_s and minute and minute % every == 0:
-                ranked, _ = rank_at(entry_t)
+                ranked, _ = rank_at(entry_t, eligible_sets)
                 ranked_t = entry_t
             slots = ((s, d) for s in names for d in (1, -1)) if grid_enabled else ((s, 0) for s in names)
             for s, desired in slots:
@@ -1054,10 +1059,16 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if not signals:
                     continue
                 if not refresh_s and ranked_t != entry_t:
-                    ranked, ranked_t = rank_at(entry_t)[0], entry_t
+                    # The hour's diagnostic needs every Set. Exact entry ranking
+                    # only needs packs that can actually enter at this clock.
+                    ranked, ranked_t, ranked_packs = {}, entry_t, set()
                 # As live, try the next signal if the stronger pack has no
                 # executable Set for THIS direction / lane / Axis / group.
                 for pack, conf, d in signals:
+                    if ranked_packs is not None and pack not in ranked_packs:
+                        pack_ranks, _ = rank_at(entry_t, sets_by_pack.get(pack, ()))
+                        ranked.update(pack_ranks)
+                        ranked_packs.add(pack)
                     # SetBook.pick_any: the positive lane first, then Real Negative; per lane base and Exit Sets together, else trailing
                     pool, lane_pick = [], ""
                     vol_pick = 1.0

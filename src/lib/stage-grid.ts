@@ -39,7 +39,7 @@ export function stageGridOf(raw: unknown): StageGridConfig {
     return {
       short,
       last: selected(LAST_COUNTS, value.last),
-      shortModes: short.every((n) => n > 12) ? ["positive"] : selected(SIGN_MODES, value.shortModes),
+      shortModes: selected(SIGN_MODES, value.shortModes),
       lastModes: selected(SIGN_MODES, value.lastModes),
     };
   }
