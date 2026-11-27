@@ -14,6 +14,8 @@ the types) and, optionally, the rest after a winning close of those indications.
    "stepMin": 3, "stepMax": 10,              TP steps (one step = 0.1 % of price) of this entry's Sets
    "slRatios": [1.0, 1.5],                   SL ratios of this entry's Sets (default: the global grid)
    "types": ["base", "exit", "trail"],       which Set types this entry builds (default all)
+   "signalIntervalMinutes": 5,               only decide at a completed UTC 5-minute boundary (default: every minute)
+   "holdMinutes": 25,                        manual time exit for this configuration when holds are enabled
    "trailStepMin": 4, "trailStepMax": 8,     the trailing arms of this entry's trailing Sets (steps of 0.1 %; default: every arm up to stepMax)
    "pause": "auto" | 0 | 15}                 rest after a winning close: the book's pause mode (default), none, or fixed minutes
 
@@ -30,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 KINDS = ("base", "exit", "trail")
 TIMEFRAMES = (1, 5, 15, 30)
 COMBINED = {"c": "c", "x": "x"}          # _c<range>: vote over 1/5/15, _x<range>: over 1/5/15/30
+SIGNAL_INTERVALS = (1, 3, 5, 15, 30)
 MAX_NAMES_PER_ENTRY = 128
 MAX_NAMES_TOTAL = 384
 MAX_ENTRIES = 64
@@ -53,6 +56,14 @@ def _words(raw: Any) -> List[str]:
     if isinstance(raw, str):
         raw = [x for x in raw.replace(";", ",").split(",")]
     return [str(x).strip() for x in (raw or []) if str(x).strip()]
+
+
+def _whole_minutes(value: Any) -> int:
+    try:
+        minutes = float(value)
+        return int(minutes) if minutes.is_integer() else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def suffixes(ranges: Sequence[int], timeframes: Sequence[Any]) -> List[str]:
@@ -135,6 +146,13 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
         trail_lo = t_lo[0] if t_lo else 0
         trail_hi = max(trail_lo, t_hi[0]) if t_hi else 0
         pz = raw.get("pause", "auto")
+        interval = _whole_minutes(raw.get("signalIntervalMinutes"))
+        hold = _whole_minutes(raw.get("holdMinutes"))
+        timing = {}
+        if interval in SIGNAL_INTERVALS and interval > 1:
+            timing["signalIntervalMinutes"] = interval
+        if 0 < hold <= 720:
+            timing["holdMinutes"] = hold
         made = 0
         for base in base_names:
             for rel in rels:
@@ -142,7 +160,7 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
                 geometry = {"lo": lo, "hi": hi, "ratios": sorted(set(ratios)) or list(default_ratios), "kinds": kinds,
                             "trailLo": trail_lo, "trailHi": trail_hi, "pause": pz,
                             "coordination": raw.get("coordination"), "major": raw.get("major"), "minor": raw.get("minor"),
-                            "label": str(raw.get("label") or "")}
+                            "label": str(raw.get("label") or ""), **timing}
                 if raw.get("lanePolicy") is not None: geometry["lanePolicy"] = raw["lanePolicy"]
                 if raw.get("symbol"): geometry["symbol"] = raw["symbol"]
                 signature = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
@@ -161,7 +179,7 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
                 ranges[name] = {"lo": lo, "hi": hi, "ratios": sorted(set(ratios)) or list(default_ratios), "kinds": kinds, "entry": e_i,
                                "trailLo": trail_lo, "trailHi": trail_hi, "source": source, "configKey": signature,
                                "lanePolicy": raw.get("lanePolicy"), "symbol": raw.get("symbol", ""),
-                               "coordination": raw.get("coordination"), "major": raw.get("major"), "minor": raw.get("minor")}
+                               "coordination": raw.get("coordination"), "major": raw.get("major"), "minor": raw.get("minor"), **timing}
                 if isinstance(pz, (int, float)) and not isinstance(pz, bool):
                     pause[name] = max(0, int(pz))
                 else:
