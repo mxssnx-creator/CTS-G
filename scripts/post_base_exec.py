@@ -66,7 +66,8 @@ def set_columns(st, names, shadow, first):
     )
 
 
-def candidate_index(book, groups, columns, clocks, floor, label):
+def candidate_index(book, groups, columns, clocks, floor, label, proof=None, *,
+                    returns_are_net=False, exact_sets=None):
     picks = {}
     base_pass = np.zeros(len(BASE_WINDOWS), dtype=np.int64)
     base_full = np.zeros_like(base_pass)
@@ -80,7 +81,7 @@ def candidate_index(book, groups, columns, clocks, floor, label):
         kind_priority = {kind: 10 * (len(book.kind_order_for(pack)) - i)
                          for i, kinds in enumerate(book.kind_order_for(pack)) for kind in kinds}
         for st in states:
-            ds = SetDecisions(book, st, columns(st.idx), clocks, floor)
+            ds = SetDecisions(book, st, columns(st.idx), clocks, floor, proof, returns_are_net=returns_are_net)
             base_pass += ds.base_pass
             base_full += ds.base_full
             eligible += ds.base_valid
@@ -102,6 +103,10 @@ def candidate_index(book, groups, columns, clocks, floor, label):
             parents = np.concatenate((ds.parents, np.take_along_axis(ds.parents, strongest, axis=1)), axis=1)
             ranks = np.concatenate((individual, np.take_along_axis(individual, strongest, axis=1)), axis=1)
             ranks += kind_priority.get(st.kind, 0)
+            if exact_sets is not None:
+                valid = parents[:, -1:] >= 0
+                exact_sets[st.idx] = np.where(valid, encode(st.idx, parents[:, -1:].astype(np.int32),
+                                                           selected[:, -1:]), 0).astype(np.uint32)
             for side in (1, -1) if st.side == 0 else (st.side,):
                 ids, best = sides[side]
                 update = (parents >= 0) & (ranks > best)
@@ -187,11 +192,19 @@ class MarketReplay:
         mark = candles[end][3]
         return end, end, entry, mark, side * (mark / entry - 1) - self.cost, "held"
 
-    def execute(self, index):
+    def execute(self, index, *, admit=None):
         """Walk every arm independently, sharing only deterministic fill calculations."""
-        runs = [[[] for _ in range(ARMS)] for _ in EXEC_FLOORS]
-        busy = np.full((len(self.names), 2, len(EXEC_FLOORS), ARMS), -1, dtype=np.int32)
-        active = [[] for _ in range(len(EXEC_FLOORS) * ARMS)]
+        if admit is not None and (admit.ndim != 4 or admit.shape[:2] != (len(self.names), 2)
+                                  or admit.shape[-1] != len(self.clocks) or admit.dtype != bool):
+            raise ValueError("entry admission must cover every symbol, side, arm and decision minute")
+        arm_count = admit.shape[2] if admit is not None else (
+            next(iter(index.values())).shape[1] if index else ARMS
+        )
+        if any(choices.shape != (len(EXEC_FLOORS), arm_count, len(self.clocks)) for choices in index.values()):
+            raise ValueError("qualified positions and entry admission must share an arm grid")
+        runs = [[[] for _ in range(arm_count)] for _ in EXEC_FLOORS]
+        busy = np.full((len(self.names), 2, len(EXEC_FLOORS), arm_count), -1, dtype=np.int32)
+        active = [[] for _ in range(len(EXEC_FLOORS) * arm_count)]
         for minute, now in enumerate(self.clocks):
             bar = int((now - self.first) // BAR) - 1
             capacity = None
@@ -206,6 +219,8 @@ class MarketReplay:
                     available = used_until < bar
                     if capacity is not None:
                         available &= capacity
+                    if admit is not None:
+                        available &= np.tile(admit[s, d, :, minute], len(EXEC_FLOORS))
                     arms = np.flatnonzero(available)
                     fills = {}
                     for pack in self.choices[s][minute][d]:
@@ -221,7 +236,7 @@ class MarketReplay:
                             if st_idx not in fills:
                                 fills[st_idx] = self.entry(symbol, side, st_idx, bar)
                             release, last, entry, exit, net, reason = fills[st_idx]
-                            j, k = divmod(int(arm), ARMS)
+                            j, k = divmod(int(arm), arm_count)
                             runs[j][k].append(Trade(symbol, side, st_idx, base, exec_idx, bar, last, entry, exit, net, reason))
                             used_until[arm] = release
                             if capacity is not None:

@@ -1,0 +1,35 @@
+{
+  "stratIndications": false,
+  "stratGeneral": false,
+  "stratShortRange": false,
+  "stratTrend": false,
+  "stratBreakout": false,
+  "stratReversion": false,
+  "stratFlow": false,
+  "stratMulti": false,
+  "stratSignals": true,
+  "signalConfigs": [
+    {
+      "label": "5m MACD crossover",
+      "sources": ["macd-cross"],
+      "ranges": ["short"],
+      "timeframes": [5],
+      "stepMin": 5,
+      "stepMax": 12,
+      "slRatios": [0.5, 0.75, 1],
+      "types": ["base", "trail"]
+    },
+    {
+      "label": "5m Bollinger bounce",
+      "sources": ["bb-bounce"],
+      "ranges": ["medium"],
+      "timeframes": [5],
+      "stepMin": 5,
+      "stepMax": 12,
+      "slRatios": [0.5, 0.75, 1],
+      "types": ["base", "trail"]
+    }
+  ],
+  "pauseMode": "off",
+  "holdAuto": false
+}

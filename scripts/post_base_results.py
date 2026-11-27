@@ -1,7 +1,7 @@
 """Forward settlement and fixed Axis/Block comparisons for the post-Base study."""
 from collections import defaultdict
 from functools import lru_cache
-from itertools import product
+from itertools import groupby, product
 import math
 
 import stage_eval as sg
@@ -10,6 +10,7 @@ import block_rules
 from pulse_trader import Position
 from set_block import SetBlockBook
 from post_base_gates import BASE_WINDOWS, EXEC_WINDOWS, fixed_history, path_name, terminal_pass
+from execution_cost import execution_result
 
 
 AXES = {
@@ -38,9 +39,10 @@ def block_profiles(overlay):
 
 
 class ParentProof:
-    def __init__(self, market, columns, base_floor, exec_floor):
+    def __init__(self, market, columns, base_floor, exec_floor, *, forward=None, returns_are_net=False):
         self.market, self.columns = market, columns
         self.base_floor, self.exec_floor = base_floor, exec_floor
+        self.forward, self.returns_are_net = forward, returns_are_net
         # Instance-local caches keep neither earlier PF arms nor their tapes alive.
         self.history = lru_cache(maxsize=96)(self.history)
         self.child = lru_cache(maxsize=192)(self.child)
@@ -50,7 +52,8 @@ class ParentProof:
     def history(self, set_idx):
         book = self.market.book
         st = book.by_idx[set_idx]
-        return fixed_history(book, st, self.columns(set_idx), self.base_floor)
+        return fixed_history(book, st, self.columns(set_idx), self.base_floor,
+                             returns_are_net=self.returns_are_net)
 
     def child(self, set_idx, base):
         history = self.history(set_idx)
@@ -58,7 +61,9 @@ class ParentProof:
 
     def active(self, set_idx, base, exec_idx, now):
         history, tape = self.child(set_idx, base)
-        return history.root.passes(BASE_WINDOWS[base], 0, now) and terminal_pass(
+        return (not self.forward or self.forward.allows(tape, now)) and history.root.passes(
+            BASE_WINDOWS[base], 0, now
+        ) and terminal_pass(
             tape, EXEC_WINDOWS[exec_idx], now, self.exec_floor
         )
 
@@ -88,11 +93,13 @@ class MemoryBlock(SetBlockBook):
         pass
 
 
-def possible_adds(market, trades, minimum_level):
+def possible_adds(market, trades, minimum_level, *, next_open=False):
     events = []
     for i, tr in enumerate(trades):
-        for bar in range(tr.first + 1, tr.last):
-            px = market.bars[tr.symbol][bar][3]
+        for bar in range(tr.first + 1, tr.last - int(next_open)):
+            # A close-driven add can only fill at the next opening, before the
+            # parent's exit bar. There is no assumed sequence inside that bar.
+            px = market.bars[tr.symbol][bar + 1][0] if next_open else market.bars[tr.symbol][bar][3]
             if tr.side * (px / tr.entry - 1) + 1e-12 >= minimum_level * market.cost:
                 events.append((bar, False, i, px))
         if not tr.held:
@@ -100,11 +107,12 @@ def possible_adds(market, trades, minimum_level):
     return sorted(events)
 
 
-def block_outcomes(market, trades, proof, cfg, events):
+def block_outcomes(market, trades, proof, cfg, events, *, fills=None):
     """Record independent hypothetical observations and fully simulated adds."""
     block = MemoryBlock(cfg)
     parents, honors = [], []
     minimum_level = cfg.levels()[0]
+    cost_pct = 100 * market.cost if fills else market.book.cost_pct
     for i, tr in enumerate(trades):
         st = market.book.by_idx[tr.set_idx]
         sl, tp = market.book.lane_fracs(st)
@@ -113,6 +121,8 @@ def block_outcomes(market, trades, proof, cfg, events):
                        tr.entry, set_id=st.id, lane=EXEC_WINDOWS[tr.execution].short_mode[:3],
                        exec_lane_id=path_name(st.id, tr.base, tr.execution),
                        client_id=f"replay-{i}", base_qty=1 / tr.entry, base_entry=tr.entry, pack=st.pack)
+        if fills:
+            pos.base_entry_fee_usdt = tr.entry * pos.base_qty * fills.taker
         parents.append(pos)
         honor = sg.se.lane_honors_tp(st.kind)
         honors.append(market.cfg["honor_tp"] if honor is None else honor)
@@ -120,25 +130,37 @@ def block_outcomes(market, trades, proof, cfg, events):
     for bar, settled, i, price in events:
         tr, pos, now = trades[i], parents[i], market.clock(bar)
         if settled:
-            block.close(pos, price, now, None, market.book.cost_pct)
+            if fills:
+                pos.exit_fee_qty = pos.qty
+                pos.exit_fee_usdt = price * pos.qty * fills.taker
+            block.close(pos, price, now, None, cost_pct)
             continue
         if tr.side * (price / tr.entry - 1) + 1e-12 < minimum_level * market.cost:
             continue
         if not proof.active(tr.set_idx, tr.base, tr.execution, now):
-            block.observe(pos, price, now, None, market.book.cost_pct, lookback)
+            block.observe(pos, price, now, None, cost_pct, lookback)
             continue
-        candidate = block.candidate(pos, price, now, None, market.book.cost_pct, lookback,
+        candidate = block.candidate(pos, price, now, None, cost_pct, lookback,
                                     floor=proof.exec_floor, honor_tp=honors[i])
         if candidate:
             qty = candidate["qty"]
-            pos.block_fills.append({"group": candidate["group"], "qty": qty, "price": price, "t": now})
+            fill = {"group": candidate["group"], "qty": qty, "price": price, "t": now}
+            if fills:
+                price = fills.open_price(price, tr.side)
+                fill.update(price=price, fee_usdt=qty * price * fills.taker)
+            pos.block_fills.append(fill)
             pos.entry = (pos.entry * pos.qty + price * qty) / (pos.qty + qty)
             pos.qty += qty
 
     values = []
     for tr, pos in zip(trades, parents):
-        total = math.fsum((tr.side * (tr.exit - f["price"]) - market.cost * f["price"]) * f["qty"]
-                          for f in pos.block_fills)
+        if fills:
+            total = math.fsum(execution_result(f["price"], tr.exit, f["qty"], pos.side,
+                                               f["fee_usdt"], f["qty"] * tr.exit * fills.taker)["net"]
+                              for f in pos.block_fills)
+        else:
+            total = math.fsum((tr.side * (tr.exit - f["price"]) - market.cost * f["price"]) * f["qty"]
+                              for f in pos.block_fills)
         values.append((total, len(pos.block_fills)))
     return values
 
@@ -178,10 +200,12 @@ def summarize(market, trades, axis=None, block=None):
         paths[(tr.set_idx, tr.base, tr.execution)].append(detail)
         symbols[tr.symbol].append(detail)
 
-    outcomes = [r[-1] for r in sorted(rows)]
+    ordered = sorted(rows)
+    outcomes = [r[-1] for r in ordered]
     equity = peak = drawdown = 0.0
-    for value in outcomes:
-        equity += value
+    # A minute candle cannot order closes across symbols within that minute.
+    for _, minute in groupby(ordered, key=lambda row: row[0]):
+        equity += math.fsum(row[-1] for row in minute)
         peak = max(peak, equity)
         drawdown = max(drawdown, peak - equity)
     hourly = [{**metrics(values), "opened": opened, "adds": adds}
@@ -209,11 +233,11 @@ def summarize(market, trades, axis=None, block=None):
     return result
 
 
-def strategy_cases(market, columns, overlay, trades, base_floor, exec_floor):
-    proof = ParentProof(market, columns, base_floor, exec_floor)
+def strategy_cases(market, columns, overlay, trades, base_floor, exec_floor, *, forward=None, fills=None):
+    proof = ParentProof(market, columns, base_floor, exec_floor, forward=forward, returns_are_net=fills is not None)
     blocks = block_profiles(overlay)
     levels = [cfg.levels()[0] for cfg in blocks.values() if cfg]
-    events = possible_adds(market, trades, min(levels))
+    events = possible_adds(market, trades, min(levels), next_open=fills is not None)
     axes = {"off": None}
     for profile in AXES:
         if profile != "off":
@@ -222,7 +246,7 @@ def strategy_cases(market, columns, overlay, trades, base_floor, exec_floor):
     for name, cfg in blocks.items():
         # Without carry the quantity ratio and add eligibility are invariant to
         # the parent's Axis multiplier. Scale its weighted settlement once.
-        block = block_outcomes(market, trades, proof, cfg, events) if cfg else None
+        block = block_outcomes(market, trades, proof, cfg, events, fills=fills) if cfg else None
         for profile, weights in axes.items():
             out.append({"basePf": base_floor, "execPf": exec_floor, "window": None,
                         "axis": profile, "axisSettings": AXES[profile].to_json() if AXES[profile] else None,

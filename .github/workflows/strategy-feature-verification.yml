@@ -24,6 +24,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:strategy-features
       - run: npm run test:lastn-blocks
+      - run: |
+          python3 scripts/test_post_base_exec.py
+          python3 scripts/test_post_base_forward.py
       - run: python3 scripts/test_project_order_identity.py
       - run: python3 scripts/test_disjoint_lastn.py
       - run: python3 scripts/test_trailing_control_pacing.py

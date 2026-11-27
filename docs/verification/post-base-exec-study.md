@@ -100,3 +100,70 @@ drawdown within 110% of the baseline, enough resizes or adds, and PF above
 Verification included four study regressions, 34 native stage-grid checks,
 31 stage regressions and 10 Block regressions. Hourly, Set-path and symbol
 close counts reconcile for every reported case.
+
+## Forward fill and release follow-up
+
+The follow-up resolves the entry from the opening immediately after the
+completed signal candle. It uses the native exit state machine, including
+same-candle stop priority and stop gaps. Fee debit follows each simulated fill's
+notional, with adverse slippage in the fill price. Signed Short and Last
+windows keep their independent paths and the position's original direction.
+The extra proof gate checks the most recent closed, after-cost positions from
+the same Base path in their original direction before ranking an entry.
+
+The smaller 132-Set study scans two five-minute packs, Bollinger bounce and
+MACD crossover. It covers exact Sets, pack-level portfolios, seven market
+conditions, all requested PF pairs and three levels of directional proof.
+Of 9,882 cases, 1,080 closed at least 30 positions in every one of five scanned
+windows. Zero of those reached PF above 1 in all five. The first two windows
+were used to choose the six frozen configurations. Four older periods were
+used as retrospective checks and the Nov 27 window starts at the research
+cutoff. All eight executions use 30 symbols and 48 hours of prehistory each.
+The research and Nov 27 inputs match their archive checksums. The older
+archives have recorded hashes from this run and no source checksum manifest.
+
+| Scored window (UTC) | Step 10 PF | Closes | Profitable hours | Combined control PF | Closes | Profitable hours |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Nov 19 12:00–Nov 20 12:00 | 6.075 | 34 | 8/24 | 0.665 | 582 | 5/24 |
+| Nov 26 00:00–Nov 27 00:00 | 1.994 | 37 | 8/24 | 0.660 | 405 | 8/24 |
+| Nov 10 00:00–Nov 11 00:00 | 0.911 | 17 | 2/24 | 0.490 | 345 | 3/24 |
+| Nov 12 00:00–Nov 13 00:00 | 2.633 | 17 | 6/24 | 0.913 | 362 | 8/24 |
+| Nov 15 00:00–Nov 16 00:00 | 0.270 | 12 | 1/24 | 0.671 | 517 | 8/24 |
+| Nov 24 00:00–Nov 25 00:00 | — | 0 | 0/24 | 1.007 | 521 | 10/24 |
+| Nov 27 00:00–08:00 | — | 0 | 0/8 | 0.501 | 99 | 3/8 |
+| Nov 27 00:00–08:00, extra 1 bp per side | — | 0 | 0/8 | 0.363 | 107 | 3/8 |
+
+The step-10 case uses Base 1.5, final 2.0, and directional PF 1.05 over 24
+closes. The combined control uses Base 2.0 and final 2.5. The higher-threshold
+step-8 case with directional proof reached PF 4.301 and 1.566 on the research
+periods and settled zero positions on Nov 27. The fresh control's best Axis
+variant resized one parent and reached PF 0.509. Block recorded no fresh adds.
+Across 54 Axis and Block combinations per frozen case, none sustained PF
+above 1 in every independent window and the cost stress test. The frozen
+release check rejects all six cases. This branch is suitable for continued
+offline testing. Production promotion remains blocked by the forward results.
+
+Run the narrow study with NumPy and the Python runtime dependencies installed.
+Use one invocation per period, with `--hours 8` for the recent
+market window and `--additional-slippage-bps 1` on that same
+archive for stress. Use a separate cache path for the stress replay. Pass
+`--market-filters --exact-sets` without a selection for a full scan.
+The checker exits with status 1 when the frozen configurations fail the
+historical release criteria. It rejects overlapping evaluation periods,
+missing sample support, mismatched stress data and inconsistent settlement
+totals. Account-specific commissions, liquidity, lot sizes and funding still
+need venue evidence for production consideration.
+
+```sh
+python3 scripts/post_base_forward.py --data archive --label period \
+  --cache period.pkl.gz --out period.json \
+  --patch presets/post-base-forward-study.json \
+  --selection presets/post-base-forward-selection.json --exact-sets --axis-block
+python3 scripts/check_post_base_forward.py --selection presets/post-base-forward-selection.json \
+  --research research-a.json research-b.json \
+  --evaluate retro-a.json retro-b.json retro-c.json retro-d.json fresh.json --stress stress.json
+python3 scripts/render_post_base_forward.py --selection presets/post-base-forward-selection.json \
+  --research research-a.json research-b.json \
+  --evaluate retro-a.json retro-b.json retro-c.json retro-d.json fresh.json --stress stress.json \
+  --scan scan-a.json scan-b.json scan-c.json scan-d.json scan-e.json --out forward.html
+```

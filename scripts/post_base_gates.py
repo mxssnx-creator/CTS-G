@@ -21,6 +21,26 @@ class ExecWindow(NamedTuple):
     last_mode: str
 
 
+class ForwardProof(NamedTuple):
+    count: int
+    floor: float
+
+    def rank_at(self, tape, end):
+        _, gain, loss = tape.evidence(self.count, end)
+        if loss and math.isclose(gain, self.floor * loss, rel_tol=1e-8):
+            values = tape.values[end - self.count:end]
+            gain = math.fsum(v for v in values if v > 0)
+            loss = math.fsum(-v for v in values if v < 0)
+        if gain <= loss or gain < self.floor * loss:
+            return 0.
+        profit_factor = min(5., gain / loss) if loss else 5.
+        return (profit_factor - 1.) * self.count / (20 + self.count)
+
+    def allows(self, tape, now):
+        start, end = tape.indices(now)
+        return end - start >= self.count and self.rank_at(tape, end) > 0
+
+
 EXEC_WINDOWS = tuple(
     ExecWindow(short, short_mode, last, last_mode)
     for short in (8, 12, 16, 20)
@@ -56,12 +76,12 @@ def indices(bits, length):
     return np.flatnonzero(np.unpackbits(packed, bitorder="little", count=length))
 
 
-def fixed_history(book, st, columns, floor, probes=()):
+def fixed_history(book, st, columns, floor, probes=(), *, returns_are_net=False):
     # Native masks answer a historical entry and a decision query identically.
     # Decision probes have a close later than every real close and decision.
     # They can never enter a window, and are stripped from child membership.
     close, entry, gross = columns
-    cf = sg.cost_as_frac(book.cost_pct)
+    cf = 0 if returns_are_net else sg.cost_as_frac(book.cost_pct)
     net = [value - cf for value in gross]
     if len(probes):
         sentinel = max(close[-1] if len(close) else 0, probes[-1]) + 60
@@ -208,7 +228,7 @@ class BaseMasks:
 class SetDecisions:
     """Fixed-floor Base and Exec results for a single independent strategy Set."""
 
-    def __init__(self, book, st, columns, clocks, floor):
+    def __init__(self, book, st, columns, clocks, floor, proof=None, *, returns_are_net=False):
         self.scores = np.zeros((len(EXEC_FLOORS), PORTFOLIO, len(clocks)))
         self.parents = np.full(self.scores.shape, -1, dtype=np.int16)
         self.full = np.zeros((PORTFOLIO, len(clocks)), dtype=bool)
@@ -225,13 +245,14 @@ class SetDecisions:
             return
 
         n = len(close)
-        history = fixed_history(book, st, columns, floor, clocks)
+        history = fixed_history(book, st, columns, floor, clocks, returns_are_net=returns_are_net)
         root = history.root
         masks = BaseMasks(history, params, floor)
         real = (1 << n) - 1
         earlier = (1 << int(np.searchsorted(close, clocks[0]))) - 1
         groups = defaultdict(list)
         valid = 0
+        keep = max(MAX_EXEC_CLOSED, proof.count if proof else 0)
         for i, window in enumerate(BASE_WINDOWS):
             # Avoid constructing historical masks for Base choices with no
             # possible first decision in this replay period.
@@ -243,8 +264,8 @@ class SetDecisions:
             valid |= now
             if now and (members := hits & real).bit_count() >= MIN_EXEC_CLOSED:
                 older = members & earlier
-                if older.bit_count() > MAX_EXEC_CLOSED:
-                    for _ in range(MAX_EXEC_CLOSED):
+                if older.bit_count() > keep:
+                    for _ in range(keep):
                         older ^= 1 << (older.bit_length() - 1)
                     members ^= older
                 groups[members].append((i, now))
@@ -258,9 +279,9 @@ class SetDecisions:
                 owner[indices(valid_at, len(clocks))] = base
             at = np.flatnonzero(owner >= 0)
             child = history.child(root, members)
-            self._confirm(child, at, clocks[at], owner[at])
+            self._confirm(child, at, clocks[at], owner[at], proof)
 
-    def _confirm(self, tape, at, when, parent):
+    def _confirm(self, tape, at, when, parent, proof):
         times = np.asarray(tape.times)
         end = np.searchsorted(times, when)
         available = end - np.searchsorted(times, when - tape.owner.lookback)
@@ -271,6 +292,14 @@ class SetDecisions:
         full = available[None, :] >= NEEDED
         self.full[:, at] |= full
         distinct, inverse = np.unique(end[supported], return_inverse=True)
+        if proof:
+            supported_proof = available >= proof.count
+            proof_ranks = np.zeros(len(distinct))
+            for i in np.unique(inverse[supported_proof]):
+                proof_ranks[i] = proof.rank_at(tape, int(distinct[i]))
+            full &= supported_proof[None, :] & (proof_ranks[inverse] > 0)
+            if not full.any():
+                return
         gain, loss = block_totals(tape, distinct)
         short_gain, short_loss = gain[SHORT_BLOCK_INDEX], loss[SHORT_BLOCK_INDEX]
         last_rows = len(SHORT_BLOCKS) + LAST_BLOCK_INDEX
@@ -285,6 +314,10 @@ class SetDecisions:
         # Use the native sample-size discount with sign-aligned PF for
         # selection only. Execution PnL and reported PF use actual signs.
         score = np.round((np.minimum(5.0, pf) - 1.0) * NEEDED / (20 + NEEDED), 12)[:, inverse]
+        if proof:
+            # Rank the expected direction using its own after-cost history.
+            # The reciprocal PF of a loss window remains qualification evidence.
+            score = proof_ranks[None, inverse] + score * 1e-8
         for j, floor in enumerate(EXEC_FLOORS):
             ok = signed_pass(sgain, sloss, floor) & signed_pass(lgain, lloss, floor)
             seen = self.scores[j][:, at]

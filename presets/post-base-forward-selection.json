@@ -1,0 +1,67 @@
+{
+  "selectionMethod": "Highest worst-panel PF with at least 30 closes per panel and no market filter, plus highest supported Base 2.0/Exec 2.5 exact Set and pack, no-proof Set, and two controls. First row is the primary candidate.",
+  "decision": {
+    "minimumPf": 1.0,
+    "minimumTotalIndependentCloses": 100,
+    "minimumClosesPer24Hours": 20,
+    "minimumClosesPer8Hours": 8,
+    "stressAdditionalPerSideBps": 1,
+    "minimumEvaluationWindows": 4
+  },
+  "cases": [
+    {
+      "base": 1.5,
+      "final": 2.0,
+      "proof": [
+        24,
+        1.05
+      ],
+      "scope": "sig-bb-bounce-medium-t5:S:1m:sl1.00:st10",
+      "alignment": "all"
+    },
+    {
+      "base": 2.0,
+      "final": 2.5,
+      "proof": [
+        24,
+        1.05
+      ],
+      "scope": "sig-bb-bounce-medium-t5:S:1m:sl1.00:st8",
+      "alignment": "all"
+    },
+    {
+      "base": 2.0,
+      "final": 2.5,
+      "proof": [
+        24,
+        1.05
+      ],
+      "scope": "sig-bb-bounce-medium-t5",
+      "alignment": "all"
+    },
+    {
+      "base": 1.5,
+      "final": 2.5,
+      "proof": null,
+      "scope": "sig-bb-bounce-medium-t5:S:1m:sl0.75:st7",
+      "alignment": "all"
+    },
+    {
+      "base": 2.5,
+      "final": 2.0,
+      "proof": [
+        24,
+        1.05
+      ],
+      "scope": "sig-bb-bounce-medium-t5",
+      "alignment": "all"
+    },
+    {
+      "base": 2.0,
+      "final": 2.5,
+      "proof": null,
+      "scope": "combined",
+      "alignment": "all"
+    }
+  ]
+}
