@@ -41,6 +41,19 @@ November 11–13 and 19–21 were reserved from parameter selection. Both had lo
 
 The grid covered four Axis settings, the shipped Block policy and six alternatives, 18 DCA settings, two combinations and a neutral control. The most aggressive Axis candidate had a slightly higher pooled PF and materially greater drawdown. All six actively funding Block alternatives lowered pooled PF. The conservative DCA plan reduced risk relative to the earlier DCA settings. Enabling DCA together with Axis still lowered pooled PF relative to Axis alone. The study does not establish a universal winning strategy.
 
+## Additional replay after selection
+
+The frozen settings were also replayed on November 9–11 UTC, covering 30 symbols, 60 settled parents and zero open positions at the cutoff. Neutral PF was 0.2527 with realized drawdown 36.128. Axis PF was 0.2555 with drawdown 35.673. Across the two originally reserved windows, neutral PF was 0.7392 and Axis PF was 0.6959 over 199 closes.
+
+| Configuration over all eight windows | Closed | Pooled Exec PF | Worst realized drawdown | Simulated adds |
+| --- | ---: | ---: | ---: | ---: |
+| Neutral | 936 | 1.0828 | 37.97 | 0 |
+| Selected Axis | 936 | 1.0770 | 35.96 | 0 |
+| Axis plus Block | 936 | 1.0754 | 35.96 | 33 |
+| Axis plus DCA | 936 | 1.0756 | 35.96 | 49 |
+
+Four of eight Axis windows lost money. The selected size range reduced the worst drawdown and slightly reduced pooled PF and held-out PF. Its evidence supports using it to limit exposure. Independent profitability is unproven.
+
 ## Calculation cost
 
 On a 60-close fixture with combined Axis rules enabled, the previous implementation took 14.77 ms per evaluation and the updated implementation took 1.75 ms. Both selected the same rule, volume and admission decision. These are medians of five batches of 20 calls on this machine. The updated kernel evaluates each distinct rule once per history prefix. DCA reuses the score for an unchanged owner and invalidates it on a confirmed close or a policy change.
