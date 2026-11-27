@@ -59,8 +59,8 @@ def directions(bars, policy=POLICY):
     return np.where(active, sign, 0).astype(np.int8), trend, lag
 
 
-def memberships(rows, template, book, length, component, bases, ends):
-    _, base_name, end_name = COMPONENTS[component]
+def memberships(rows, template, book, length, component, bases, ends, components=COMPONENTS):
+    _, base_name, end_name = components[component]
     history = book.grid_history(template, closes=[60*(r[1] or length+1) for r in rows],
                                 entries=[60*r[0] for r in rows], nets=[r[3] or 0 for r in rows])
     grid = {}
@@ -147,10 +147,12 @@ def main(argv=None):
     fit = sub.add_parser('fit', help='Select using distinct, chronological development panels')
     fit.add_argument('--development', type=Path, action='append', required=True)
     fit.add_argument('--details', type=Path, help='Full development scores and settlement ledgers')
+    fit.add_argument('--profile', choices=['market-catchup','native'], default='market-catchup')
     replay = sub.add_parser('replay', help='Apply a frozen fit to a later market panel')
     replay.add_argument('--data', type=Path, required=True)
     replay.add_argument('--selection', type=Path, required=True)
     for p in (fit, replay):
+        p.add_argument('--jobs', type=int, choices=range(1,9), default=3)
         p.add_argument('--out', type=Path, required=True)
     args = parser.parse_args(argv)
     folders = args.development if args.method == 'fit' else [args.data]
@@ -158,30 +160,44 @@ def main(argv=None):
     infos = [i for _, i in inputs]
     if any(a['end'] > b['start'] or a['symbols'] != b['symbols'] for a,b in zip(infos,infos[1:])):
         parser.error('Development panels must be ordered, disjoint and use the same symbols.')
-    protocol = digest(POLICY)
+    from . import native_policy
+    saved = json.loads(args.selection.read_text()) if args.method == 'replay' else None
+    profile = args.profile if args.method == 'fit' else saved['policy'].get('profile', 'market-catchup')
+    policy = native_policy.POLICY if profile == 'native' else POLICY
+    protocol = digest(policy)
     if args.method == 'fit':
         if len(infos) < 3:
             parser.error('Fit needs at least three distinct market periods.')
         frozen = None
     else:
-        frozen = json.loads(args.selection.read_text())
+        frozen = saved
         frozen_id = frozen.pop('sha256', None)
         if frozen_id != digest(frozen):
             parser.error('Frozen selection fingerprint mismatch.')
         frozen['sha256'] = frozen_id
+        if profile == 'native' and frozen.get('engine') != native_policy.engine_digest():
+            parser.error('Production replay and fitted engine fingerprints differ.')
         if (frozen['protocol'] != protocol or frozen['symbols'] != infos[0]['symbols']
                 or infos[0]['start'] + 60000*infos[0]['warm'] < frozen['trainingEnd']):
             parser.error('Frozen policy, symbol universe or forward chronology mismatch.')
     study.offline()
     book, cfg = study.make_book()
-    panels = [build_panel(f, m, i, book, cfg) for f,(m,i) in zip(folders,inputs)]
-    body = dict(protocol=protocol, policy=POLICY, panels=panels, selection=frozen)
+    panels = []
+    for folder, (m, info) in zip(folders, inputs):
+        if profile == 'native':
+            tapes = native_policy.native_orders(folder,m,info,args.jobs)
+            panels.append(native_policy.panel_from_tapes(folder,m,info,book,tapes))
+        else:
+            panels.append(build_panel(folder,m,info,book,cfg))
+    body = dict(protocol=protocol, policy=policy, panels=panels, selection=frozen)
     if args.method == 'fit':
         with tempfile.TemporaryDirectory(prefix='cts-fit-') as temp:
             detail = Path(temp)/'fit.json'
             run_node('fit', body, detail)
             result = json.loads(detail.read_bytes())
         development = result.pop('development')
+        if profile == 'native':
+            result['engine'] = native_policy.engine_digest()
         result['sha256'] = digest(result)
         if args.details:
             args.details.parent.mkdir(parents=True, exist_ok=True)
