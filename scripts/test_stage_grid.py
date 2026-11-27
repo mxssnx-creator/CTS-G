@@ -950,6 +950,29 @@ class StageGridTest(unittest.TestCase):
             pulse.cooldown[pos.symbol] = 1200
             self.assertTrue(pulse.entry_slot_rests(pos.symbol, "SHORT", 1000))
 
+    def test_owned_exec_losses_pause_only_their_exact_path_side_and_symbol(self):
+        book = se.SetBook()
+        book.load({"stageLastN": {"enabled": True}, "histEnabled": True, "setStepMax": 3, "setMinStep": 3})
+        st = book.by_idx[0]
+        st.hist = [dict(zip(se._ROW_KEYS, (60.0*i, "TEST-USDT", "LONG", .01, .011, 1, "tp", st.id)))
+                   for i in range(1, 161)]
+        book._score_one(st, 161 * 60)
+        lane = book.exec_lane_id(st)
+        self.assertTrue(lane)
+        n = st.exec_grid.path[-1].need
+        now = 162 * 60
+        for i in range(n):
+            book.on_live_close({"set_id": st.id, "exec_lane_id": lane, "symbol": "TEST-USDT",
+                                "side": "LONG", "t": now+i, "client_id": str(i),
+                                "pnl_pct": -.01, "net_pnl_pct": -.012, "ours": True})
+        self.assertTrue(book.exec_entry_allows(st, "TEST-USDT", 1, now+n-1), "same-clock close is excluded")
+        self.assertFalse(book.exec_entry_allows(st, "TEST-USDT", 1, now+n))
+        self.assertTrue(book.exec_entry_allows(st, "OTHER-USDT", 1, now+n))
+        self.assertTrue(book.exec_entry_allows(st, "TEST-USDT", -1, now+n))
+        st.live_exec.clear()
+        st.live_exec[(lane + ":other", "TEST-USDT", "LONG")] = [(now+i, -.01) for i in range(n)]
+        self.assertTrue(book.exec_entry_allows(st, "TEST-USDT", 1, now+n))
+
     def test_exec_cash_pf_includes_reported_funding_on_restart(self):
         pulse = pt.Pulse.__new__(pt.Pulse)
         win = pt.Closed(1795254001, "BTC-USDT", "LONG", 1, 100, 101, .9, .01, "tp", 60,
