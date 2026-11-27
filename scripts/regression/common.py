@@ -81,6 +81,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     # x01 (owner 2026-11-05, disable the non-performers): Micro range, trend pack and Short Range off, five SL ratios dropped, trailing pairs that lock under 0.2 % dropped; fixtures keep the full grid
     ov["trailMinLockPct"], ov["stratShortRange"] = 0.0, True
     ov["stratGeneral"], ov["tpStepsOff"], ov["packSidesOff"] = True, [], []   # x01 (owner 2026-11-24, disable the non-performers): general pack, steps 7 / 9 / 19 and reversion long off; fixtures keep the full grid
+    ov["trailRanges"] = {k: True for k in ("micro", "minimal", "short", "normal", "long", "wide")}   # x01 (owner 2026-11-27): trailing Sets off live (PF 0.26 on 73 closes); fixtures keep them
     ov.pop("setSlRatios", None)
     # the shipped overlays (owner 2026-11-13/14) run every signal pack, the group gate by side and the 0.8 SL ceiling; fixtures keep the earlier packs, no gate and the full ratio grid
     ov["stratReversion"], ov["stratFlow"], ov["stratMulti"] = False, False, False

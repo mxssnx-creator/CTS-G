@@ -2,6 +2,10 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-27 (later), owner: "Weitere nicht performende configs und trailings deaktivieren, x01 symbols auf 60".** Live x01 engine closes since 11-26 11:14 (150): trailing **0.26 / 73 (-2.2 USDT)**, every
+  trailing pair losing (1.2:1.2 0.00 / 8, 1.2:0.6 0.34 / 9, 1.2:0.7 0.51 / 6), TP step 22 0.18 / 10, 21 0.00 / 6, 13 0.22 / 6, flow LONG 0.32 / 40, indications LONG 0.26 / 18. Shipped on x01: `trailRanges` all off
+  (no trailing Set is built), `tpStepsOff` + 13 / 21 / 22, `packSidesOff` + flow:L / indications:L, `symbolCap` 60. Isolated-PF removal, no counterfactual sim (2026-11-06 caveat); account at 0.76 USDT, so the sample is thin.
+  Fixtures pin trailing back on (`common.overlay`, `trader._signal_book`). Revert = remove those keys.
 - **2026-11-27, owner: "Freigabe ... optimal minstep und mintrailstep, check live x01 history and disable non performing configs", "decrease symbols on live x01 to 30 and enable the working Relate".**
   Live x01 closes since 11-26 11:14 (148 engine closes, USDT PF / closes): **trailing 0.26 / 73 (-2.22 USDT)** (trail lock 0.0 0.00 / 8, 0.6 0.30 / 10), flow 0.32 / 64, indications 0.37 / 35, reversion 0.46 / 24,
   SL 0.20 0.33 / 13 (0.30 0.84, 0.75 0.76), TP step 22 0.18 / 10, step 28 3.63 / 8. Shipped on x01: `symbolCap` 30; `volumeByKind` trail 2.0 -> **1.0** (the x2 doubled the worst group's size);

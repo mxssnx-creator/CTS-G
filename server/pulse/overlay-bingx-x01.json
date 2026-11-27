@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 30,
+  "symbolCap": 60,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -400,11 +400,16 @@
   "tpStepsOff": [
     7,
     9,
+    13,
     19,
+    21,
+    22,
     30,
     31
   ],
   "packSidesOff": [
+    "flow:L",
+    "indications:L",
     "reversion:L"
   ],
   "stratReversion": true,
@@ -667,5 +672,13 @@
       "maxLossRun": 3,
       "trigger": "every"
     }
-  ]
+  ],
+  "trailRanges": {
+    "micro": false,
+    "minimal": false,
+    "short": false,
+    "normal": false,
+    "long": false,
+    "wide": false
+  }
 }

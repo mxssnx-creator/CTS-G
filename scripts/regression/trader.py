@@ -2568,6 +2568,7 @@ def _signal_book():
     b = se.SetBook()
     ov = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json")))
     ov["stageLastN"] = False
+    ov["trailRanges"] = {k: True for k in ("micro", "minimal", "short", "normal", "long", "wide")}   # x01 builds no trailing Set live (owner 2026-11-27); this check needs one
     # the shipped x01 now runs every signal pack, so some pack signals on nearly every bar of this synthetic trend and the "quiet bar" half of the check disappears; the check
     # pins the packs it was written for (the signal transport is the same for every pack)
     ov["stratReversion"] = ov["stratFlow"] = ov["stratMulti"] = ov["stratTrend"] = False
