@@ -10,7 +10,7 @@
     {"id": "trail-only", "kind": "trailing-only", "tp": 0, "sl": 0.01, "trailArm": 0.005, "trailGap": 0.003, "holdMinutes": 60}
   ],
   "lastNLanes": [{"base": 4, "main": 4, "real": 4}, {"base": 12, "main": 8, "real": 4}],
-  "minPf": 2.2,
+  "minPf": 2.25,
   "historyMinutes": 720,
   "maxContextDrawdown": 0.04,
   "normalEnabled": true,

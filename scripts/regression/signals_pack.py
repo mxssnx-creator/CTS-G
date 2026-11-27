@@ -64,7 +64,7 @@ def every_signal_pack_is_its_own_set_grid_at_the_signals_floor():
     off.load(overlay(**{**SMALL, "stratSignals": False, "signalConfigs": cfg}))
     dropped = [d["name"] for d in b.signal_report["dropped"]]
     ok = (sorted(sig) == sorted(sp.pack_name(s, "short", tf) for s in ("ema-cross", "donchian") for tf in (5, 15)) and steps == {6, 7, 8, 9}
-          and ratios == {0.5, 1.0} and kinds <= {"base", "trail"} and "exit" not in kinds and floors == {b.signal_min_pf} and b.signal_min_pf >= 2.2
+          and ratios == {0.5, 1.0} and kinds <= {"base", "trail"} and "exit" not in kinds and floors == {b.signal_min_pf} and b.signal_min_pf >= 2.25
           and any("nope" in d for d in dropped) and not any(p.startswith(sp.PREFIX) for p in off.packs) and all(se.is_signal_pack(p) for p in sig))
     return ok, f"packs {sig}; steps {sorted(steps)}; ratios {sorted(ratios)}; kinds {sorted(kinds)}; floors {sorted(floors)}; dropped {dropped}"
 

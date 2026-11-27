@@ -60,7 +60,7 @@
       "shortRatio": 0.5
     },
     "maxContextDrawdown": 0.01,
-    "minPf": 2.2,
+    "minPf": 2.25,
     "realLastN": "coordinated"
   },
   "protections": [

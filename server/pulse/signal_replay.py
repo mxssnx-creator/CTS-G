@@ -16,12 +16,12 @@ import json
 import math
 
 from signal_sources import SOURCES, RANGES, TIMEFRAMES, onsets, validate_bars, completed_bars, warmup_bars
-from position_cost import sl_floor_frac
+from position_cost import PF_BY_SIZE_DEFAULTS, sl_floor_frac
 
 MINUTE = 60000
 HOUR = 3600000
 STAGES = ("base", "main", "real")
-SIGNAL_MIN_PF = 2.2  # User's Signals-only floor; ordinary strategy thresholds are separate.
+SIGNAL_MIN_PF = PF_BY_SIZE_DEFAULTS["minPfSignals"]
 
 
 def evidence(values):

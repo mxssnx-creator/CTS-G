@@ -18,13 +18,13 @@ FEES={"maker":.0002,"taker":.0005,"slippagePerLeg":.0001,"entryLiquidity":"taker
 P={"id":"test","kind":"normal","strategyRange":"signals","tp":.006,"sl":.005,"trailArm":0,"trailGap":0,"holdMinutes":20}
 
 def cfg():
-    return dict(base=copy.deepcopy(DEFAULT_WINDOWS),main=copy.deepcopy(DEFAULT_WINDOWS),realLastN=8,minPf=2.2,
+    return dict(base=copy.deepcopy(DEFAULT_WINDOWS),main=copy.deepcopy(DEFAULT_WINDOWS),realLastN=8,minPf=2.25,
                 historyMinutes=720,maxContextDrawdown=.04,fees=copy.deepcopy(FEES))
 
 def identity(symbol='A',side=1):
     return dict(symbol=symbol,source='ema-cross',sourceRange='short',tf=1,side=side,coordination='source')
 
-def plain_pass(rows,t,rule,floor=2.2):
+def plain_pass(rows,t,rule,floor=2.25):
     vals=[v for clock,v in rows if t-720*60000<=clock<t]
     a,b,n,mode=rule.long,rule.short,rule.minimal,rule.polarity
     if len(vals)<a+n:return False
@@ -47,7 +47,7 @@ def scalar_path(bars,events,br,mr,side,p=P):
         g=sum(v for v in vals if v>0);loss=-sum(v for v in vals if v<0)
         total=peak=dd=0
         for value in vals:total+=value;peak=max(peak,total);dd=max(dd,peak-total)
-        good_real=len(vals)==real_n and g>0 and (not loss or g/loss>=2.2) and dd<=.04
+        good_real=len(vals)==real_n and g>0 and (not loss or g/loss>=2.25) and dd<=.04
         if events.get(t)==side:
             if b and m and good_real:candidates.append(t)
             for stage,admit in [('base',True),('main',b),('real',b and m)]:
@@ -94,7 +94,7 @@ class Windows(unittest.TestCase):
         h=History(23)
         for i in range(20):h.record(i*60000,.01)
         h.record(20*60000,-.9)
-        passing=h.evaluate(21*60000,720*60000,rules(),2.2,.04)
+        passing=h.evaluate(21*60000,720*60000,rules(),2.25,.04)
         rule=passing['l20-s10-m1-negative']
         self.assertEqual(rule['long']['loss'],0)
         self.assertEqual(rule['minimal']['loss'],.9)

@@ -52,7 +52,7 @@ COMMON = {
     "minPfMicroN": 2,
     "minPfShort": 1.12,
     "minPfShortN": 12,
-    "minPfSignals": 2.2,
+    "minPfSignals": 2.25,
     "mainGateN": 20,
     "realGateN": 12,
     "pfWindow": 10,

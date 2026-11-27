@@ -136,7 +136,7 @@
   window and own Auto floor 1.72 unchanged) and the mutant `set auto: a Set's own floor is learned from the pooled pairs of its step`.
   (h) **Signals are Set-engine packs** (owner "Signals ... for each source, symbol, type, range independent ... through the stages like the other"): `server/pulse/signal_packs.py`,
   overlay `stratSignals` + `signalConfigs` (entries: sources, ranges, timeframes, stepMin / stepMax, slRatios, types; each source x range x timeframe of the CTS-A-O ports in
-  `signal_sources.py` becomes pack `sig-<source>-<range>-t<tf>` with its own Sets, stage chain, last-N windows, lanes and execution; floor `minPfSignals` 2.2 in every window).
+  `signal_sources.py` becomes pack `sig-<source>-<range>-t<tf>` with its own Sets, stage chain, last-N windows, lanes and execution; floor `minPfSignals` 2.25 in every window).
   The signal on a 1m bar is the source state's onset on the timeframe bar that bar completes, read from the pack's own window (6 warm-ups, at most 1,920 rows; agrees with
   `signal_sources.onsets` on the full history on 3,637 of 3,638 onsets after one window). Checks `signals-pack.*` (4), mutants `signals pack:` (3). Desk: Settings "Signals"
   toggle + editor (`src/components/signal-config-editor.tsx`). x02 runs the 1 / 5 min entry (steps 5 - 12, SL 0.5 / 0.75 / 1.0, base + trailing); fixtures pin it off. Sweep (`docs/verification/signals-pack-20261114.md`, 8 symbols,

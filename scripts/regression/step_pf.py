@@ -668,7 +668,9 @@ def every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default
     for x in (micro, sig, pol, gen):
         b.set_floor_auto[x.id] = 1.18
     ask("micro, own", micro, 1.18, "auto-set")
-    ask("signals, own", sig, 1.18, "auto-set")
+    ask("signals, lower own", sig, 2.4, "signals")
+    b.set_floor_auto[sig.id] = 2.5
+    ask("signals, higher own", sig, 2.5, "auto-set")
     ask("policy, own", pol, 1.18, "auto-set")
     ask("generic, own", gen, 1.18, "auto-set")
     b.set_floor_auto[gen.id] = 1.9

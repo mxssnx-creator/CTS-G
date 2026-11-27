@@ -4693,6 +4693,7 @@ class SetBook:
             return
         sources = tuple(self._hist_rows[symbol] for symbol in tape_order)
         sets = [(st.id, self.grid_auto_fallback(st)[0]) for st in self.by_idx if not self.auto_holds(st)]
+        signal_sets = {st.id for st in self.by_idx if is_signal_pack(st.pack)}
         previous, minimum = self.pf_step_auto_n, self.pf_set_auto_min
         tolerance, orders_factor, candidates = self.pf_step_auto_tol, self.pf_auto_factor, self.step_auto_candidates()
         cost = cost_as_frac(self.cost_pct)
@@ -4711,8 +4712,9 @@ class SetBook:
                 close = [row[0] for row in rows]
                 entry = [row[0] - row[5] for row in rows]
                 nets = [row[4] - cost for row in rows]
+                floors = self.signal_auto_floors(fallback) if sid in signal_sets else candidates
                 model = auto_set_pf.RollingFloors(close, entry, nets, previous, minimum, fallback,
-                                                 candidates, tolerance, orders_factor)
+                                                 floors, tolerance, orders_factor)
                 models[sid] = model
                 floor = model.learned(upper)
                 if floor is not None:
@@ -4875,6 +4877,10 @@ class SetBook:
         if auto and per_set:
             own = self.set_floor_auto.get(st.id)
             if own is not None:
+                if is_signal_pack(st.pack):
+                    minimum, source = self.own_manual_floor(st)
+                    learned = min(float(own), round(minimum + .2, 6))
+                    return (learned, "auto-set") if learned > minimum else (minimum, source)
                 return min(float(own), high), "auto-set"
             if self.stage_grid:
                 return self.grid_auto_fallback(st)
@@ -4895,6 +4901,11 @@ class SetBook:
         if value is not None:
             return min(self.pf_step_auto_high, max(self.pf_step_auto_low, value)), "auto-range-default"
         return self.manual_step_floor_for(st), "manual-step"
+
+    @staticmethod
+    def signal_auto_floors(minimum: float) -> tuple[float, ...]:
+        """Search just above the exact Signals floor on the Set's own evidence."""
+        return tuple(round(minimum + step * .05, 6) for step in range(1, 5))
 
     def manual_step_floor_for(self, st: "SetState") -> float:
         bucket = self.step_bucket(st)
@@ -5019,9 +5030,12 @@ class SetBook:
                                      params.max_dd_s, params.consistency)
         main_filter = (lambda values: negative_filter_ok(values, params.negative_filter)) if params.negative_filter else None
         need = max(params.negative_filter["windows"]) if params.negative_filter else 0
-        auto = (stage_grid.WindowAuto(self.grid_auto_fallback(st)[0], self.pf_set_auto_min,
-                                     tuple(self.step_auto_candidates()), self.pf_step_auto_tol, self.pf_auto_factor)
-                if self.grid_auto_enabled() else None)
+        auto = None
+        if self.grid_auto_enabled():
+            fallback, _ = self.grid_auto_fallback(st)
+            candidates = self.signal_auto_floors(fallback) if is_signal_pack(st.pack) else tuple(self.step_auto_candidates())
+            auto = stage_grid.WindowAuto(fallback, self.pf_set_auto_min, candidates,
+                                         self.pf_step_auto_tol, self.pf_auto_factor)
         return stage_grid.StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
                                        params.floor_for, risk, main_filter, need, window_auto=auto)
 
