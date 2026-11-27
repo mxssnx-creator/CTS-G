@@ -68,6 +68,100 @@ class Settlement(unittest.TestCase):
         self.assertAlmostEqual(sum(r['qty']*r['price']for r in pos.block_fills),109,12)
         self.assertFalse(pos.block_pending)
 
+    def test_dca_ack_partial_repeat_restart_and_final(self):
+        cid = pt.TAG+"dCase"
+        pos = pt.Position("A-USDT","LONG",1,100,1000,99,102,100,base_entry=100,base_qty=1,sl_pct=.01,
+            entry_fee_usdt=.05,block_pending={"strategy":"dca","rung":1,"qty":.1,"t":1001,"client_id":cid})
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        pulse.dca = pt.DcaBook()
+        pulse.dca.load({"fixedSlBands":{}, "dcaEnabled":True, "dcaMaxExposureX":1.1})
+        pulse.save_open_book = lambda: True
+        pulse.fill_cost = lambda data,q,px,*a: (q*px*.0005,"taker-rate")
+        row = dict(symbol=pos.symbol,positionSide=pos.side,side="BUY",clientOrderId=cid,orderId="901",
+                   status="NEW",origQty=".1",avgPrice="99.4")
+        pulse.api = SimpleNamespace(get=lambda path,params: {"code":0,"data":{"order":row.copy()}})
+        self.assertFalse(pulse.reconcile_block_pending(pos,1.1,row=row))
+        self.assertEqual(pos.qty,1)
+        row.update(status="PARTIALLY_FILLED",executedQty=".04")
+        self.assertTrue(pulse.reconcile_block_pending(pos,1.04,row=row))
+        self.assertTrue(pulse.reconcile_block_pending(pos,1.04,row=row))
+        self.assertEqual(len(pos.dca_fills),1)
+        self.assertEqual(pos.dca_fills[0],[99.4,.04])
+        pos = pt.Position(**pt.asdict(pos))
+        pulse.dca = pt.DcaBook()
+        pulse.dca.load({"fixedSlBands":{}, "dcaEnabled":True})
+        row.update(status="FILLED",executedQty=".1",avgPrice="99.2")
+        self.assertTrue(pulse.reconcile_block_pending(pos,1.1,row=row))
+        self.assertFalse(pos.block_pending)
+        self.assertEqual(pos.block_fills,[])
+        self.assertEqual(pos.dca_fills,[[99.2,.1]])
+        self.assertAlmostEqual(pos.qty,1.1)
+        self.assertAlmostEqual(pos.entry,(100+9.92)/1.1)
+        self.assertAlmostEqual(pos.entry_fee_usdt,.05+9.92*.0005)
+        restored = pulse.dca.restore_position(pos,.01)
+        self.assertTrue(restored.steps[0].filled)
+        self.assertEqual(restored.steps[0].qty,.1)
+        self.assertIsNone(pulse.dca.due(pos.symbol,pos.side,1,100,98,now=1100,sl_frac=.01))
+
+    def test_dca_evidence_is_owned_by_exact_path(self):
+        book = pt.DcaBook()
+        book.load({"dcaEnabled":True, "fixedSlBands":{}, "dcaMinPf":1.2, "minPfLinked":False})
+        for i in range(10):
+            receipt = {"scope":"A","pnl_pct":-.005,"dca_n":1,"client_id":str(i)}
+            book.on_close(receipt)
+            book.on_close(receipt)
+            book.on_close({**receipt,"scope":"B","pnl_pct":.01})
+        self.assertEqual(book.score("A")["count"],10)
+        self.assertFalse(book.score("A")["active"])
+        self.assertTrue(book.score("B")["active"])
+        self.assertEqual(book.score("cold")["count"],0)
+
+    def test_dca_add_requires_this_symbols_exact_qualified_exec_owner(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        pulse.dca = pt.DcaBook()
+        pulse.dca.on_sets = True
+        owners = {"qualified": []}
+        pulse.sets = SimpleNamespace(stage_grid=True, sets={"set":object()},
+            held_exec_stream=lambda state, identity: owners.get(identity))
+        pos = pt.Position("X-USDT", "SHORT", 1, 100, 1000, 101, 99, 100, set_id="set")
+        self.assertFalse(pulse.dca_eligible(pos))
+        pos.exec_lane_id = "qualified"
+        self.assertTrue(pulse.dca_eligible(pos))
+        owner = pulse.dca_scope(pos)
+        pos.symbol = "Y-USDT"
+        self.assertNotEqual(pulse.dca_scope(pos), owner)
+        pos.exec_lane_id = "sibling"
+        self.assertFalse(pulse.dca_eligible(pos))
+        pos.exec_lane_id = "qualified"
+        pos.close_pending = {"t":1001}
+        self.assertFalse(pulse.dca_eligible(pos))
+
+    def test_direct_block_partial_fill_recovers_across_two_books(self):
+        import tempfile
+        from block_engine import BlockBook
+        with tempfile.TemporaryDirectory() as tmp:
+            cid = pt.TAG + "bPaper"
+            pulse = pt.Pulse.__new__(pt.Pulse)
+            pulse.block = BlockBook(str(Path(tmp) / "block.json"), {})
+            pulse.save_open_book = lambda: True
+            pulse.fill_cost = lambda *a: (0., "taker-rate")
+            rule = dict(blockCount=1, targetAddQty=.4, targetBlockQty=1.4, setKey="ind", requestedAddQty=.4)
+            pos = pt.Position("X-USDT","SHORT",1,100,1000,101,99,100,
+                block_pending=dict(strategy="direct-block",qty=.4,client_id=cid,t=1001,group=1,baseQty=1,baseEntry=100,rule=rule))
+            before = deepcopy(pos)
+            row = dict(symbol=pos.symbol, positionSide="SHORT", side="SELL", clientOrderId=cid, orderId="92",
+                       status="PARTIALLY_FILLED", executedQty=".15", avgPrice="99")
+            self.assertTrue(pulse.reconcile_block_pending(pos,1.15,row=row))
+            self.assertTrue(pulse.reconcile_block_pending(before,1.15,row=row))
+            row.update(status="FILLED",executedQty=".4",avgPrice="98.90")
+            self.assertTrue(pulse.reconcile_block_pending(before,1.4,row=row))
+            lane = pulse.block.lanes[pulse.block.key(before.symbol,before.side)]
+            self.assertAlmostEqual(lane.confirmed_add,.4)
+            self.assertAlmostEqual(before.qty,1.4)
+            self.assertAlmostEqual(sum(f["qty"] for f in before.block_fills),.4)
+            self.assertAlmostEqual(before.entry,(100+.4*98.9)/1.4)
+            self.assertFalse(before.block_pending)
+
     def test_pending_block_cannot_adopt_a_foreign_or_oversized_fill(self):
         for change in({'clientOrderId':'foreign'},{'executedQty':'2'},{'avgPrice':'NaN'}):
             cid=pt.TAG+'bCase';pos=pt.Position('A-USDT','LONG',1,100,1000,99,103,100,

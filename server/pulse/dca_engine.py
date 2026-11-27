@@ -7,6 +7,7 @@ loss on last 25 deactivates further adds.
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -111,6 +112,12 @@ class DcaBook:
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.active = True
         self.deact_reason = ""
+        self.scope_closes: Dict[str, List[Dict[str, Any]]] = {}
+        self._scores: Dict[Optional[str], tuple] = {}
+        self.fixed_stops = False
+        self.confirm_bounce = False
+        self.auto_fracs = AUTO_RUNG_FRACS
+        self.auto_mult = AUTO_RUNG_MULT
         self.lanes: Dict[str, DcaLane] = {}
         self.closes: List[Dict[str, Any]] = []
         self.last_pick = ""
@@ -125,6 +132,15 @@ class DcaBook:
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
         self.enabled = bool(ov.get("dcaEnabled", False)) and not DCA_HARD_OFF
         self.auto = bool(ov.get("dcaAuto", True))
+        fixed = self.fixed_stops = "fixedSlBands" in ov
+        rungs = ov.get("dcaAutoRungFractions", [.6] if fixed else AUTO_RUNG_FRACS)
+        mult = ov.get("dcaAutoRungMultiplier", .1 if fixed else AUTO_RUNG_MULT)
+        self.confirm_bounce = ov.get("dcaConfirmBounce", fixed) is True
+        if not isinstance(rungs, (list, tuple)) or not rungs or any(type(x) not in (float, int) or not 0 < x < 1 for x in rungs):
+            raise ValueError("DCA Auto rungs must be fractions within the initial stop")
+        if type(mult) not in (int, float) or not math.isfinite(mult) or mult <= 0:
+            raise ValueError("DCA Auto rung size must be positive and finite")
+        self.auto_fracs, self.auto_mult = sorted(set(rungs)), mult
         self.on_sets = bool(ov.get("dcaOnSets", False))
         self.on_axis = bool(ov.get("dcaOnAxis", False))
         try:
@@ -195,9 +211,9 @@ class DcaBook:
         if sl <= 0:
             sl = 4 * cf                 # no stop known: a nominal four PositionCosts
         out = []
-        for i, f in enumerate(AUTO_RUNG_FRACS):
+        for i, f in enumerate(self.auto_fracs[:self.max_steps or None]):
             d = min(max(f * sl, cf), 0.9 * sl)
-            out.append(DcaStep(n=i + 1, distance_pct=d, mult=AUTO_RUNG_MULT))
+            out.append(DcaStep(n=i + 1, distance_pct=d, mult=self.auto_mult))
         return out
 
     def attach(self, symbol: str, side: str, qty: float, entry: float, sl_frac: float = 0.0) -> DcaLane:
@@ -219,35 +235,63 @@ class DcaBook:
                 lane.parent_qty = qty
         return lane
 
+    def restore_position(self, pos, sl_frac: float) -> DcaLane:
+        """Rebuild the immutable rung plan and its consumed fills from the owned position."""
+        key = self.key(pos.symbol, pos.side)
+        if key in self.lanes and self.lanes[key].filled_n == len(pos.dca_fills):
+            lane = self.lanes[key]
+            if pos.dca_plan:
+                return lane
+        else:
+            self.lanes.pop(key, None)
+            add_qty = sum(q for _, q in pos.dca_fills)
+            seed = pos.base_qty or max(0., pos.qty - add_qty)
+            lane = self.attach(pos.symbol,pos.side,seed,pos.base_entry or pos.dca_ref or pos.entry,sl_frac)
+        snapshot = pos.dca_plan
+        if not snapshot:
+            snapshot.update(rungs=[[r.distance_pct,r.mult] for r in lane.steps], lastAdd=0.)
+        elif not lane.filled_n:
+            lane.steps = [DcaStep(i+1, d, m) for i,(d,m) in enumerate(snapshot["rungs"])]
+        for i in range(lane.filled_n, len(pos.dca_fills)):
+            price, qty = pos.dca_fills[i]
+            if i >= len(lane.steps):
+                lane.steps.append(DcaStep(i+1, self._dist_at(i), self._mult_at(i)))
+            step = lane.steps[i]
+            step.filled, step.qty, step.px = True, qty, price
+        lane.filled_n = len(pos.dca_fills)
+        lane.avg_entry, lane.last_add = pos.entry, float(snapshot["lastAdd"])
+        return lane
+
     def drop(self, symbol: str, side: str) -> None:
         self.lanes.pop(self.key(symbol, side), None)
 
-    def score(self) -> Dict[str, Any]:
-        pc = last_n_cost_pf(self.closes, self.pf_n, self.cost_pct)
-        last25 = [r for r in self.closes if r.get("pnl_pct") is not None][-self.deact_n :]   # a missing value is not a loss
-        avg_r = 0.0
-        if last25:
-            avg_r = sum(row_net_pnl_pct(r, self.cost_pct) / max(1e-9, cost_as_frac(self.cost_pct)) for r in last25) / len(last25)
-        if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
-            self.active = False
-            self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
+    def score(self, scope: str = "") -> Dict[str, Any]:
+        closes = self.scope_closes.get(scope, ()) if scope else self.closes
+        # All empty scopes share a neutral score. A funded close invalidates only its own scope and the aggregate.
+        key = scope if closes else None
+        policy = (self.pf_n, self.deact_n, self.cost_pct, self.min_pf, self.auto_deact)
+        cached = self._scores.get(key)
+        if cached and cached[0] == policy:
+            return dict(cached[1])
+        pc = last_n_cost_pf(closes, self.pf_n, self.cost_pct)
+        window = [r for r in closes[-self.deact_n:] if r.get("pnl_pct") is not None]
+        avg = (sum(row_net_pnl_pct(r, self.cost_pct) for r in window) /
+               (len(window) * max(1e-9, cost_as_frac(self.cost_pct)))) if window else 0.
+        reason = ""
+        if self.auto_deact and len(window) >= self.deact_n and avg < 0:
+            reason = f"last{len(window)} avgR {avg:.2f}<0"
         elif pc["count"] >= min(8, self.pf_n) and pc["pf"] + 1e-9 < self.min_pf:
-            self.active = False
-            self.deact_reason = f"last15 PF {pc['pf']:.2f}<{self.min_pf:.2f}"
-        else:
-            if not self.active and avg_r >= 0 and (pc["count"] < 8 or pc["pf"] >= self.min_pf):
-                self.active = True
-                self.deact_reason = ""
-        pc["last25AvgR"] = round(avg_r, 4)
-        pc["active"] = self.active
-        pc["deactReason"] = self.deact_reason
-        return pc
+            reason = f"last{self.pf_n} PF {pc['pf']:.2f}<{self.min_pf:.2f}"
+        if not scope:
+            self.active, self.deact_reason = not reason, reason
+        result = {**pc, "last25AvgR":round(avg, 4), "active":not reason, "deactReason":reason}
+        self._scores[key] = (policy, result)
+        return dict(result)
 
-    def due(self, symbol: str, side: str, qty: float, entry: float, px: float, now: Optional[float] = None, sl_frac: float = 0.0) -> Optional[Dict[str, Any]]:
+    def due(self, symbol: str, side: str, qty: float, entry: float, px: float, now: Optional[float] = None, sl_frac: float = 0.0, scope: str = "") -> Optional[Dict[str, Any]]:
         if DCA_HARD_OFF or not self.enabled:
             return None
-        self.score()
-        if not self.active:
+        if not self.score(scope)["active"]:
             self.skips += 1
             return None
         now = time.time() if now is None else float(now)
@@ -309,6 +353,15 @@ class DcaBook:
         cid = str(rec.get("client_id") or rec.get("clientId") or "")
         if not rec.get("dca_n") and "dca" not in why.lower() and not (len(cid) > 4 and cid[4:5] == "d"):
             return
+        scope = str(rec.get("scope") or "")
+        if scope:
+            history = self.scope_closes.setdefault(scope, [])
+            if cid and any(r.get("client_id") == cid for r in history):
+                return
+            history.append(rec)
+            del history[:-max(self.pf_n, self.deact_n, 80)]
+        self._scores.pop(scope, None)
+        self._scores.pop("", None)
         self.closes.append(rec)
         if len(self.closes) > 80:
             self.closes = self.closes[-80:]

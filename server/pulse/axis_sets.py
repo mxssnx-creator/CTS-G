@@ -14,6 +14,7 @@ its PF over the Set's floor. Bounded to [`vmin`, `vmax`]. A volume ratio weights
 One pure module for the engine (Pulse._scope_choice, Pulse.place) and the simulators (stage_eval.execute axis_pick, trade_sim --axis-sets)."""
 from __future__ import annotations
 
+from functools import lru_cache
 import bisect
 import math
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ LAST_W = (1, 2, 3, 4)
 PREV_W = (4, 6, 8, 12)
 PAUSE_W = (1, 2, 3, 4, 6, 8)
 VOL_MODES = ("flat", "base", "floor")
+
+
+FIXED_STOP_DEFAULT = {"enabled":True, "n":15, "minN":8, "vol":"floor", "vmin":.75, "vmax":1.0}
 
 
 @dataclass
@@ -65,6 +69,7 @@ def config_of(raw: Any) -> AxisSetsCfg:
     return c
 
 
+@lru_cache(maxsize=2)
 def candidates(combos: bool) -> List[Tuple[Tuple[str, int], ...]]:
     singles = [("last", w) for w in LAST_W] + [("prev", w) for w in PREV_W] + [("pause", w) for w in PAUSE_W]
     out: List[Tuple[Tuple[str, int], ...]] = [(s,) for s in singles]
@@ -117,8 +122,15 @@ def choose(exits: Sequence[float], entries: Sequence[float], nets: Sequence[floa
     base_pf = pf(list(nets)[-cfg.n:]) or 0.0
     best: Tuple[Optional[Tuple[Tuple[str, int], ...]], float, int] = (None, base_pf, len(nets))
     before = [bisect.bisect_left(exits, e) for e in entries]
+    truths = {}
     for setting in candidates(cfg.combos):
-        adm = [nets[j] for j in range(len(nets)) if admits(setting, nets[:before[j]], floor)]
+        for rule in setting:
+            if rule not in truths:
+                truths[rule] = [rule_ok(*rule, nets[max(0, end-50):end], floor) for end in before]
+        passed = truths[setting[0]]
+        if len(setting) == 2:
+            passed = (left and right for left, right in zip(passed, truths[setting[1]]))
+        adm = [value for value, ok in zip(nets, passed) if ok]
         if len(adm) < cfg.min_n:
             continue
         p = pf(adm[-cfg.n:]) or 0.0
@@ -129,9 +141,9 @@ def choose(exits: Sequence[float], entries: Sequence[float], nets: Sequence[floa
     if cfg.strict and p_c + 1e-9 < floor:
         allow = False
     vol = 1.0
-    if cfg.vol == "base" and setting is not None:
+    if n_c >= cfg.min_n and cfg.vol == "base" and setting is not None:
         vol = p_c / base_pf if base_pf > 0 else cfg.vmax
-    elif cfg.vol == "floor":
+    elif n_c >= cfg.min_n and cfg.vol == "floor":
         vol = p_c / floor if floor > 0 else 1.0
     vol = max(cfg.vmin, min(cfg.vmax, vol))
     return {"setting": [list(s) for s in setting] if setting else None, "pf": round(p_c, 4), "basePf": round(base_pf, 4), "admitted": n_c,

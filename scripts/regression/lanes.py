@@ -61,7 +61,9 @@ class _Venue:
         if path.endswith("/trade/order"):
             q = str(body.get("quantity") or "1")
             return {"code": 0, "data": {"order": {"orderId": str(len(self.posts)), "avgPrice": repr(float(self.price())), "executedQty": q,
-                                                  "quantity": q, "clientOrderID": body.get("clientOrderID", "")}}}
+                                                  "quantity": q, "status": "FILLED", "symbol": body["symbol"],
+                                                  "positionSide": body["positionSide"], "side": body["side"],
+                                                  "clientOrderID": body.get("clientOrderID", "")}}}
         return {"code": 0, "data": {}}
 
     def batch_place(self, orders):
@@ -163,6 +165,8 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
                 p.coord.rearrange = True
                 p.score = lambda s_: (side, "x", 0.99)
             if dca is not None:                    # the DCA lane on, with these overlay keys (cooldown 0)
+                # Provide venue granularity for a fractional add below one base quantity.
+                contracts[SYM].min_usdt = 1.0
                 p.dca.load({"positionCostPct": b.cost_pct, "dcaEnabled": True, "dcaCooldownSeconds": 0, **dca})
                 p.dca.enabled = True
             trace = []

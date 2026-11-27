@@ -3135,7 +3135,10 @@ class SetBook:
         # the config gate: the same rule on one configuration Set's own executed results (config_key), next to the group gate (default off)
         self.config_gate = bool(ov.get("configGate", False))
         self.gate_recovery = bool(ov.get("gateRecovery", False))       # a blocked group / config scope reopens on its Sets' paper results after its last executed one
-        self.axis_sets = axis_sets.config_of(ov.get("axisSets"))       # Axis Sets: per configuration and lane, the Auto choice among every Axis setting
+        axis = ov.get("axisSets")
+        if bands is not None:
+            axis = {**axis_sets.FIXED_STOP_DEFAULT, **(axis if isinstance(axis, dict) else {})}
+        self.axis_sets = axis_sets.config_of(axis)
         self.config_gate_n = int(_num("configGateN", 5, 1, 200))
         self.config_gate_pf = _num("configGatePf", 1.0, 0.5, 3.0)
         self.config_gate_hours = _num("configGateHours", 24.0, 1.0, 72.0)

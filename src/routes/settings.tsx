@@ -1918,6 +1918,13 @@ function SettingsPage() {
                 onChange={(v) => patch("dcaOnAxis", v)}
               />
               <Grid>
+                <EnableSlider label="Require a completed one-minute bounce for Auto DCA" on={overlay.dcaConfirmBounce} onChange={v=>patch("dcaConfirmBounce",v)}/>
+                <CsvField label="Auto DCA rungs (fraction of initial SL)" value={overlay.dcaAutoRungFractions.join(", ")}
+                  hint="For example, 0.4 adds after a move of 40% of the initial stop distance."
+                  onCommit={s => {const r=s.split(/[,;\s]+/).filter(Boolean).map(Number);
+                    if (r.length && r.every(x => x > 0 && x < 1)) patch("dcaAutoRungFractions", [...new Set(r)].sort((a,b)=>a-b));}}/>
+                <Num label="Auto DCA size per rung (× base quantity)" value={overlay.dcaAutoRungMultiplier}
+                  min={0.01} max={8} step={0.01} onChange={v=>patch("dcaAutoRungMultiplier",v)} />
                 <Num
                   label="Max exposure × base size (auto; 0 = no ceiling)"
                   value={overlay.dcaMaxExposureX}
@@ -2043,6 +2050,16 @@ function SettingsPage() {
           {section === "axes" && (
             <Card title="Coordination · rearrangements · thresholds" hint="CTS Main-stage axes live on pulse">
               <div className="space-y-2">
+                <EnableSlider label="Size Exec by its own Axis history" on={overlay.axisSets.enabled}
+                  hint="Uses the qualified Real parent of the exact Exec path." onChange={enabled=>patch("axisSets",{...overlay.axisSets,enabled})}/>
+                <Num label="Axis lookback (settled orders)" value={overlay.axisSets.n} min={3} max={200} step={1}
+                  onChange={n=>patch("axisSets",{...overlay.axisSets,n,minN:Math.min(n,overlay.axisSets.minN)})}/>
+                <Num label="Minimum Axis size" value={overlay.axisSets.vmin} min={.1} max={1} step={.05}
+                  onChange={vmin=>patch("axisSets",{...overlay.axisSets,vmin})}/>
+                <Num label="Maximum Axis size" value={overlay.axisSets.vmax} min={1} max={5} step={.05}
+                  onChange={vmax=>patch("axisSets",{...overlay.axisSets,vmax})}/>
+                <EnableSlider label="Fund qualified Block additions on strategy Sets" on={overlay.blockSetAddsEnabled}
+                  hint="Block continues to measure its candidates while funding is off." onChange={v=>patch("blockSetAddsEnabled",v)}/>
                 <LiveAxis
                   name="Previous"
                   range="4–12 step 2"

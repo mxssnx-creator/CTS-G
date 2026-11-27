@@ -58,6 +58,8 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov = json.load(open(os.path.join(PULSE, name)))
     # Historic deterministic fixtures keep their original explicit cost. New policy has separate tests.
     ov.pop("fixedSlBands", None)  # Frozen ratio replays use their original geometry.
+    for key in ("dcaAutoRungFractions", "dcaAutoRungMultiplier", "dcaConfirmBounce", "blockSetAddsEnabled"):
+        ov.pop(key, None)
     ov["positionCostPct"] = .12
     ov["stageLastN"] = False  # retain the historical stage contract for the frozen fixtures
     # fixtures judge every window at one floor (setMinPf) unless they ask for the size classes (minPfBySize), which have their own checks

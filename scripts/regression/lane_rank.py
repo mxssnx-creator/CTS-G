@@ -261,6 +261,7 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
         with _Env() as env:
             p, pos = env.p, env.pos
             p.equity = 1000
+            p.overlay["blockSetAddsEnabled"] = True
             st = p.sets.by_idx[0]
             pos.set_id, pos.lane, pos.pack = st.id, lane, st.pack
             pos.base_entry, pos.base_qty, pos.set_hold_bars = pos.entry, pos.qty, 10

@@ -1,4 +1,9 @@
 {
+  "axisSets": {"enabled": true, "n": 15, "minN": 8, "margin": 1.05, "vol": "floor", "vmin": 0.75, "vmax": 1, "strict": false, "combos": false},
+  "blockSetAddsEnabled": false,
+  "dcaAutoRungFractions": [0.6],
+  "dcaAutoRungMultiplier": 0.1,
+  "dcaConfirmBounce": true,
   "fixedSlBands": {},
   "targetNotional": 0.2,
   "volumeFactor": 0.15,

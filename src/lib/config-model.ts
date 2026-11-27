@@ -160,6 +160,8 @@ export const TP_RANGES_DEFAULT: Record<TpRangeId, boolean> = { micro: true, mini
 /** Trailing grid ceiling: arms up to trailStepMax steps (default 22 = 2.2 %, at most 30 = 3.0 %). */
 export const TRAIL_STEP_MAX_DEFAULT = 22;
 export const TRAIL_STEP_CEIL = 30;
+type SetAxis = { enabled: boolean; n: number; minN: number; margin: number; vol: "floor" | "base" | "flat"; vmin: number; vmax: number; strict: boolean; combos: boolean };
+const DEFAULT_SET_AXIS: SetAxis = {enabled:true,n:15,minN:8,margin:1.05,vol:"floor",vmin:.75,vmax:1,strict:false,combos:false};
 export const DEFAULT_MAX_STOP_RATIO = protectionPolicy.maxStopLossRatio;
 export function maxStopRatioOf(raw: unknown): number {
   const value = typeof raw === "number" ? raw : Number.NaN;
@@ -332,6 +334,11 @@ export type PulseOverlay = {
   dcaBreakevenProfitPct: number;
   dcaTakeProfitMode: string;
   dcaStepDistancesPct: number[];
+  axisSets: SetAxis;
+  blockSetAddsEnabled: boolean;
+  dcaConfirmBounce: boolean;
+  dcaAutoRungFractions: number[];
+  dcaAutoRungMultiplier: number;
   dcaStepVolumeMultipliers: number[];
   dcaAutoDeact: boolean;
   dcaAuto: boolean;
@@ -709,6 +716,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaBreakevenProfitPct: 0.2,
   dcaTakeProfitMode: "average",
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
+  axisSets: {...DEFAULT_SET_AXIS},
+  blockSetAddsEnabled: false,
+  dcaConfirmBounce: true,
+  dcaAutoRungFractions: [.6],
+  dcaAutoRungMultiplier: .1,
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
   dcaAuto: true,
@@ -1025,6 +1037,11 @@ export type CtsSettings = {
   dcaBreakevenProfitPct?: number;
   dcaTakeProfitMode?: string;
   dcaStepDistancesPct?: number[];
+  axisSets?: Partial<SetAxis>;
+  blockSetAddsEnabled?: boolean;
+  dcaConfirmBounce?: boolean;
+  dcaAutoRungFractions?: number[];
+  dcaAutoRungMultiplier?: number;
   dcaStepVolumeMultipliers?: number[];
   dcaAutoDeact?: boolean;
   dcaAuto?: boolean;
@@ -1615,6 +1632,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaBreakevenProfitPct: num(cts.dcaBreakevenProfitPct ?? coord.dcaBreakevenProfitPct, 0.2),
     dcaTakeProfitMode: String(cts.dcaTakeProfitMode ?? coord.dcaTakeProfitMode ?? "average"),
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
+    axisSets: {...DEFAULT_SET_AXIS,...cts.axisSets},
+    blockSetAddsEnabled: bool(cts.blockSetAddsEnabled,false),
+    dcaConfirmBounce: bool(cts.dcaConfirmBounce,true),
+    dcaAutoRungFractions: arr<number>(cts.dcaAutoRungFractions, [.6]),
+    dcaAutoRungMultiplier: num(cts.dcaAutoRungMultiplier,.1),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
     dcaAuto: bool(cts.dcaAuto, true),
@@ -1870,6 +1892,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
   out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);
   out.strategyProcessingByRange = processingByRangeOf(out.strategyProcessingByRange);
+  out.axisSets = {...DEFAULT_SET_AXIS,...out.axisSets};
   out.maxStopLossRatio = maxStopRatioOf(out.maxStopLossRatio);
   out.fixedSlBands = fixedStopsOf(out.fixedSlBands);
   out.setPriceDistanceGrid = true;

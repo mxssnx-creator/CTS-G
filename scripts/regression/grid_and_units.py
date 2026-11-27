@@ -97,7 +97,7 @@ def default_grid_counts():
     kinds = {}
     for st in sb.by_idx:
         kinds[st.kind] = kinds.get(st.kind, 0) + 1
-    steps, ratios = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1)), list(SL_RATIOS)
+    steps, ratios = list(range(sb.min_step, TP_STEP_DEFAULT_MAX + 1)), list(SL_RATIOS)
     short = list(range(2, 7))
     give_floor = trail_floor_steps() * sb.cost_pct
     m = sb.trail_min_step

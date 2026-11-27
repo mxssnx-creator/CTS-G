@@ -513,6 +513,7 @@ def block_parent_unchanged_end_to_end():
     with _Env() as env:
         p, pos = env.p, env.pos
         p.equity = 1000
+        p.overlay["blockSetAddsEnabled"] = True
         st = p.sets.by_idx[0]
         pos.set_id, pos.lane, pos.pack = st.id, "pos", st.pack
         pos.base_entry, pos.base_qty, pos.set_hold_bars = pos.entry, pos.qty, 10
