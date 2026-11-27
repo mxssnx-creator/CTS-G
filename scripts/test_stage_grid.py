@@ -351,6 +351,33 @@ class StageGridTest(unittest.TestCase):
         disabled = execute(book, [symbol], {symbol: bars}, {symbol: dates}, shadow, tapes, [hour])
         self.assertFalse([r for r in disabled if "set" in r])
 
+    def test_replay_only_rechecks_signalled_packs_between_hourly_snapshots(self):
+        win = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        book = se.SetBook()
+        book.load({"stageLastN": {"base": {**win, "long": [10]},
+                                  **{stage: {**win, "longModes": ["none"]} for stage in sg.STAGES[1:]}},
+                   "minPfStepAuto": False, "setMinStep": 4, "setStepMax": 4, "stratIndications": True,
+                   "stratGeneral": True, "stratTrailing": False, "exitSets": False,
+                   "setSlRatios": [1.0], "directionMode": "split"})
+        names, hour = ["AAA-USDT", "BBB-USDT"], 200 * 3600
+        self.assertEqual(len(book.packs), 2)
+        active, quiet = book.packs
+        history = [hour - 60 * i for i in range(160, 0, -1)]
+        tapes = SimpleNamespace(
+            by_set={st.idx: (history, [t - 30 for t in history], [.02] * len(history)) for st in book.by_idx},
+            cf=se.cost_as_frac(book.cost_pct),
+        )
+        times = {s: [hour, hour + 60, hour + 120] for s in names}
+        bars = {s: [[100, 102, 99.9, 100]] * 3 for s in names}
+        shadow = {s: (0, {active: [0, 1, 0], quiet: [0, 0, 0]},
+                      {pack: [.9] * 3 for pack in book.packs}, {}) for s in names}
+        with patch("stage_eval.gate_metrics", wraps=gate_metrics) as gates:
+            rows = execute(book, names, bars, times, shadow, tapes, [hour], refresh_s=0, include_open=True)
+        evaluated = [(call.args[2].idx, call.args[3]) for call in gates.call_args_list]
+        self.assertEqual(evaluated, [(st.idx, hour + 60) for st in book.by_idx]
+                         + [(st.idx, hour + 120) for st in book.by_idx if st.pack == active])
+        self.assertEqual({row["symbol"] for row in rows if "symbol" in row}, set(names))
+
     def test_replay_position_cap_counts_open_slots_and_releases_closed_ones(self):
         block = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
         book = se.SetBook()
@@ -617,22 +644,23 @@ class StageGridTest(unittest.TestCase):
 
     def test_default_paths_and_signed_windows(self):
         grid = sg.StageGrid.from_settings({})
-        self.assertEqual(grid.capacities(), (350, 49000, 10780000, 2371600000))
+        self.assertEqual(grid.capacities(), (400, 64000, 20480000, 6553600000))
         for depth in range(4):
             choices = grid.windows(depth, 30)
             self.assertEqual({(w.last, w.last_mode) for w in choices},
                              {(size, sign) for size in (1, 2, 3, 4, 5) for sign in ("positive", "negative")})
-            self.assertEqual({w.short for w in choices if w.short_mode == "negative"}, {4, 8, 12})
+            self.assertEqual({w.short for w in choices if w.short_mode == "negative"},
+                             set(sg.LATE_SHORT if depth >= 2 else sg.SHORT))
             self.assertEqual({w.short for w in choices if w.short_mode == "positive"},
                              set(sg.LATE_SHORT if depth >= 2 else sg.SHORT))
             if depth:
                 self.assertEqual({w.long for w in choices}, {0, 30})
         grid_setting = grid.settings()
         self.assertEqual(sg.StageGrid.from_settings(grid_setting), grid)
-        with self.assertRaises(ValueError):
-            sg.StageGrid.from_settings({"exec": {"short": [16], "shortModes": ["negative"]}})
+        negative = sg.StageGrid.from_settings({"exec": {"short": [30], "shortModes": ["negative"]}})
+        self.assertTrue(all(w.short == 30 and w.short_mode == "negative" for w in negative.windows(3, 40)))
         extended = sg.StageGrid.from_settings({"exec": {"short": [12, 20, 24, 28, 30]}})
-        self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "negative"}, {12})
+        self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "negative"}, {12, 20, 24, 28, 30})
         self.assertEqual({w.short for w in extended.windows(3, 40) if w.short_mode == "positive"}, {12, 20, 24, 28, 30})
         self.assertEqual(sg.StageGrid.from_settings({"real": {"short": [30]}}).options[2].shorts, (30,))
         with self.assertRaises(ValueError):
