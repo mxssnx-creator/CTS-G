@@ -1,0 +1,113 @@
+{
+  "stratIndications": false,
+  "stratGeneral": false,
+  "stratTrend": false,
+  "stratBreak": false,
+  "stratShortRange": false,
+  "stratSignals": false,
+  "stratBlock": false,
+  "stratNormal": true,
+  "stratTrailing": false,
+  "dcaEnabled": false,
+  "stratDca": false,
+  "axisEnabled": false,
+  "holdAuto": false,
+  "extraIndicators": [],
+  "histLookbackBars": 1440,
+  "histLookbackAuto": false,
+  "warmup": 30,
+  "positionCostPct": 0.11,
+  "setMinStep": 8,
+  "setStepMax": 8,
+  "indicationConfigs": [
+    {
+      "label": "Reversal confluence and RSI",
+      "names": [
+        "trrevconfluence_n10_t1",
+        "trrevrsi_n10_t1"
+      ],
+      "stepMin": 8,
+      "stepMax": 8,
+      "slRatios": [
+        1
+      ],
+      "types": [
+        "base"
+      ]
+    }
+  ],
+  "signalConfigs": [],
+  "stratDominating": false,
+  "stratActive": false,
+  "stratInverse": false,
+  "stratRelate": false,
+  "stratMicro": false,
+  "stratLowRange": false,
+  "stratArbitrage": false,
+  "stratDrag": false,
+  "stratTactic": false,
+  "stratExit": false,
+  "histWarmup": 30,
+  "minPfAutoEnabled": false,
+  "setPriceDistanceGrid": false,
+  "stratBreakout": false,
+  "stratReversion": false,
+  "stratFlow": false,
+  "stratMulti": false,
+  "stageLastN": {
+    "enabled": true,
+    "base": {
+      "short": [
+        4
+      ],
+      "last": [
+        1,
+        2
+      ],
+      "long": [
+        10
+      ]
+    },
+    "main": {
+      "short": [
+        4
+      ],
+      "last": [
+        1,
+        2
+      ],
+      "longModes": [
+        "none",
+        "inherit"
+      ]
+    },
+    "real": {
+      "short": [
+        4,
+        30
+      ],
+      "last": [
+        1,
+        2
+      ],
+      "longModes": [
+        "none",
+        "inherit"
+      ]
+    },
+    "exec": {
+      "short": [
+        4,
+        30
+      ],
+      "last": [
+        1,
+        2
+      ],
+      "longModes": [
+        "none",
+        "inherit"
+      ]
+    }
+  }
+}

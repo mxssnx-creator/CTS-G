@@ -240,19 +240,18 @@ def main() -> int:
         return 2
     overlay = sg.replay_overlay()
     shared = {k.strip() for k in a.cache_shared.split(",") if k.strip()}
-    if shared:
-        overlay = {k: v for k, v in overlay.items() if k not in shared}
-    manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
+    cache_overlay = {k: v for k, v in overlay.items() if k not in shared}
+    manifest = replay_cache.fingerprint(a.data, names, cache_overlay, sg.PULSE, sg.__file__)
     loaded_names, bars, times = sg.load_bars(a.data, a.symbols)
     print(f'Loaded {len(names)} market histories; {len(book.by_idx)} independent Sets', flush=True)
-    if loaded_names != names or replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
+    if loaded_names != names or replay_cache.fingerprint(a.data, names, cache_overlay, sg.PULSE, sg.__file__) != manifest:
         raise ValueError("replay inputs changed while reading market data")
     if os.path.exists(a.cache):
         print('Checking saved replay provenance', flush=True)
         shadow = replay_cache.load(a.cache, manifest)
     else:
         shadow = sg.build(names, bars, times, a.jobs)
-        if replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
+        if replay_cache.fingerprint(a.data, names, cache_overlay, sg.PULSE, sg.__file__) != manifest:
             raise ValueError("replay inputs changed during cache generation")
         replay_cache.save(a.cache, shadow, manifest)
     shadow = sg.build_hold_auto(names, bars, times, shadow)      # hold Auto on: each Set's tape is the engine's own lane with the causally chosen hold
@@ -452,6 +451,10 @@ def main() -> int:
         import axis_sets as _axs
         _cache = {}
         def axis_pick(st, lane, now):
+            if book.stage_grid:
+                result = sg.grid_at(book, tapes, st, now)
+                verdict = book.grid_axis_verdict(result, book.stage_grid.path(st.id, lane))
+                return verdict["allow"], verdict["vol"]
             key = (st.idx, lane, int(now // 60))
             if key not in _cache:
                 rows_ = sg.lane_stream_entries(book, tapes, st, now, lane)

@@ -64,7 +64,7 @@ def _calculate(payload):
         inputs['pause'] = {key: (fixed, PauseLookup(array('i', (fn(i) for i in range(count + 1)))) if fn else None)
                            for key, (fixed, fn) in inputs['pause'].items()}
     else:
-        inputs = {}
+        inputs = {"base_entries": inputs.get("base_entries", {})}
     while len(book._sig_cache)>4:book._sig_cache.pop(next(iter(book._sig_cache)))
     return packed,inputs,codes,pauses
 

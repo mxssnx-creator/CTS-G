@@ -141,6 +141,8 @@ GATE_MIN_DEFAULT = 0            # minimum orders behind a Base verdict: 0 = off 
 GATE_MAX_DDT_HOURS_DEFAULT = 24.0   # the longest drawdown over the gate window must stay under this (owner 2026-10-29; setMaxDdtHours 2..36)
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
+# Four stage lookbacks, two maximum trailing holds, and the indicator warmup.
+EXEC_SETTLEMENT_HISTORY_S = (len(stage_grid.STAGES) * LOOKBACK_MAX + 2 * 4320 + 80) * BAR_S
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = TP_STEP_MIN
 STEP_MAX = TP_STEP_MAX                       # the ceiling
@@ -2230,17 +2232,20 @@ SCAN_FORK_TIMEOUT_S = 1800.0
 
 
 def _scan_share(book: "SetBook", symbol: str, sets: Sequence["SetState"], packs: Sequence[str], bars, base_ts: float, warmup: int, n: int,
-                cfg: Dict[str, Any], dirs, confs, cand, acc, cand_side) -> Tuple[Dict[Tuple[str, str, int], int], List[Tuple[str, "RowCols", bytes]]]:
+                cfg: Dict[str, Any], dirs, confs, cand, acc, cand_side):
     """One share of a symbol's Sets: the pause plan of the packs it touches, then each Set's scan exactly as _replay_symbol's loop does (no hold
     candidates: the forked path is off with hold Auto). Returns (pause_now entries of these packs on this symbol, [(set id, columns, tape key)])."""
     plan = book._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc, packs=packs)
     own = set(packs)
     pauses = {k: v for k, v in book.pause_now.items() if k[1] == symbol and k[0] in own}
     out: List[Tuple[str, RowCols, bytes]] = []
+    admissions = {}
     for st in sets:
         lane = SetLane(st, symbol)
         sel_pause = book._lane_pause(lane, st.pack, plan, st.side)
         trades = lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
+        if book.stage_grid and lane.open and lane.open["i"] == n - 1:
+            admissions[st.id] = lane.hold or cfg["time_bars"]
         if not trades:
             continue
         cols = RowCols([{"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"], "pnl": done["pnl"], "pnl_pct": done["pnl_pct"],
@@ -2249,7 +2254,7 @@ def _scan_share(book: "SetBook", symbol: str, sets: Sequence["SetState"], packs:
         key = (array("q", [d["entry_i"] for d in trades]).tobytes() + array("q", [d["exit_i"] for d in trades]).tobytes()
                + array("d", [d["pnl_pct"] for d in trades]).tobytes() + "\x1f".join(f"{d['reason']}\x1e{d['side']}" for d in trades).encode())
         out.append((st.id, cols, key))
-    return pauses, out
+    return pauses, out, admissions
 
 
 def _scan_shares(book: "SetBook", symbol: str, sets: Sequence["SetState"], cand: Dict[str, List[int]], k: int) -> List[List["SetState"]]:
@@ -2288,7 +2293,7 @@ def _scan_shares(book: "SetBook", symbol: str, sets: Sequence["SetState"], cand:
 
 
 def scan_forked(book: "SetBook", symbol: str, bars, base_ts: float, warmup: int, n: int, cfg: Dict[str, Any], dirs, confs, cand, acc, cand_side,
-                on_step: Optional[Callable[[], None]] = None) -> Optional[Dict[str, "RowCols"]]:
+                on_step: Optional[Callable[[], None]] = None, admissions=None) -> Optional[Dict[str, "RowCols"]]:
     """{set id: columns} of every Set of this symbol that traded (aliased Sets share their first twin's columns), the pause_now entries applied; None = not
     done (the caller scans in its own thread)."""
     if not hasattr(os, "fork"):
@@ -2376,7 +2381,9 @@ def scan_forked(book: "SetBook", symbol: str, bars, base_ts: float, warmup: int,
     if not kids_done:
         return None
     got: Dict[str, Tuple[RowCols, bytes]] = {}
-    for codes, pauses, rows in results:
+    for codes, pauses, rows, opened in results:
+        if admissions is not None:
+            admissions.update(opened)
         # a child may have met a row word the parent's table does not hold yet: register it here and recode that child's columns
         table = bytes(_code(wd) for wd in codes)
         same = table == bytes(range(len(codes)))
@@ -2408,6 +2415,7 @@ class SetBook:
         self.stage_grid: Optional[stage_grid.StageGrid] = None
         self._exec_candidates: Dict[Tuple[str, str], Dict[str, SetState]] = {}
         self._held_exec_paths: Dict[str, Dict[str, int]] = {}
+        self.base_entries: dict[str, tuple[float, dict[str, int]]] = {}
         self.enabled = True
         self.lookback = LOOKBACK_DEFAULT
         self.lookback_cfg = LOOKBACK_DEFAULT
@@ -2626,9 +2634,18 @@ class SetBook:
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         # A malformed policy must not partially overwrite the active grid or economic settings.
+        stage_windows = stage_grid.StageGrid.from_settings(ov.get("stageLastN"))
+        inputs = ({k: v for k, v in ov.items() if k != "stageLastN"}, cts or {}) if stage_windows else None
+        with self._lock:
+            if inputs is not None and self.stage_grid and inputs == getattr(self, "_last_grid_inputs", None):
+                if self.stage_grid != stage_windows:
+                    self.stage_grid = stage_windows
+                    self.processing_overlay["stageLastN"] = copy.deepcopy(ov["stageLastN"])
+                    self._evaluation_config = (stage_windows, self._evaluation_config[1])
+                    self._invalidate_stage_scores()
+                return
         configs = ov.get("indicationConfigs", [])
         checked = expand_entries(configs)
-        stage_windows = stage_grid.StageGrid.from_settings(ov.get("stageLastN"))
         exact = any((c.get("lanePolicy") or {}).get("windowPath") for c in checked if c.get("enabled", True))
         prepared = expand_indication_configs(configs, extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS) if exact else None
         if prepared is not None and not ov.get("lastNDisjoint", False):
@@ -2651,7 +2668,7 @@ class SetBook:
             previous = getattr(self, "_evaluation_config", None)
             self.stage_grid = stage_windows
             self._load(ov, cts, prepared)
-            signature = repr((self.stage_grid, self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
+            signature = (self.stage_grid, repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
                               self.min_sl_distance_pct, self.micro_min_sl_pct, self.micro_min_trail_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
@@ -2663,64 +2680,71 @@ class SetBook:
                               self.pf_auto_defaults, self.pf_range_floor,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
-                              [self.stage_params(pack) for pack in self.packs]))
+                              [self.stage_params(pack) for pack in self.packs])))
             self._evaluation_config = signature
+            self._last_grid_inputs = copy.deepcopy(inputs)
             if previous is not None and signature != previous:
                 # No row may validate new evaluation rules before it has been
                 # replayed under the configuration just loaded.
                 self._hist_rows.clear()
+                self.base_entries.clear()
                 self._hist_inputs.clear()
                 self._hist_replay_key.clear()
                 self._hist_replay_source.clear()
-                self._stage_score_keys.clear()
                 self._hist_replay_at.clear()
                 self._hist_replay_bar_at.clear()
                 self._sig_cache.clear()
                 self._sig_meta["revision"] += 1
-                self._history_snapshot_active = False
-                if self.stage_grid and self.hist_keep_last_complete:
-                    # Assemble the replacement universe before scoring it. A
-                    # chunk by itself can have a different qualifying Exec path.
-                    self._lookback_pending = True
-                    self._lookback_retry_fast = True
-                    self._lookback_progress_key = None
-                    self._lookback_progress_count = 0
-                self.progress.ready = False
-                self.last_run = 0.0
-                self._exec_candidates.clear()
-                self._grid_auto_key = None
-                self._grid_auto_models = {}
-                self.set_floor_auto.clear()
-                self.relation_state, self.relation_at = {}, 0.0      # lanes of the previous rules raise nothing
-                for st in self.by_idx:
-                    st.last_error = "configuration changed; replay required"
-                    st.hist, st.proc, st.exe, st.neg = [], [], [], []
-                    st.main_evidence = None
-                    st.exec_grid = None
-                    st.held_exec_evidence.clear()
-                    st.proc_replayed = False
-                    st.n = st.proc_total = st.exe_total = st.neg_total = 0
-                    st.gate_n = st.main_n = st.exe_n = st.neg_n = 0
-                    st.gate_pf = st.main_pf = st.exe_pf = st.neg_pf = 0.0
-                    st.gate_gp = st.gate_gl = st.main_gp = st.main_gl = 0.0
-                    st.exe_gp = st.exe_gl = st.neg_gp = st.neg_gl = 0.0
-                    st.rank_pos = st.rank_neg = (0, 0.0, 0.0, 0.0, 0.0)
-                    st.base_short_n = st.base_min_n = st.main_short_n = st.main_min_have = 0
-                    st.base_short_pf = st.main_short_pf = 0.0
-                    st.base_short_gp = st.base_short_gl = st.main_short_gp = st.main_short_gl = 0.0
-                    st.base_min_gp = st.base_min_gl = st.main_min_gp = st.main_min_gl = 0.0
-                    st.base_min_ok = st.base_long_ok = st.base_short_ok = False
-                    st.sample_counts = None
-                    for key in ("gate_pf_old", "gate_pf_new", "main_short_win", "neg_win", "neg_win_gp", "neg_win_gl",
-                                "last15_pf", "last15_n", "last15_r", "last25_avg_r", "last25_n", "last25_avg_pnl",
-                                "max_dd_s", "avg_dd_s", "dd_episodes", "wins", "gp", "gl", "wr", "expectancy",
-                                "avg_hold_s", "pf_all", "source_n", "hold_auto_pf", "hold_auto_n"):
-                        setattr(st, key, 0)
-                    st.last15_ratio = 1.0
-                    st.exits = {}
-                    st.hold_bars, st.hold_auto = self.hold_bars_for(st), False
-                    st.stage = {}
-                    st.deact_reason = "error"
+                self._invalidate_stage_scores()
+
+    def _invalidate_stage_scores(self) -> None:
+        """Withdraw published admissions immediately; the worker rebuilds them from current raw evidence."""
+        self._stage_score_keys.clear()
+        self._history_snapshot_active = False
+        if self.stage_grid and self.hist_keep_last_complete:
+            # Assemble the replacement universe before scoring it. A
+            # chunk by itself can have a different qualifying Exec path.
+            self._lookback_pending = True
+            self._lookback_retry_fast = True
+            self._lookback_progress_key = None
+            self._lookback_progress_count = 0
+        self.progress.ready = False
+        self.last_run = 0.0
+        self._exec_candidates.clear()
+        self._grid_auto_key = None
+        self._grid_auto_models = {}
+        self.set_floor_auto.clear()
+        self.relation_state, self.relation_at = {}, 0.0      # lanes of the previous rules raise nothing
+        for st in self.by_idx:
+            st.last_error = "configuration changed; replay required"
+            st.hist, st.proc, st.exe, st.neg = [], [], [], []
+            st.main_evidence = None
+            st.exec_grid = None
+            st.held_exec_evidence.clear()
+            st.proc_replayed = False
+            st.n = st.proc_total = st.exe_total = st.neg_total = 0
+            st.gate_n = st.main_n = st.exe_n = st.neg_n = 0
+            st.gate_pf = st.main_pf = st.exe_pf = st.neg_pf = 0.0
+            st.gate_gp = st.gate_gl = st.main_gp = st.main_gl = 0.0
+            st.exe_gp = st.exe_gl = st.neg_gp = st.neg_gl = 0.0
+            st.rank_pos = st.rank_neg = (0, 0.0, 0.0, 0.0, 0.0)
+            st.base_short_n = st.base_min_n = st.main_short_n = st.main_min_have = 0
+            st.base_short_pf = st.main_short_pf = 0.0
+            st.base_short_gp = st.base_short_gl = st.main_short_gp = st.main_short_gl = 0.0
+            st.base_min_gp = st.base_min_gl = st.main_min_gp = st.main_min_gl = 0.0
+            st.base_min_ok = st.base_long_ok = st.base_short_ok = False
+            st.sample_counts = None
+            for key in ("gate_pf_old", "gate_pf_new", "main_short_win", "neg_win", "neg_win_gp", "neg_win_gl",
+                        "last15_pf", "last15_n", "last15_r", "last25_avg_r", "last25_n", "last25_avg_pnl",
+                        "max_dd_s", "avg_dd_s", "dd_episodes", "wins", "gp", "gl", "wr", "expectancy",
+                        "avg_hold_s", "pf_all", "source_n", "hold_auto_pf", "hold_auto_n"):
+                setattr(st, key, 0)
+            st.last15_ratio = 1.0
+            st.exits = {}
+            st.hold_bars, st.hold_auto = self.hold_bars_for(st), False
+            st.stage = {}
+            st.deact_reason = "error"
+
 
     def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None, prepared=None) -> None:
         cts = cts or {}
@@ -3620,25 +3644,51 @@ class SetBook:
             if o <= 0 or c <= 0 or h <= 0 or l <= 0:
                 continue
             cleaned.append([o, h, l, c, v])
-        if len(cleaned) >= 16:
-            old = self.bars.get(symbol) or []
+        old = self.bars.get(symbol) or []
+        dated = last_t is not None
+        if dated and (not math.isfinite(last_t) or len(cleaned) != len(bars)):
+            return
+        if len(cleaned) >= 16 or (cleaned and dated and old_last is not None and len(old) >= 16):
             first_new = float(last_t) - (len(cleaned) - 1) * BAR_S if last_t is not None else None
             if watching and old_last is not None and first_new is not None and first_new > old_last + BAR_S + 1e-6:
                 self._history_snapshot_active = False
             frames = getattr(self, "_bar_frames", None)
             frame = frames.get(symbol) if frames is not None else None
-            joined = _join_bars(old, cleaned, keep_on_gap=tail, share_rows=bool(frame and frame[0] is old))
+            if old and old_last is not None and dated:
+                # Equal OHLCV values occur on different minutes. Dates also
+                # let an exchange correct an overlapping interior candle.
+                elapsed = (last_t - old_last) / BAR_S
+                if not elapsed.is_integer():
+                    return
+                end = len(old) + int(elapsed)
+                start = end - len(cleaned)
+                if end < 0 or (start > len(old) and tail):
+                    return
+                if start > len(old):
+                    joined = cleaned
+                else:
+                    overlap = len(old) - start
+                    # A venue may rebase an entire price series at the same
+                    # timestamps. Recover the prior history from the venue if
+                    # the refresh has no common price candle with its old tail.
+                    replaced = (not tail and start > 0 and end >= len(old) and overlap >= 2
+                                and all(old[start + i][:4] != cleaned[i][:4] for i in range(overlap)))
+                    joined = cleaned if replaced else old[:max(0, start)] + cleaned + old[max(end, 0):]
+                    last_t = max(old_last, last_t)
+            else:
+                joined = _join_bars(old, cleaned, keep_on_gap=tail, share_rows=bool(frame and frame[0] is old))
             capacity = self.history_bars()
             if len(joined) > capacity:
                 joined = joined[-capacity:]
             if joined != old:
                 # Ingestion replaces a completed frame; replay readers can
                 # keep the old object until they finish reading it.
+                getattr(self, "base_entries", {}).pop(symbol, None)
                 self.bars[symbol] = joined
                 if frames is not None:
                     frames[symbol] = (joined, object())
             bar_t = self.__dict__.setdefault("bar_t", {})
-            if last_t is not None and joined and joined[-1] == cleaned[-1]:
+            if dated and joined and (old_last is not None or joined[-1] == cleaned[-1]):
                 bar_t[symbol] = float(last_t)
             elif not old or not joined or joined[-1] != old[-1]:
                 bar_t.pop(symbol, None)           # the series now ends on a row of unknown time
@@ -3702,6 +3752,7 @@ class SetBook:
             if self._lookback_pending and symbol in self._history_snapshot_symbols:
                 self._history_snapshot_active = False
             self.bars.pop(symbol, None)
+            getattr(self, "base_entries", {}).pop(symbol, None)
             self._bar_frames.pop(symbol, None)
             self._bar_quality_cache.pop(symbol, None)
             self.bar_t.pop(symbol, None)
@@ -3794,6 +3845,7 @@ class SetBook:
             "hold_s": finite(get("hold_s")),
             "reason": str(get("reason") or ""),
             "client_id": str(get("client_id") or get("clientId") or ""),
+            "exec_lane_id": str(get("exec_lane_id") or get("execLaneId") or ""),
             "lane": lane,
             # Aggregate net cannot be attributed to the base when add-on fills
             # changed its cost basis. Old records without component fees use an
@@ -3977,6 +4029,9 @@ class SetBook:
                         break                       # never restore an old-rules chunk after load invalidated it
                     if packed is not None:
                         self._replace_paper_rows(symbol, packed)
+                        if (self.stage_grid and replay_bar_at is not None and self.bar_t.get(symbol) == replay_bar_at
+                                and self._bar_frames.get(symbol, (None, None))[1] is versions.get(symbol)):
+                            self.base_entries[symbol] = (replay_bar_at + BAR_S, inputs.get("base_entries", {}))
                         if symbol in source_keys:
                             self._hist_replay_source[symbol] = source_keys[symbol]
                         else:
@@ -4006,6 +4061,7 @@ class SetBook:
                     self._replace_paper_rows(s, {})
                     del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
                     self._hist_inputs.pop(s, None)
+                    self.base_entries.pop(s, None)
                     self._hist_replay_key.pop(s, None)
                     self._hist_replay_source.pop(s, None)
                     self._hist_replay_at.pop(s, None)
@@ -4307,6 +4363,9 @@ class SetBook:
                         packed[sid] = old
                         continue
                 self._stage_score_keys.pop(sid, None)
+                st = self.sets.get(sid)
+                if self.stage_grid and st and st.exec_grid:
+                    st.last_error = "paper evidence changed; scoring pending"
                 if training_end is not None:
                     if old is not None and new is not None:
                         changed = not isinstance(old, RowCols) or not old.same_training_rows(new, training_start, training_end)
@@ -4396,12 +4455,13 @@ class SetBook:
             cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
         acc = BarIndex(bars)          # one index per symbol, shared by every lane
         cand_side = self._cand_by_side(cand, dirs)
+        admissions = {}
         if self.__dict__.get("_scan_packed") and self.scan_workers and not getattr(self, "hold_auto", False):
-            forked = scan_forked(self, symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc, cand_side, on_step)
+            forked = scan_forked(self, symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc, cand_side, on_step, admissions)
             if forked is not None:
                 # the same rows, columns and aliases the loop below builds, made in forked processes (scan_forked); replay_all stores them as they are
                 return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg, "dirs": dirs, "confs": confs, "cand": cand,
-                        "cand_side": cand_side, "acc": acc, "pause": {}, "tape_alias": {}, "packed": forked}
+                        "cand_side": cand_side, "acc": acc, "pause": {}, "tape_alias": {}, "packed": forked, "base_entries": admissions}
         pause_plan = self._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc)
         # Keys that traded exactly the same orders in this pass (Sets whose stops and targets never decide a trade differently) are noted in `tape_alias`
         # so the packing step stores their columns once. Every list in `hist` and every row stays its own: a Set's rows always name that Set.
@@ -4419,6 +4479,8 @@ class SetBook:
                     lane.hold = h                    # 0 = the global time stop; the Set's chosen hold never feeds its own judgement
                     key = st.id if h == 0 else f"{st.id}{HOLD_KEY}{h}"
                 trades = lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
+                if self.stage_grid and h is None and lane.open and lane.open["i"] == n - 1:
+                    admissions[st.id] = lane.hold or cfg["time_bars"]
                 sig = tuple((d["entry_i"], d["exit_i"], d["reason"], d["pnl_pct"], d["side"]) for d in trades)
                 out = hist.setdefault(key, [])
                 fresh = not out
@@ -4435,7 +4497,8 @@ class SetBook:
         # Candidate evidence must cover every entry being reconstructed, not just
         # the most recent 50 closes at the final scoring time.
         return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg,
-                "dirs": dirs, "confs": confs, "cand": cand, "cand_side": cand_side, "acc": acc, "pause": pause_plan, "tape_alias": tape_alias}
+                "dirs": dirs, "confs": confs, "cand": cand, "cand_side": cand_side, "acc": acc, "pause": pause_plan,
+                "tape_alias": tape_alias, "base_entries": admissions}
 
     def _cand_by_side(self, cand: Dict[str, List[int]], dirs: Dict[str, List[int]]) -> Dict[Tuple[str, int], List[int]]:
         """Entry bars per (pack, side): a Set that trades one direction scans only the bars whose signal points that way (side 0: every bar). Each bar
@@ -4759,7 +4822,7 @@ class SetBook:
         return rows
 
     def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float, until: Optional[float] = None,
-                     scoring_cutoff: Optional[float] = None) -> List[tuple]:
+                     scoring_cutoff: Optional[float] = None, open_entries=None, entry_holds=None) -> List[tuple]:
         """Auto Mode: the hold (minutes) whose own tape has the best cost PF over this Set's last orders, as many as it has but at most
         holdAutoMax. The global time stop is the reference; a candidate needs holdAutoMin orders and a PF margin over it to replace
         it. Returns the rows of the tape the Set is judged on, and leaves the choice in st.hold_bars (live positions read it)."""
@@ -4801,12 +4864,23 @@ class SetBook:
                 idx = hold_choice_at(cands, prefixes, base_ts + i * BAR_S,
                                      self.hold_auto_max, self.hold_auto_min,
                                      getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback * BAR_S)
-                return cands[idx][0]
+                hold = cands[idx][0]
+                if entry_holds is not None:
+                    entry_holds[symbol][i] = hold or data["cfg"]["time_bars"]
+                return hold
             lane = SetLane(st, symbol)
             sel_pause = self._lane_pause(lane, st.pack, data.get("pause") or {}, st.side)
             cand_side = data.get("cand_side") or self._cand_by_side(data["cand"], data["dirs"])      # inputs built before the direction split carry only `cand`
             done = lane.scan(data["warmup"], len(bars), bars, data["dirs"][st.pack], data["confs"][st.pack],
                              True, data["cfg"], cand_side[(st.pack, st.side)], data["acc"], select_hold=choose, select_pause=sel_pause)
+            if open_entries is not None and lane.open:
+                open_entries[symbol] = lane.open["i"]
+            current = self.base_entries.get(symbol)
+            if until is not None and current and current[0] == base_ts + (len(bars) - 1) * BAR_S:
+                if lane.open and lane.open["i"] == len(bars) - 1:
+                    current[1][st.id] = lane.open["time_bars"]
+                else:
+                    current[1].pop(st.id, None)
             for row in done:
                 t = base_ts + row["exit_i"] * BAR_S
                 if t >= cutoff and (until is None or t <= until):
@@ -5028,9 +5102,9 @@ class SetBook:
             params = self.stage_params(st.pack, st)
         if rows:
             cf = cost_as_frac(self.cost_pct)
-            closes = [finite(row[0]) for row in rows]
-            entries = [t - finite(row[5]) for t, row in zip(closes, rows)]
-            nets = [finite(row[4]) - cf for row in rows]
+            closes = array("d", (finite(row[0]) for row in rows))
+            entries = array("d", (t - finite(row[5]) for t, row in zip(closes, rows)))
+            nets = array("d", (finite(row[4]) - cf for row in rows))
         risk = None
         if self.stop_cap_exceeded(st):
             def risk(*_args):
@@ -5081,7 +5155,20 @@ class SetBook:
                 return None
             if identity == self.exec_lane_id(st):
                 return st.exe
-            return st.held_exec_evidence.get(identity)
+            if identity in st.held_exec_evidence:
+                return st.held_exec_evidence[identity]
+            result = st.exec_grid
+            path = self.stage_grid.path(st.id, identity) if self.stage_grid else ()
+            if not (result and result.lanes and result.lanes.contains(path)):
+                return None
+        rows = result.path_orders(path[:-1], PROC_KEEP)
+        return tuple((row.close, row.net) for row in rows)
+
+    def grid_axis_verdict(self, result: stage_grid.GridResult, path: stage_grid.Path):
+        """Size an Exec signal from its own Real parent, including non-representative siblings."""
+        rows, floor = result.exec_parent(path, PROC_KEEP)
+        return axis_sets.choose([r.close for r in rows], [r.entry for r in rows], [r.net for r in rows],
+                                floor, self.axis_sets)
 
     def set_processed(self, st: SetState, full: Sequence[tuple], now: Optional[float] = None,
                       relations: Optional["relation_lanes.Accumulator"] = None,
@@ -5097,6 +5184,7 @@ class SetBook:
             # Keep the published decision and its figures. Main and Real
             # already retain the orders they need below.
             st.exec_grid = replace(grid_result, streams=(), row_ids=(), validated_base_ids=(),
+                                   source=grid_result.source if grid_result.ready else None,
                                    stream_sizes=tuple(map(len, grid_result.streams)))
             candidates = self._exec_candidates.setdefault((st.pack, st.kind), {})
             if grid_result.ready:
@@ -5108,7 +5196,9 @@ class SetBook:
             st.proc = [(row.close, row.net) for row in main]
             st.exe = [(row.close, row.net) for row in real]
             st.neg, st.neg_total, st.neg_ent = [], 0, None
-            st.proc_total, st.exe_total = len(st.proc), len(st.exe)
+            counts = grid_result.post_evidence
+            st.proc_total = counts[1].count if len(counts) > 1 else 0
+            st.exe_total = counts[2].count if len(counts) > 2 else 0
             st.exe_ent = array("d", (row.entry for row in real)) if self.axis_sets.enabled else None
             st.main_evidence, st.main_short_win, st.proc_replayed = None, 0, True
             if relations is not None and self.sl_auto_allows(st):
@@ -5692,9 +5782,13 @@ class SetBook:
             idx = self._pk_index = (key, table)
         return idx[1].get((pack, kind), [])
 
-    def _eligible_exec(self, pack: str, kind: str, side: int):
+    def _eligible_exec(self, pack: str, kind: str, side: int, admitted=None):
         candidates = self._exec_candidates.get((pack, kind), {})
-        return (st for st in candidates.values() if self.sets.get(st.id) is st
+        if admitted is not None and len(admitted) < len(candidates):
+            rows = (candidates[sid] for sid in admitted if sid in candidates)
+        else:
+            rows = (st for st in candidates.values() if admitted is None or st.id in admitted)
+        return (st for st in rows if self.sets.get(st.id) is st
                 and (not side or st.side in (0, side)) and self.is_eligible(st))
 
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
@@ -6012,7 +6106,7 @@ class SetBook:
         return not own or own == symbol
 
     def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None,
-                 predicate: Optional[Callable[[SetState], bool]] = None, side: int = 0) -> Optional[SetState]:
+                 predicate: Optional[Callable[[SetState], bool]] = None, side: int = 0, admitted=None) -> Optional[SetState]:
         """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
         rank_key: the same entries, each judged on its own exits), else the best valid trailing Set. `side` (+1 long, -1 short): only a Set that may trade
         that direction; in a split book a long signal is never judged by a short Set's tape. 0: any (a display value)."""
@@ -6023,7 +6117,7 @@ class SetBook:
                 if allowed_lanes is not None and "pos" not in allowed_lanes:
                     return None
                 for kinds in self.kind_order_for(pack):
-                    candidates = (st for kind in kinds for st in self._eligible_exec(pack, kind, side))
+                    candidates = (st for kind in kinds for st in self._eligible_exec(pack, kind, side, admitted))
                     if predicate is None:
                         chosen = max(candidates, key=self.lane_rank_key, default=None)
                     else:

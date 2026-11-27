@@ -45,6 +45,8 @@ from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
 from conn_guard import ConnGuardError, mode_of, resolve_base
 from redis_reads import read_output as _redis_read_output
+from stage_grid import SettledLanes, lane_id as stage_lane_id
+from set_engine import EXEC_SETTLEMENT_HISTORY_S
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
@@ -3939,6 +3941,26 @@ class Pulse:
         chosen, _lane, blocked = self._scope_choice(pack)
         return chosen, blocked
 
+    def grid_entry_choice(self, pack: str, side: int, symbol: str, at: float):
+        if not self.sets.symbol_allows(pack, symbol):
+            return None, ()
+        stamp, admissions = self.sets.base_entries.get(symbol, (0, {}))
+        if stamp != at or not admissions:
+            return None, ()
+        settlements = getattr(self, "exec_settlements", None)
+        path = ()
+
+        def passes(st):
+            nonlocal path
+            if st.score_at < at:
+                return False
+            result = st.exec_grid
+            path = result.entry_path(symbol, side, at, st.id, settlements) if result and result.decision_at <= at else ()
+            return bool(path)
+
+        chosen = self.sets.pick_any(pack, side=side, predicate=passes, admitted=admissions)
+        return chosen, path if chosen else ()
+
     def _evidence_s(self) -> float:
         """Seconds of closed orders a Set's own stream may be read over: the book's bound (lookback, or the whole held history with lastNBasis count)."""
         fn = getattr(self.sets, "evidence_bars", None)
@@ -4156,21 +4178,25 @@ class Pulse:
         exec_lane_id = ""
         exec_axis_vol = 1.0
         if self.exec_stage_enabled():
+            signal_at = math.floor(time.time() / 60) * 60
+            cached_signal = getattr(self, "_entry_sig", {}).get(sym)
+            if cached_signal is not None and cached_signal[0] + 60 != signal_at:
+                return
             with self.sets._lock:
-                chosen, chosen_lane, blocked_by = self._scope_choice(pack, direction, symbol=sym)
-                exec_lane_id = self.sets.exec_lane_id(chosen) if chosen else ""
-                if exec_lane_id and self.sets.axis_sets.enabled:
-                    # An Axis Set can size the admitted order from its own Real
-                    # stream. The current Exec decision already governs entry.
-                    now = chosen.score_at
-                    floor = self.set_axis_floor(chosen, chosen_lane)
-                    if floor is None:
-                        floor = self.sets.floor_for(15, chosen.pack, chosen)
-                    verdict = self.sets.axis_set_verdict(chosen, chosen_lane, now, now - self._evidence_s(), floor)
-                    if verdict is not None and verdict["allow"]:
-                        exec_axis_vol = float(verdict["vol"])
+                chosen, path = self.grid_entry_choice(pack, direction, sym, signal_at)
+                chosen_lane, blocked_by = "pos" if chosen else "", ""
+                decision = chosen.exec_grid if chosen else None
+                if path:
+                    exec_lane_id = stage_lane_id(chosen.id, path)
+                    entry_hold = self.sets.base_entries[sym][1][chosen.id] or self.sets.hist_time_bars
+                axis_enabled = bool(path and self.sets.axis_sets.enabled)
+            if axis_enabled:
+                verdict = self.sets.grid_axis_verdict(decision, path)
+                if verdict["allow"]:
+                    exec_axis_vol = float(verdict["vol"])
         else:
             chosen, chosen_lane, blocked_by = self._scope_choice(pack, direction, symbol=sym)
+            entry_hold = int(getattr(chosen, "hold_bars", 0) or self.sets.hist_time_bars) if chosen else 0
         rel_mult, rel_why = 1.0, []
         rounds_mult, rounds_why, rounds_keys = 1.0, [], None
         if chosen is None and blocked_by:
@@ -4409,6 +4435,16 @@ class Pulse:
 
         def submit_entry(order_qty, order_cid):
             if exec_lane_id:
+                # Venue reads and sizing can span a scoring pass or a candle
+                # boundary. Reserve only the proof used by this order.
+                with self.sets._lock:
+                    stamp, admissions = self.sets.base_entries.get(sym, (0, {}))
+                    if (signal_at != math.floor(time.time() / 60) * 60
+                            or stamp != signal_at or set_id not in admissions
+                            or (admissions[set_id] or self.sets.hist_time_bars) != entry_hold
+                            or self.sets.sets.get(set_id) is not chosen or chosen.exec_grid is not decision
+                            or not self.sets.is_eligible(chosen)):
+                        return {"code": -2, "msg": "Exec qualification changed before submission"}
                 intents = self.__dict__.setdefault("exec_intents", {})
                 intents[order_cid] = {"id": exec_lane_id, "base": set_id, "symbol": sym, "side": side, "at": time.time(),
                                        "pack": pack, "lane": lane}
@@ -4571,7 +4607,7 @@ class Pulse:
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True, lane=lane,
             overall=True, close_position=True, ind_kind=ind_kind, exec_lane_id=exec_lane_id,
             base_entry=avg if chosen else 0.0, base_qty=filled if chosen else 0.0,
-            set_hold_bars=(int(getattr(chosen, "hold_bars", 0) or self.sets.hist_time_bars) if chosen else 0),
+            set_hold_bars=entry_hold,
             relate_origin_qty=relate_origin_qty if relate_receipt else 0.0,
             rel_mult=float(rel_mult), rel_why="+".join(rel_why),
             rounds_mult=float(rounds_mult), rounds_why="+".join(rounds_why),
@@ -5367,6 +5403,7 @@ class Pulse:
 
 
     def _exec_boot(self) -> None:
+        self.exec_settlements = SettledLanes()
         """Execution counters from the whole trades file (streamed): orders closed by a Set lane and by the Exit lane, wins, the Sets that closed
         orders. The in-memory closed list keeps only the last 80; these totals do not."""
         self.exec_n: Dict[str, int] = {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0}
@@ -5396,7 +5433,7 @@ class Pulse:
                         outcome = Closed(t, str(rec.get("symbol") or ""), str(rec.get("side") or ""),
                             0, 0, 0, pnl if pnl is not None else float("nan"), 0, str(rec.get("reason") or ""), 0,
                             set_id=str(rec.get("set_id") or rec.get("setId") or ""),
-                            exec_lane_id=str(rec.get("exec_lane_id") or ""),
+                            exec_lane_id=str(rec.get("exec_lane_id") or ""), client_id=cid,
                             filled_orders=max(0, int(rec.get("filled_orders") or 0)),
                             funding_usdt=number(rec.get("funding_usdt")) or 0.0,
                             pack=str(rec.get("pack") or ""), lane=str(rec.get("lane") or "pos"),
@@ -5435,6 +5472,12 @@ class Pulse:
     def _exec_stage_note(self, rec: "Closed", verified: bool = True) -> None:
         if not getattr(rec, "exec_lane_id", ""):
             return
+        if rec.side in ("LONG", "SHORT") and rec.symbol and rec.set_id:
+            if not hasattr(self, "exec_settlements"):
+                self.exec_settlements = SettledLanes()
+            self.exec_settlements.record(rec.symbol, 1 if rec.side == "LONG" else -1, rec.exec_lane_id, rec.t,
+                                         number(rec.net_pnl_pct) if verified else None,
+                                         EXEC_SETTLEMENT_HISTORY_S, rec.client_id)
         self._exec_inc("execFilledOrders", getattr(rec, "filled_orders", 0))
         cash = number(rec.pnl) if verified else None
         funding = (number(getattr(rec, "funding_usdt", None)) or 0.0) if cash is not None else 0.0
@@ -6789,15 +6832,22 @@ class Pulse:
         # eligibility by pack AND direction for this cycle, never across cycles:
         # stage/Axis verdicts may change while the completed-bar signal is cached.
         grid_enabled = self.exec_stage_enabled()
-        eligible: Dict[Tuple[str, int, str], bool] = {}
+        eligible = {}
         def can_enter(candidate, symbol):
             pack, side = candidate[0], int(candidate[1])
             if grid_enabled and isinstance(self.sets, SetBook):
                 if not self.sets.symbol_allows(pack, symbol):
                     return False
-                # Exec eligibility is common to the pack/direction. The
-                # symbol restriction above is specific to the indication.
-                symbol = ""
+                with self.sets._lock:
+                    stamp, admissions = self.sets.base_entries.get(symbol, (0, {}))
+                    if stamp != minute or not admissions:
+                        return False
+                    ledger = getattr(self, "exec_settlements", None)
+                    slot = symbol if ledger and (symbol.upper(), side) in ledger.slots else ""
+                    key = (pack, side, slot, frozenset(admissions))
+                    if key not in eligible:
+                        eligible[key] = self.grid_entry_choice(pack, side, symbol, minute)[0] is not None
+                return eligible[key]
             key = (pack, side, symbol)
             if key not in eligible:
                 eligible[key] = self._scope_choice(pack, side=side, symbol=symbol)[0] is not None
@@ -8293,7 +8343,14 @@ class Pulse:
                     and cached.get("target") == lookback and cached.get("expires", 0) > cache_now
                     and oldest <= cached.get("oldest", float("-inf")) + 1e-6)
             short = {s: len(self.sets.bars.get(s) or []) < lookback - 1 and not cached_short[s] for s in names}
-            first = _gather([(path, {"symbol": s, "interval": "1m", "limit": str(min(page, lookback) if short[s] else 120)}) for s in names])
+            def fetch_limit(s):
+                if short[s]:
+                    return min(page, lookback)
+                last = self.sets.bar_t.get(s)
+                if last is None or not self.exec_stage_enabled():
+                    return 120
+                return min(120, max(3, int((time.time() - last) // 60) + 2))
+            first = _gather([(path, {"symbol": s, "interval": "1m", "limit": str(fetch_limit(s))}) for s in names])
             rows_by: Dict[str, List[Any]] = {}
             failed = set(names)
             exhausted = set()
@@ -8403,16 +8460,35 @@ class Pulse:
             bars = self.real_bars_1m(s)      # real minutes only: the seed padding (flat rows) would be replayed as bars
             if bars:
                 self.sets.ingest_bars(s, bars, tail=True)
-        if not self.sets.due():
+        minute = int(time.time() // 60) * 60
+        steady_grid = (self.exec_stage_enabled() and self.sets.enabled and self.sets.progress.ready
+                       and not self.sets._lookback_pending)
+        new_minute = steady_grid and getattr(self, "_grid_history_minute", None) != minute
+        if new_minute:
+            self._grid_history_minute = minute
+            self._grid_history_pending = set(hist_universe)
+            self._grid_history_attempts = {}
+        pending = self._grid_history_pending if steady_grid else set()
+        if steady_grid and not new_minute:
+            for symbol in hist_universe:
+                frame = self.sets._bar_frames.get(symbol)
+                if (frame and self.sets.bar_t.get(symbol) == minute - 60
+                        and self._grid_history_attempts.get(symbol) is not frame[1]):
+                    pending.add(symbol)
+        if not pending and not self.sets.due():
             return
         full = int(self.sets.history_bars() * 0.9)
         have = sum(1 for s in hist_universe if len(self.sets.bars.get(s) or []) >= full)
         fetched = None
-        if self.sets._lookback_pending or have < max(4, len(hist_universe) // 2):
+        if new_minute:
+            missing = [s for s in hist_universe if self.sets.bar_t.get(s, 0) < minute - 60]
+            if missing:
+                fetched = self._hist_fetch(missing)
+        elif not pending and (self.sets._lookback_pending or have < max(4, len(hist_universe) // 2)):
             # most symbols lack their history: fetch it now. Live minutes alone take the lookback (32 h) to fill it,
             # and waiting for them first left every Set unvalidated after each start.
             fetched = self._hist_fetch(hist_universe)
-        elif time.time() - self.sets.last_run >= self.sets.refresh_s:
+        elif not pending and time.time() - self.sets.last_run >= self.sets.refresh_s:
             fetched = self._hist_fetch(hist_universe)
         self.hist_busy = True
         try:
@@ -8420,11 +8496,17 @@ class Pulse:
             names = hist_universe
             if b.scan_chunk and len(names) > b.hist_chunk:
                 names, self.load.cursor_hist = self.load.history_window(names, b.hist_chunk, int(self.load.cursor_hist or 0))
+            if pending:
+                names = [s for s in names if s in pending]
             if self.sets._lookback_pending and fetched is not None:
                 names = [s for s in names if s in fetched]
             if b.hist_run:
-                self.sets.replay_all(on_step=lambda: time.sleep(0), symbols=names, expected_symbols=hist_universe,
-                                     abort=lambda: self.load.last_budget.level == "critical" and not self.load.last_budget.hist_run)   # memory, not slow cycles
+                if names:
+                    if steady_grid:
+                        self._grid_history_attempts.update((s, self.sets._bar_frames.get(s, (None, None))[1]) for s in names)
+                    self.sets.replay_all(on_step=lambda: time.sleep(0), symbols=names, expected_symbols=hist_universe,
+                                         abort=lambda: self.load.last_budget.level == "critical" and not self.load.last_budget.hist_run)
+                    pending.difference_update(names)
         finally:
             self.hist_busy = False
 

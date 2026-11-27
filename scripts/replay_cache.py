@@ -23,11 +23,19 @@ def fingerprint(data_dir, names, overlay, pulse_dir, stage_eval_path):
         assets = Path(pulse_dir) / "shared" / "cts-indications"
     source_assets = {str(path.relative_to(assets)): file_sha(path) for path in sorted(assets.rglob("*"))
                      if path.is_file() and path.suffix in (".ts", ".json")}
+    settings = {k: v for k, v in overlay.items() if not str(k).startswith(
+        ("groupGate", "relationLanes", "laneOrder", "lastNBasis", "blockRounds", "axisDisjoint", "axisLastOutcome"))}
+    def digest(values):
+        return hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    grid = settings.get("stageLastN")
+    # Only the enabled mode can affect collection. Its window counts and
+    # signs filter the resulting tapes after collection, in every simulation.
+    shadow_settings = {**settings, "stageLastN": True} if isinstance(grid, dict) and grid.get("enabled", True) else settings
     return {"version": 1,
             "markets": {name: file_sha(os.path.join(data_dir, name + ".json")) for name in names},
             # the profit group gate (groupGate*), the relation lanes (relationLanes) the lane order (laneOrder) the basis of the last-N windows (lastNBasis), the Block rounds (blockRounds) and the disjoint Axis rule (axisDisjoint, axisLastOutcome) act on the scoring or at entry time and change no tape:
             # arms that differ in them share one cache
-            "settings": hashlib.sha256(json.dumps({k: v for k, v in overlay.items() if not str(k).startswith(("groupGate", "relationLanes", "laneOrder", "lastNBasis", "blockRounds", "axisDisjoint", "axisLastOutcome"))}, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+            "settings": digest(settings), "shadowSettings": digest(shadow_settings),
             "engine": {os.path.basename(path): file_sha(path) for path in files},
             "sourceAssets": source_assets,
             "simulator": file_sha(stage_eval_path)}
@@ -40,7 +48,12 @@ def load(cache, expected):
         raise ValueError("cache has no provenance metadata; use a new cache path")
     with open(meta_path, encoding="utf-8") as f:
         meta = json.load(f)
-    if meta.get("fingerprint") != expected or meta.get("cacheSha256") != file_sha(cache):
+    stored = meta.get("fingerprint", {})
+    # Old manifests establish only exact-settings reuse. New manifests
+    # also prove equivalence of the shadow trades across Last-N choices.
+    ignored = "settings" if "shadowSettings" in stored and "shadowSettings" in expected else "shadowSettings"
+    if ({k: v for k, v in stored.items() if k != ignored} != {k: v for k, v in expected.items() if k != ignored}
+            or meta.get("cacheSha256") != file_sha(cache)):
         raise ValueError("cache provenance differs from the market data, settings, engine or saved bytes")
     encoding = meta.get("encoding", "pickle")
     if encoding not in ("pickle", "pickle-gzip"):

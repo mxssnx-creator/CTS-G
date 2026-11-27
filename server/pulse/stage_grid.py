@@ -1,10 +1,12 @@
 """Causal Last-N stage sets backed by ordered references to their Base tape."""
 from __future__ import annotations
 
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from copy import copy
+from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
+from hashlib import blake2b
 from itertools import product
 import math
 import re
@@ -140,6 +142,27 @@ class StageGrid:
         return bounds
 
     @cached_property
+    def plans(self) -> dict:
+        """Precompute which configurations each block can disqualify on one parent tape."""
+        plans = {}
+        for key, choices in self.rules.items():
+            buckets = {}
+            by_block = [{} for _ in range(4)]
+            for i, w in enumerate(choices):
+                bit = 1 << i
+                buckets[w.need] = buckets.get(w.need, 0) | bit
+                blocks = (*window_blocks(w, key[0]), (w.need, 0, "pf"))
+                for masks, block in zip(by_block, blocks):
+                    if block[0]:
+                        masks[block] = masks.get(block, 0) | bit
+            sizes = tuple(sorted(buckets))
+            masks = [0]
+            for size in sizes:
+                masks.append(masks[-1] | buckets[size])
+            plans[key] = (sizes, tuple(masks), tuple(tuple(block.items()) for block in by_block))
+        return plans
+
+    @cached_property
     def floor_sizes(self) -> frozenset[int]:
         sizes = {n for options in self.options for n in (*options.shorts, *options.lasts)}
         sizes.update(n for minimum, maximum in self.sample_bounds.values() for n in range(minimum, maximum + 1))
@@ -246,6 +269,65 @@ class StageOrder(NamedTuple):
     net: float
 
 
+class SettledLanes:
+    """Only funded fills allocate a ledger. One symbol/side never supplies another's evidence."""
+
+    def __init__(self):
+        self.slots = {}
+        self.next_prune = 0.0
+
+    def record(self, symbol: str, side: int, identity: str, at: float, net: float | None, retention: float,
+               receipt: str = ""):
+        if at >= self.next_prune:
+            cutoff = at - retention
+            for slot, lanes in list(self.slots.items()):
+                for key, rows in list(lanes.items()):
+                    del rows[:bisect_left(rows, cutoff, key=lambda row: row[0])]
+                    if not rows:
+                        del lanes[key]
+                if not lanes:
+                    del self.slots[slot]
+            self.next_prune = at + 3600
+        rows = self.slots.setdefault((symbol.upper(), side), {}).setdefault(identity, [])
+        receipt = receipt or str(at)
+        if not any(row[2] == receipt for row in rows):
+            rows.insert(bisect_right(rows, at, key=lambda row: row[0]), (at, net, receipt))
+
+
+class QualifiedLanes(NamedTuple):
+    """Immutable branches of one decision. Equivalent tapes share a subtree, never a parent ID."""
+    choices: tuple[Window, ...]
+    sizes: tuple[int, ...]
+    groups: tuple[tuple[int, QualifiedLanes | None], ...]
+
+    def contains(self, path: Path) -> bool:
+        if not path:
+            return False
+        try:
+            bit = 1 << self.choices.index(path[0])
+        except ValueError:
+            return False
+        return any(bits & bit and (len(path) == 1 or child is not None and child.contains(path[1:]))
+                   for bits, child in self.groups)
+
+    def path_at(self, depth: int, index: int) -> Path:
+        """Return one qualified path at the requested stage without expanding its siblings."""
+        if not 0 <= depth < len(self.sizes) or not 0 <= index < self.sizes[depth]:
+            raise IndexError("qualified lane index outside stage")
+        for bits, child in self.groups:
+            width = (child.sizes[depth - 1] if child else 0) if depth else 1
+            span = bits.bit_count() * width
+            if index < span:
+                member, remainder = divmod(index, width)
+                # Select the member's set bit without allocating a list.
+                for _ in range(member):
+                    bits &= bits - 1
+                w = self.choices[(bits & -bits).bit_length() - 1]
+                return (w,) + (child.path_at(depth - 1, remainder) if depth else ())
+            index -= span
+        raise AssertionError("qualified stage counts disagree with branches")
+
+
 @dataclass(frozen=True, slots=True)
 class GridResult:
     counts: tuple[StageCount, ...]
@@ -260,6 +342,65 @@ class GridResult:
     validated_base_ids: tuple[int, ...] = ()
     stream_sizes: tuple[int, ...] = ()
     selected_floors: tuple[tuple[float, ...], ...] = ()
+    lanes: QualifiedLanes | None = None
+    source: StageHistory | None = field(default=None, compare=False, repr=False)
+    decision_at: float = 0.0
+
+    def entry_path(self, symbol: str, side: int, signal_time: float, base_id: str = "", settlements=None) -> Path:
+        """Allocate one venue slot among all currently qualified paper paths, repeatably for the same signal."""
+        if not self.ready or self.lanes is None:
+            return ()
+        total = self.lanes.sizes[-1]
+        ordinal = 0
+        if total > 1:
+            key = f"{symbol.upper()}|{side}|{int(signal_time // 60)}".encode()
+            ordinal = int.from_bytes(blake2b(key, digest_size=8).digest(), "big") % total
+        ledger = settlements.slots.get((symbol.upper(), side), {}) if settlements else {}
+        # Only previously funded identities can fail the settlement gate.
+        # A cold sibling bootstraps from its own complete paper qualification.
+        for attempt in range(min(total, len(ledger) + 1)):
+            path = self.path if total == 1 else self.lanes.path_at(len(STAGES) - 1, (ordinal + attempt) % total)
+            rows = ledger.get(lane_id(base_id, path)) if ledger else None
+            if not rows:
+                return path
+            n = path[-1].need
+            end = bisect_left(rows, signal_time, key=lambda row: row[0])
+            if end < n or rows[end - n][0] < signal_time - self.source.lookback:
+                return path
+            nets = [row[1] for row in rows[end - n:end]]
+            if any(v is None for v in nets):
+                continue
+            gain = math.fsum(v for v in nets if v > 0)
+            loss = math.fsum(-v for v in nets if v < 0)
+            if gain > 0 and (not loss or gain >= loss * self.exec_parent(path, 0)[1]):
+                return path
+        return ()
+
+    def path_orders(self, path: Path, limit: int) -> tuple[StageOrder, ...]:
+        """Read just this lane's admitted closes from the same immutable publication."""
+        if not self.source or not self.lanes or not self.lanes.contains(path) or limit <= 0:
+            return ()
+        history, tape = self._path_tape(path)
+        return self._orders(history, tape, limit)
+
+    def _path_tape(self, path: Path):
+        history = self.source.for_lookup()
+        tape = history._decision_tape(self.decision_at)
+        for depth, w in enumerate(path):
+            tape = history.child(tape, tape.child_mask(w, depth))
+        return history, tape
+
+    def _orders(self, history, tape, limit):
+        start, end = tape.indices(self.decision_at)
+        ids = tape.ids[max(start, end - limit):end]
+        return tuple(StageOrder(history.closes[i], history.entries[i], history.nets[i]) for i in ids)
+
+    def exec_parent(self, path: Path, limit: int):
+        """Exact Real rows and combined Exec threshold used for this admission."""
+        if not self.source or len(path) != len(STAGES) or not self.lanes or not self.lanes.contains(path):
+            raise ValueError("Exec lane has no qualified parent")
+        history, tape = self._path_tape(path[:-1])
+        return self._orders(history, tape, limit), tape.floor(path[-1].need, 0, "pf", self.decision_at)
 
     @property
     def ready(self) -> bool:
@@ -276,7 +417,7 @@ class GridResult:
                 "parentIds": dict(zip(STAGES, ids[:-1])),
                 "setIds": dict(zip(STAGES, ids[1:])),
                 "windows": path_settings(self.path),
-                "selectedOrders": dict(zip(STAGES, self.stream_sizes or tuple(map(len, self.streams)))),
+                "selectedOrders": {s: ev.count for s, ev in zip(STAGES, self.post_evidence)},
                 "selectedWindows": {s: ev.report() for s, ev in zip(STAGES, self.selected_evidence)},
                 "selectedBlocks": {s: {name: ev.report() for name, ev in zip(BLOCK_NAMES, blocks) if ev.count}
                                    for s, blocks in zip(STAGES, self.selected_blocks)},
@@ -538,6 +679,7 @@ class _Tape:
         return mask
 
 
+@lru_cache(maxsize=4096)
 def window_blocks(w: Window, depth: int) -> tuple:
     return ((w.last, 0, w.last_mode),
             (w.short, w.last, "pf" if w.short_mode == "positive" else "negative"),
@@ -563,6 +705,14 @@ class StageHistory:
         self._views: OrderedDict[Sequence[int], _Tape] = OrderedDict()
         self._children: OrderedDict[tuple[_Tape, int], _Tape] = OrderedDict()
         self._filter_masks: OrderedDict[_Tape, int] = OrderedDict()
+
+    def for_lookup(self) -> StageHistory:
+        # A published proof retains the three immutable input columns. Mask
+        # caches and training workspaces belong only to an individual query.
+        other = copy(self)
+        other._root = other._decision = other._entry_floors = None
+        other._views, other._children, other._filter_masks = OrderedDict(), OrderedDict(), OrderedDict()
+        return other
 
     @property
     def root(self) -> _Tape:
@@ -733,53 +883,52 @@ class StageHistory:
             size = end - start
             if size < bounds[depth, base_long][0]:
                 return GridResult(counts)
-            results: dict[tuple[int, int, str], Evidence | None] = {}
-            paths: dict[tuple[int, int], tuple[Window, int]] = {}
+            sizes, size_masks, block_masks = self.grid.plans[depth, base_long]
+            passing = size_masks[bisect_left(sizes, size + 1)]
+            tally.sample_full = passing.bit_count()
+            if depth == 1 and self.main_filter and not self.main_filter(
+                tape.values[max(start, end - self.filter_need):end]
+            ):
+                return GridResult(counts)
+            results = {}
+            for blocks in block_masks:
+                for block, mask in blocks:
+                    if not passing & mask:
+                        continue
+                    if block not in results:
+                        n, offset, kind = block
+                        results[block] = tape.test(n, end - offset, kind, now, offset)
+                    if results[block] is None:
+                        passing &= ~mask
+                if not passing:
+                    return GridResult(counts)
+            paths: dict[tuple[int, int], int] = {}
+            terminal = passing if depth == len(STAGES) - 1 else 0
+            groups = []
             picked_path: Path = ()
             picked_evidence = Evidence()
             picked_key = (0, (0.0, 0))
-            filter_ok = depth != 1 or not self.main_filter or self.main_filter(
-                tape.values[max(start, end - self.filter_need):end]
-            )
-
-            for w in choices:
-                if size < w.need:
+            while passing:
+                bit = passing & -passing
+                passing ^= bit
+                w = choices[bit.bit_length() - 1]
+                evidence = results[w.need, 0, "pf"]
+                tally.qualified += 1
+                tally.negative_short += int(w.short_mode == "negative")
+                tally.negative_last += int(w.last_mode == "negative")
+                tally.orders += evidence.count
+                tally.gain += evidence.gain
+                tally.loss += evidence.loss
+                if depth == len(STAGES) - 1:
+                    candidate_key = (1, evidence_rank(evidence))
+                    if candidate_key > picked_key:
+                        picked_path, picked_evidence, picked_key = (w,), evidence, candidate_key
                     continue
-                tally.sample_full += 1
-                if not filter_ok:
-                    continue
-                for n, offset, kind in window_blocks(w, depth):
-                    if not n:
-                        continue
-                    key = (n, offset, kind)
-                    if key not in results:
-                        results[key] = tape.test(n, end - offset, kind, now, offset)
-                    if results[key] is None:
-                        break
-                else:
-                    key = (w.need, 0, "pf")
-                    if key not in results:
-                        results[key] = tape.test(w.need, end, "pf", now)
-                    evidence = results[key]
-                    if evidence is None:
-                        continue
-                    tally.qualified += 1
-                    tally.negative_short += int(w.short_mode == "negative")
-                    tally.negative_last += int(w.last_mode == "negative")
-                    tally.orders += evidence.count
-                    tally.gain += evidence.gain
-                    tally.loss += evidence.loss
-                    if depth == len(STAGES) - 1:
-                        candidate_key = (1, evidence_rank(evidence))
-                        if candidate_key > picked_key:
-                            picked_path, picked_evidence, picked_key = (w,), evidence, candidate_key
-                        continue
-                    long = (w.long if depth == 0 else base_long) if self.grid.uses_inherited_long[depth + 1] else 0
-                    key = (long, tape.child_mask(w, depth))
-                    first, copies = paths.get(key, (w, 0))
-                    paths[key] = (first, copies + 1)
+                long = (w.long if depth == 0 else base_long) if self.grid.uses_inherited_long[depth + 1] else 0
+                key = (long, tape.child_mask(w, depth))
+                paths[key] = paths.get(key, 0) | bit
 
-            for (long, mask), (first, copies) in paths.items():
+            for (long, mask), bits in paths.items():
                 if streams and depth == 0:
                     validated_base_mask |= mask
                 if depth == len(STAGES) - 2 and self.window_auto is None:
@@ -789,12 +938,17 @@ class StageHistory:
                 else:
                     next_result = walk(depth + 1, self.child(tape, mask), long)
                 for dest, source in zip(counts[1:], next_result.counts):
-                    dest.add(source, copies)
+                    dest.add(source, bits.bit_count())
+                groups.append((bits, next_result.lanes))
                 candidate_key = (1 + len(next_result.path), next_result.rank)
                 if candidate_key > picked_key:
+                    first = choices[(bits & -bits).bit_length() - 1]
                     picked_path = (first, *next_result.path)
                     picked_evidence, picked_key = next_result.evidence, candidate_key
-            return GridResult(counts, picked_path, picked_evidence)
+            if terminal:
+                groups.append((terminal, None))
+            lanes = QualifiedLanes(choices, tuple(c.qualified for c in counts), tuple(groups)) if groups else None
+            return GridResult(counts, picked_path, picked_evidence, lanes=lanes)
 
         try:
             result = walk(0, root, 0)
@@ -820,5 +974,6 @@ class StageHistory:
             base = Evidence(len(base_ids), math.fsum(x for x in base_net if x > 0),
                             math.fsum(-x for x in base_net if x < 0))
             return GridResult(result.counts, result.path, result.evidence, self.read_streams(row_ids), row_ids,
-                              selected, tuple(post), blocks, base, base_ids, selected_floors=floors)
-        return result
+                              selected, tuple(post), blocks, base, base_ids, selected_floors=floors, lanes=result.lanes,
+                              source=self.for_lookup(), decision_at=now)
+        return replace(result, source=self.for_lookup(), decision_at=now) if result.ready else result
