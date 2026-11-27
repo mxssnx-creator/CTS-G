@@ -4604,7 +4604,7 @@ class SetBook:
         own_floor: Dict[str, float] = {}
         # Identical causal observations may reuse a calculation after tuple equality is checked.
         # A pooled tape fingerprint alone cannot establish an individual Set's evidence.
-        own_cache: Dict[Tuple[Tuple[float, float], ...], Optional[float]] = {}
+        own_cache: Dict[Tuple[Optional[float], Tuple[Tuple[float, float], ...]], Optional[float]] = {}
         cf = cost_as_frac(self.cost_pct)
         n_win = self.pf_step_auto_n
         until = math.nextafter(float(learn_before), float("-inf"))
@@ -4635,11 +4635,11 @@ class SetBook:
                     observations.append((99.0, nets[k]))
             if per_set and observations:
                 evidence = tuple(observations)
-                if evidence not in own_cache:
-                    got = learn_step_floor(evidence, self.pf_set_auto_min, self.pf_step_auto_tol,
-                                           self.step_auto_candidates(), self.pf_auto_factor)
-                    own_cache[evidence] = got["floor"] if got else None
-                threshold = own_cache[evidence]
+                signal_floor = self.signal_auto_minimum(st)
+                key = signal_floor, evidence
+                if key not in own_cache:
+                    own_cache[key] = self.learn_owned_auto_floor(evidence, signal_floor)
+                threshold = own_cache[key]
                 if threshold is not None:
                     own_floor[st.id] = float(threshold)
             if sig not in seen:
@@ -4821,7 +4821,7 @@ class SetBook:
 
     def auto_pf_per_set(self, st: "SetState") -> bool:
         """An explicit Last-N profile owns its floor even on a desk with pooled ordinary Sets."""
-        return bool(self.stage_grid) or self.pf_set_auto or st.pack in self.owned_auto_packs
+        return bool(self.stage_grid) or self.pf_set_auto or is_signal_pack(st.pack) or st.pack in self.owned_auto_packs
 
     def auto_step_bucket(self, st: "SetState") -> int:
         """The shared Auto table ends at 3.5%; wider targets use its final bucket.
@@ -4906,6 +4906,17 @@ class SetBook:
     def signal_auto_floors(minimum: float) -> tuple[float, ...]:
         """Search just above the exact Signals floor on the Set's own evidence."""
         return tuple(round(minimum + step * .05, 6) for step in range(1, 5))
+
+    def signal_auto_minimum(self, st: "SetState") -> Optional[float]:
+        return self.own_manual_floor(st)[0] if is_signal_pack(st.pack) else None
+
+    def learn_owned_auto_floor(self, evidence: Sequence[Tuple[float, float]], signal_floor: Optional[float]) -> Optional[float]:
+        if signal_floor is not None:
+            return auto_set_pf.fit(evidence, self.pf_set_auto_min, signal_floor, self.signal_auto_floors(signal_floor),
+                                   self.pf_step_auto_tol, self.pf_auto_factor)
+        result = learn_step_floor(evidence, self.pf_set_auto_min, self.pf_step_auto_tol,
+                                  self.step_auto_candidates(), self.pf_auto_factor)
+        return result["floor"] if result else None
 
     def manual_step_floor_for(self, st: "SetState") -> float:
         bucket = self.step_bucket(st)
