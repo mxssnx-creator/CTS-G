@@ -23,7 +23,7 @@ from trend_reversal import SOURCES as REVERSAL_SOURCES, reversal_at, signal_peri
 PREFIX = "sig-"
 KINDS = ("base", "exit", "trail")
 MAX_ENTRIES = 32
-MAX_PACKS = 72                 # 9 sources x 2 ranges x 4 timeframes
+MAX_PACKS = len(SOURCES) * len(RANGES) * len(TIMEFRAMES)
 WINDOW_CAP = 1920              # 1m rows a Signals pack reads at most on the 1 / 5 min timeframes (the Set history's default lookback)
 WINDOW_CAP_SLOW = 4320         # on 15 / 30 min: three days, so the slow EMAs warm up (64 bars of 30 min starved them; owner 2026-11-14 "make also 15, 30 min work")
 CONF = 0.6
@@ -49,7 +49,7 @@ def parse(pack: str) -> Optional[Tuple[str, str, int]]:
 
 
 def window_minutes(pack: str) -> int:
-    """1m rows the pack reads for one bar: six warm-ups of completed timeframe bars plus two, at most WINDOW_CAP."""
+    """Return the bounded minute history for a settled signal bar."""
     p = parse(pack)
     if p is None:
         return 0

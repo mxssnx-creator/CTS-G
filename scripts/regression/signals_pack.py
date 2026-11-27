@@ -14,7 +14,7 @@ def _rows_ms(bars, close_last):
 
 def the_signal_is_the_sources_onset_on_its_own_window():
     """On every 1m bar the pack's signal equals signal_sources.onsets of the same 1m rows the pack reads (its window), at the bar that completes a timeframe bar,
-    and nothing on the bars in between: 9 sources x 2 ranges x 4 timeframes on a synthetic walk."""
+    and nothing on the bars in between, for every supported source, range and timeframe on a synthetic walk."""
     bars = synth_bars(7, 900, drift=0.0002, vol=0.003)
     close0 = float(int(T0 // 1800) * 1800)                  # the first bar closes on a 30-minute boundary
     bad, fired = [], 0
@@ -31,7 +31,7 @@ def the_signal_is_the_sources_onset_on_its_own_window():
                     if got[0] != want:
                         bad.append((pk, i, got[0], want))
                     fired += bool(got[0])
-    return not bad and fired > 50, f"{fired} signals over 72 packs, mismatches {len(bad)} {bad[:3]}"
+    return not bad and fired > 50, f"{fired} signals over {sp.MAX_PACKS} packs, mismatches {len(bad)} {bad[:3]}"
 
 
 def the_signal_never_reads_a_later_bar():

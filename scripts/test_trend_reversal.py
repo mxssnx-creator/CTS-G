@@ -8,11 +8,23 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server/pulse"))
 from indication_extra import known
-from signal_packs import pack_name, signal
-from signal_sources import onsets
+from signal_packs import expand, pack_name, signal
+from signal_sources import DEFAULT_SOURCES, RANGES, SOURCES, TIMEFRAMES, onsets
 from trend_reversal import PERIODS, TACTICS, reversal_at
 
 class ReversalTest(unittest.TestCase):
+    def test_all_new_and_legacy_signal_packs_can_coexist(self):
+        legacy = expand([{}], 2, 20, float, [1])
+        all_selected = expand([{"sources": list(SOURCES)}], 2, 20, float, [1])
+        self.assertFalse(legacy["dropped"])
+        self.assertFalse(all_selected["dropped"])
+        self.assertEqual(len(legacy["packs"]), len(DEFAULT_SOURCES) * len(RANGES) * len(TIMEFRAMES))
+        self.assertEqual(set(all_selected["packs"]), {
+            pack_name(source, range_name, timeframe)
+            for source in SOURCES for range_name in RANGES for timeframe in TIMEFRAMES
+        })
+        self.assertTrue(set(legacy["packs"]).issubset(all_selected["packs"]))
+
     def test_reference_batch_and_latest_signals(self):
         close, seed = 100, 291
         rows = []
