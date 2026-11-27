@@ -14,6 +14,82 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'server/pulse'))
 import bingx_fast as bx
 
 
+class BatchPlace(unittest.TestCase):
+    def test_larger_request_keeps_every_order_and_preserves_partial_errors(self):
+        client = bx.FastBingX.__new__(bx.FastBingX)
+        batches = []
+        def post(path, body):
+            self.assertEqual(path, "/openApi/swap/v2/trade/batchOrders")
+            rows = json.loads(body["batchOrders"])
+            batches.append(rows)
+            return {"code": 0, "data": {"orders": rows[:-1], "errors": [rows[-1]]}}
+        client.post = post
+        orders = [{"clientOrderId": f"id-{i}", "quantity": "0.25"} for i in range(12)]
+        response = client.batch_place(orders)
+        self.assertEqual([len(chunk) for chunk in batches], [5, 5, 2])
+        self.assertEqual(len(response["data"]["orders"]), 9)
+        self.assertEqual(len(response["data"]["errors"]), 3)
+        self.assertTrue(all(row["quantity"] == .25 for chunk in batches for row in chunk))
+        self.assertEqual([row["clientOrderId"] for chunk in batches for row in chunk],
+                         [order["clientOrderId"] for order in orders])
+
+    def test_ambiguous_chunk_stops_and_identifies_the_unsubmitted_orders(self):
+        client = bx.FastBingX.__new__(bx.FastBingX)
+        batches = []
+        def post(_path, body):
+            rows = json.loads(body["batchOrders"])
+            batches.append(rows)
+            return {"code": 0, "data": {"orders": rows}} if len(batches) == 1 else {
+                "code": -1, "error": True, "msg": "request outcome unknown"}
+        client.post = post
+        orders = [{"clientOrderId": f"id-{i}", "quantity": 1} for i in range(12)]
+        result = client.batch_place(orders)
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(len(result["previous"]["orders"]), 5)
+        self.assertEqual([row["clientOrderId"] for row in result["unknown"]], [f"id-{i}" for i in range(5, 10)])
+        self.assertEqual(result["unsubmitted"], orders[10:])
+
+    def test_incomplete_acknowledgement_is_unknown(self):
+        client = bx.FastBingX.__new__(bx.FastBingX)
+        client.post = lambda *_: {"code": 0, "data": {"orders": []}}
+        orders = [{"clientOrderId": f"id-{i}", "quantity": 1} for i in range(6)]
+        result = client.batch_place(orders)
+        self.assertTrue(result["error"])
+        self.assertEqual(result["unknown"], orders[:5])
+        self.assertEqual(result["unsubmitted"], orders[5:])
+
+    def test_cooling_marks_current_and_later_chunks_unsubmitted(self):
+        client = bx.FastBingX.__new__(bx.FastBingX)
+        batches = []
+        def post(_path, body):
+            rows = json.loads(body["batchOrders"])
+            batches.append(rows)
+            return ({"code": 0, "data": {"orders": rows}} if len(batches) == 1 else
+                    {"code": 101209, "error": True, "cooled": True})
+        client.post = post
+        orders = [{"clientOrderId": f"id-{i}", "quantity": 1} for i in range(12)]
+        result = client.batch_place(orders)
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(result["unknown"], [])
+        self.assertEqual(result["unsubmitted"], orders[5:])
+
+    def test_exception_retains_prior_and_uncertain_orders(self):
+        client = bx.FastBingX.__new__(bx.FastBingX)
+        batches = []
+        def post(_path, body):
+            rows = json.loads(body["batchOrders"])
+            batches.append(rows)
+            if len(batches) == 1:
+                return {"code": 0, "data": {"orders": rows}}
+            raise OSError("connection lost")
+        client.post = post
+        orders = [{"clientOrderId": f"id-{i}", "quantity": 1} for i in range(12)]
+        result = client.batch_place(orders)
+        self.assertEqual(len(result["previous"]["orders"]), 5)
+        self.assertEqual(result["unknown"], orders[5:10])
+        self.assertEqual(result["unsubmitted"], orders[10:])
+
+
 @unittest.skipIf(bx.httpx is None,'httpx runtime dependency unavailable')
 class SignedPool(unittest.TestCase):
     def client(self,handler):

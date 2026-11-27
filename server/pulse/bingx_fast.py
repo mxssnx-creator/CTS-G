@@ -530,8 +530,38 @@ class FastBingX:
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not orders:
             return {"code": 0, "data": {"orders": []}}
-        chunk = [_batch_numbers(o) for o in orders[:5]]
-        return self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
+        if not all(isinstance(order, dict) for order in orders):
+            return {"code": -1, "error": True, "msg": "Invalid batch order", "unsubmitted": orders}
+        if len(orders) <= 5:
+            return self.post("/openApi/swap/v2/trade/batchOrders",
+                             {"batchOrders": dumps([_batch_numbers(order) for order in orders])})
+        placed, errors = [], []
+        for start in range(0, len(orders), 5):
+            chunk = [_batch_numbers(order) for order in orders[start:start + 5]]
+            try:
+                response = self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
+            except Exception as exc:
+                response = {"code": -1, "error": True, "msg": str(exc)[:400]}
+            if not isinstance(response, dict) or response.get("error") or response.get("code") not in (0, "0"):
+                result = dict(response) if isinstance(response, dict) else {"code": -1, "error": True}
+                result["error"] = True
+                result["previous"] = {"orders": placed, "errors": errors}
+                # Cooling is decided before sending the current chunk.
+                result["unsubmitted"] = orders[start if result.get("cooled") else start + len(chunk):]
+                # A transport failure can have reached the venue. Retain the
+                # exact client IDs for reconciliation before any retry.
+                result["unknown"] = [] if result.get("cooled") else chunk
+                return result
+            data = response.get("data")
+            if (not isinstance(data, dict) or not isinstance(data.get("orders"), list)
+                    or not isinstance(data.get("errors", []), list)
+                    or len(data["orders"]) + len(data.get("errors", [])) != len(chunk)):
+                return {"code": -1, "error": True, "msg": "Unrecognized batch acknowledgement",
+                        "previous": {"orders": placed, "errors": errors}, "unknown": chunk,
+                        "unsubmitted": orders[start + len(chunk):]}
+            placed.extend(data["orders"])
+            errors.extend(data.get("errors") or [])
+        return {"code": 0, "data": {"orders": placed, "errors": errors}}
 
     cancel_replace_ok = True        # False once the venue answered that the endpoint does not exist (BingX mainnet, x01 2026-11-03: 76 refusals in 12 minutes)
 
