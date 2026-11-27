@@ -283,7 +283,7 @@ def run_case(cases):
     eligibility = PreparedEligibility()
     with patch.object(sg, "grid_at", eligibility):
         rows = sg.execute(book, NAMES, bars, times, shadow, tapes, hours,
-                          refresh_s=0, include_open=True)
+                          refresh_s=0, include_open=True, indexed_exits=False)
     tapes.__dict__.pop("_exec_grid_query", None)
     trades = [r for r in rows if "net" in r]
     still_open = [r for r in rows if r.get("open_at_end") and r["t_in"] < clock + end * 60]

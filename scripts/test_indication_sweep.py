@@ -96,6 +96,9 @@ class ResearchReplayTests(unittest.TestCase):
                 lane = se.SetLane(st, "TEST-USDT")
                 closed = lane.scan(entry, len(bars), bars, directions, confidence, True,
                                    config, [entry], acc)
+                direct = se.SetLane(st, "TEST-USDT").scan(entry, len(bars), bars, directions,
+                                                        confidence, True, config, [entry])
+                self.assertEqual(direct, closed)
                 if not closed:
                     self.assertEqual(idx[entry], len(bars))
                 else:
