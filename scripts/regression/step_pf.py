@@ -580,7 +580,7 @@ def the_simulator_learns_the_engines_sl_ranges_and_the_gate_reads_them():
     bars = {s_: synth_bars(71 + i, 1300, drift=0.0004 if i % 2 == 0 else -0.0004, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
     patch = {**SMALL, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
-             "setSlRatios": [0.5, 0.75, 1.0, 1.25, 1.5], "slAutoRange": True, "slAutoMin": 10, "slAutoTol": 5,
+             "historicalStopModel": "sl-ratio", "setSlRatios": [0.5, 0.75, 1.0, 1.25, 1.5], "slAutoRange": True, "slAutoMin": 10, "slAutoTol": 5,
              "directionMode": "split", "pauseMode": "off", "setScratchEnabled": True}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")
     try:

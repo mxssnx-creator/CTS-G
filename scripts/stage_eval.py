@@ -44,6 +44,7 @@ sys.path.insert(0, PULSE)
 import set_engine as se  # noqa: E402
 import auto_set_pf  # noqa: E402
 from position_cost import cost_as_frac, signed_result_r
+from exposure_limits import symbol_group
 from stage_grid import GridResult, SettledLanes, lane_id, STAGES  # noqa: E402
 
 OVERLAY = os.path.join(PULSE, "overlay-bingx-x01.json")
@@ -67,6 +68,8 @@ def replay_overlay():
     ov = json.load(open(OVERLAY))
     patch = json.loads(os.environ.get("STAGE_OVERLAY_PATCH") or "{}")
     ov.update(patch)
+    if patch.get("historicalStopModel") == "sl-ratio":
+        ov.pop("fixedSlBands", None)
     schedule = FeeSchedule()
     contracts, now = {}, 0
     snapshot_path = os.environ.get("STAGE_FEE_SNAPSHOT")
@@ -860,7 +863,7 @@ class AutoFloors:
         if getattr(self, "_sl_sets", None) is None:
             rows = []
             for st in book.by_idx:
-                if st.kind == "trail":
+                if st.kind == "trail" or st.price_sl_pct:
                     continue
                 tx, te, pp = tapes.by_set[st.idx]
                 symbols = getattr(tapes, "symbols_by_set", {}).get(st.idx) or (f"unknown:{st.id}",) * len(tx)
@@ -962,10 +965,18 @@ class AutoFloors:
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
             refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None,
-            candidate_filter=None, max_open: int = 0) -> List[Dict[str, Any]]:
+            candidate_filter=None, max_open: int | None = None, max_per_group: int | None = None) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
-    this often inside the hour (the live engine refreshes every histRefreshS, 120 s). max_open mirrors a venue session's position cap."""
+    this often inside the hour in legacy mode. Capacity follows the loaded session unless explicitly overridden."""
+    overlay = getattr(book, "processing_overlay", {})
+    if max_open is None:
+        max_open = int(overlay.get("maxOpen") or 0)
+    if max_per_group is None:
+        max_per_group = int(overlay.get("maxPerGroup") or 0)
+    capped = max_open > 0 or max_per_group > 0
+    symbol_groups = {s: symbol_group(s) for s in names} if max_per_group > 0 else {}
+    group_open = dict.fromkeys(symbol_groups.values(), 0)
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -997,7 +1008,13 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it
     axis_cache: Dict[Tuple[int, str], Any] = {}
     opened: List[Tuple[float, str, str]] = []           # (exit t, Set id, lane) of executed positions: the Axis continuation cap counts the open ones
-    active_ends: List[float] = []
+    active_ends: List[Tuple[float, str]] = []
+
+    def reserve(symbol, end_time):
+        group = symbol_groups.get(symbol, "")
+        heappush(active_ends, (end_time, group))
+        if group:
+            group_open[group] += 1
     # the profit group gate (SetBook.group_gate, owner 2026-11-06): a group (pack x kind x TP range x lane) opens only while the newest groupGateN net results it executed inside
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
     gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if not grid_enabled and getattr(book, "group_gate", False) else None
@@ -1091,8 +1108,10 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             while pending_settlements and pending_settlements[0][0] < entry_t:
                 at, symbol, side, identity, net = heappop(pending_settlements)
                 settlements.record(symbol, side, identity, at, net, se.EXEC_SETTLEMENT_HISTORY_S)
-            while active_ends and active_ends[0] <= entry_t:
-                heappop(active_ends)
+            while active_ends and active_ends[0][0] <= entry_t:
+                _, released_group = heappop(active_ends)
+                if released_group:
+                    group_open[released_group] -= 1
             if refresh_s and minute and minute % every == 0:
                 ranked, _ = rank_at(entry_t, eligible_sets)
                 ranked_t = entry_t
@@ -1100,6 +1119,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             for s, desired in slots:
                 if max_open > 0 and len(active_ends) >= max_open:
                     break
+                if max_per_group > 0 and group_open[symbol_groups[s]] >= max_per_group:
+                    continue
                 slot = (s, desired) if desired else s
                 i = idx_of[s].get(t)
                 if i is None or i <= busy.get(slot, -1):
@@ -1241,8 +1262,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # it here lets other symbols exceed the live per-Set cap.
                         if axis_coord is not None:
                             opened.append((float("inf"), st.id, lane_pick))
-                        if max_open > 0:
-                            heappush(active_ends, float("inf"))
+                        if capped:
+                            reserve(s, float("inf"))
                         if include_open:
                             pos = lane.open
                             mark = float(bars[s][end - 1][3])
@@ -1276,8 +1297,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     closes.append((rec["t"], rec["net"]))
                 if axis_coord is not None:
                     opened.append((rec["t"], st.id, lane_pick))
-                if max_open > 0:
-                    heappush(active_ends, rec["t"])
+                if capped:
+                    reserve(s, rec["t"])
                 if gg is not None:
                     ghist.setdefault(se.set_group(st.id, lane_pick, gside), []).append((rec["t"], rec["net"]))
                 if cg:

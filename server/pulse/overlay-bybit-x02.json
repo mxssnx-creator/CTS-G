@@ -1,4 +1,5 @@
 {
+  "fixedSlBands": {},
   "targetNotional": 5.0,
   "volumeFactor": 0.05,
   "sizePctOfBalance": 0,

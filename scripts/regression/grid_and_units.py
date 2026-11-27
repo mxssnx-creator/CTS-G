@@ -79,7 +79,7 @@ def trail_step_min_removes_only_short_arms():
 def tp_steps():
     steps = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1))
     tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
-    ok = steps[0] == 2 and steps[-1] == 32 and len(steps) == 31 and tp[0] == 0.2 and tp[-1] == 3.2 and TP_STEP_MAX == 50      # shipped grid 0.2-3.2 %, ceiling 5.0 %
+    ok = steps[0] == 1 and steps[-1] == 32 and len(steps) == 32 and tp[0] == 0.1 and tp[-1] == 3.2 and TP_STEP_MAX == 50      # shipped grid 0.2-3.2 %, ceiling 5.0 %
     ok = ok and all(abs((tp[i + 1] - tp[i]) - 0.1) < 1e-9 for i in range(len(tp) - 1))
     return ok, f"steps={steps[0]}..{steps[-1]} n={len(steps)}; TP {tp[0]}%..{tp[-1]}% in 0.1% steps (absolute, not PositionCost multiples)"
 
@@ -433,7 +433,7 @@ def x01_runs_the_full_grid_the_replay_measured_best():
 
 
 CHECKS = [
-    ("grid.tp-steps-2-32", tp_steps),
+    ("grid.tp-steps-1-32", tp_steps),
     ("grid.sl-ratios-0.25-2.5", sl_ratios),
     ("grid.long-and-wide-have-their-own-sl-ratios", sl_ratios_by_range),
     ("grid.max-sl-ratio-caps-the-grid", max_sl_ratio_caps_the_grid),

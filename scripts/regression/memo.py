@@ -39,7 +39,7 @@ def _key(b: SetBook, symbol: str, now: float):
     bars = market[symbol]
     digest = hashlib.blake2b(repr(bars).encode(), digest_size=16).hexdigest()
     settings = json.dumps(b.ind_settings, sort_keys=True, default=str)
-    sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, getattr(st, 'trail_sl', 0), st.step, st.tp_pct, st.sl_ratio,
+    sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, getattr(st, 'trail_sl', 0), st.step, st.tp_pct, st.sl_ratio, st.price_sl_pct, st.price_sl_band,
                   st.hold_bars, st.side, getattr(st, 'pause_bars', 0), b.auto_holds(st),
                   b.symbol_allows(st.pack, symbol)) for st in b.by_idx)
     # Mutants and scoped monkeypatches must never borrow a replay performed
@@ -56,7 +56,7 @@ def _key(b: SetBook, symbol: str, now: float):
 
 
 def _rows_of(hist: dict) -> dict:
-    return {sid: [dict(r) for r in rows] for sid, rows in hist.items() if rows}
+    return {sid: [dict(r) for r in rows] for sid, rows in hist.items()}
 
 
 def _replay(self: SetBook, symbol, hist, now, on_step=None):
@@ -66,7 +66,7 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
     key = _key(self, symbol, now)
     cached = _CACHE.get(key)
     if cached is None:
-        fresh = {sid: [] for sid in hist}
+        fresh = {}
         inputs = _ORIG(self, symbol, fresh, now, on_step=on_step)
         # Immutable compressed snapshots avoid four-symbol fixtures thrashing
         # a two-symbol cache, without retaining millions of Python row dicts.
@@ -89,7 +89,7 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
         return inputs
     cached_rows, cached_inputs = pickle.loads(zlib.decompress(cached))
     if MODE == "verify":
-        check = {sid: [] for sid in hist}
+        check = {}
         check_inputs = _ORIG(self, symbol, check, now, on_step=on_step)
         if _rows_of(check) != cached_rows or any(check_inputs[k] != cached_inputs[k] for k in ("bars", "base_ts", "warmup", "cfg", "dirs", "confs", "cand")):
             raise AssertionError(f"memo mismatch for {symbol} at {now}: cached rows differ from a fresh replay")

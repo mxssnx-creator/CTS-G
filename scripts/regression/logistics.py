@@ -16,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "d90dcd228ada8fd6432328e8a9912927098075f5"
+PIN_WANT = "86d7f96b419ff70b17508ed4f11d5a4dc5044b9b"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 

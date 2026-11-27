@@ -311,7 +311,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="d90dcd228ada8fd6432328e8a9912927098075f5"
+  local pt_want="86d7f96b419ff70b17508ed4f11d5a4dc5044b9b"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
@@ -366,7 +366,7 @@ sync_pulse_tree() {
   python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
     "$PULSE_DIR"/redis_reads.py \
     "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py \
-    "$PULSE_DIR"/stage_grid.py "$PULSE_DIR"/auto_set_pf.py \
+    "$PULSE_DIR"/stage_grid.py "$PULSE_DIR"/auto_set_pf.py "$PULSE_DIR"/exposure_limits.py \
     "$PULSE_DIR"/set_block.py "$PULSE_DIR"/execution_cost.py "$PULSE_DIR"/market_features.py
   ok "pulse tree $PULSE_DIR"
 }

@@ -47,6 +47,7 @@ from conn_guard import ConnGuardError, mode_of, resolve_base
 from redis_reads import read_output as _redis_read_output
 from stage_grid import SettledLanes, lane_id as stage_lane_id
 from set_engine import EXEC_SETTLEMENT_HISTORY_S
+from exposure_limits import GROUPS, symbol_group
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
@@ -62,6 +63,7 @@ BLOCK_PATH = os.path.join(DIR, f"block-state-{CONN_SHORT}.json")
 OVERLAY_PATH = os.path.join(DIR, f"overlay-{CONN_SHORT}.json")
 OPEN_PATH = os.path.join(DIR, f"open-{CONN_SHORT}.json")
 EXEC_INTENTS_PATH = os.path.join(DIR, f"exec-intents-{CONN_SHORT}.json")
+EXEC_INTENT_LOCK = threading.RLock()
 CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
 ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
 LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
@@ -74,12 +76,6 @@ SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
     "DOGE-USDT", "APT-USDT", "ENA-USDT", "LDO-USDT", "1000PEPE-USDT", "KAS-USDT",
 ]
-GROUPS = {
-    "majors": {"SOL-USDT", "XRP-USDT", "ETC-USDT"},
-    "meme": {"DOGE-USDT", "1000PEPE-USDT", "KAS-USDT", "JUP-USDT"},
-    "l1": {"APT-USDT", "HYPE-USDT", "TRX-USDT"},
-    "defi": {"ENA-USDT", "LDO-USDT", "JTO-USDT", "ZRO-USDT", "COMP-USDT", "ORDI-USDT"},
-}
 
 
 def _sf(v: Any, default: float = 0.0) -> float:
@@ -1367,10 +1363,7 @@ class Pulse:
         return {**data, "executedQty": None, "avgPrice": None, "fillUnconfirmed": True}
 
     def group_of(self, sym: str) -> str:
-        for g, s in GROUPS.items():
-            if sym in s:
-                return g
-        return "u%d" % (abs(hash(sym)) % 8)
+        return symbol_group(sym)
 
     def round_qty(self, c: Contract, qty: float) -> float:
         n = math.floor(qty / c.step + 1e-12) * c.step
@@ -1818,8 +1811,9 @@ class Pulse:
             return False
 
     def clear_exec_intent(self, cid: str) -> None:
-        if self.__dict__.get("exec_intents", {}).pop(cid, None) is not None:
-            self.write_exec_intents()
+        with EXEC_INTENT_LOCK:
+            if self.__dict__.get("exec_intents", {}).pop(cid, None) is not None:
+                self.write_exec_intents()
 
     def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1, lane: str = "") -> str:
         kind = (kind or "o")[:1]
@@ -2770,6 +2764,35 @@ class Pulse:
 
     def group_count(self, g: str) -> int:
         return sum(1 for p in self.open.values() if self.group_of(p.symbol) == g)
+
+    def entry_capacity(self, symbol: str) -> bool:
+        """Count each owned open or unresolved entry once against the venue limits."""
+        if MAX_OPEN <= 0 and MAX_PER_GROUP <= 0:
+            return True
+        if MAX_OPEN > 0 and len(self.open) >= MAX_OPEN:
+            return False
+        target = self.group_of(symbol) if MAX_PER_GROUP > 0 else ""
+        grouped = self.group_count(target) if target else 0
+        if target and grouped >= MAX_PER_GROUP:
+            return False
+        intents = self.__dict__.get("exec_intents", {})
+        related = getattr(getattr(self, "relate", None), "pending", {})
+        uncertain = self.__dict__.get("unknown_entry", {})
+        if not (intents or related or uncertain):
+            return True
+        pending = {(r["symbol"], r["side"]) for r in tuple(intents.values())}
+        for r in tuple(related.values()):
+            owned = r.get("receipt", {}).get("identity", {})
+            if owned.get("symbol") and owned.get("side") in ("LONG", "SHORT"):
+                pending.add((owned["symbol"], owned["side"]))
+        now = time.time()
+        for key, stamp in tuple(uncertain.items()):
+            sym, _, side = key.rpartition(":")
+            if sym and side in ("LONG", "SHORT") and now - stamp < 180:
+                pending.add((sym, side))
+        untracked = [sym for sym, side in pending if self.tracked_position(sym, side) is None]
+        return ((MAX_OPEN <= 0 or len(self.open) + len(untracked) < MAX_OPEN)
+                and (not target or grouped + sum(self.group_of(s) == target for s in untracked) < MAX_PER_GROUP))
 
     def list_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         hit = self._oo_cache.get("*")
@@ -4136,7 +4159,7 @@ class Pulse:
         if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
         side = "LONG" if direction > 0 else "SHORT"
-        if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or self.occupying(sym, side):
+        if not self.entry_capacity(sym) or self.occupying(sym, side):
             return
         if any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
                for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
@@ -4147,8 +4170,6 @@ class Pulse:
             return
         if manual_rest_active(getattr(self, "manual_rest", {}), sym, side, time.time()):
             return              # closed by hand a moment ago: not the exact same position again (every other symbol and direction trades on)
-        if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
-            return
         pack = pack_of_reason(reason)
         skip = self.entry_sense(sym, direction, reason, conf, pack)
         if skip:
@@ -4437,19 +4458,24 @@ class Pulse:
             if exec_lane_id:
                 # Venue reads and sizing can span a scoring pass or a candle
                 # boundary. Reserve only the proof used by this order.
-                with self.sets._lock:
-                    stamp, admissions = self.sets.base_entries.get(sym, (0, {}))
-                    if (signal_at != math.floor(time.time() / 60) * 60
-                            or stamp != signal_at or set_id not in admissions
-                            or (admissions[set_id] or self.sets.hist_time_bars) != entry_hold
-                            or self.sets.sets.get(set_id) is not chosen or chosen.exec_grid is not decision
-                            or not self.sets.is_eligible(chosen)):
-                        return {"code": -2, "msg": "Exec qualification changed before submission"}
-                intents = self.__dict__.setdefault("exec_intents", {})
-                intents[order_cid] = {"id": exec_lane_id, "base": set_id, "symbol": sym, "side": side, "at": time.time(),
-                                       "pack": pack, "lane": lane}
-                if not self.write_exec_intents():
-                    intents.pop(order_cid, None)
+                with EXEC_INTENT_LOCK:
+                    with self.sets._lock:
+                        stamp, admissions = self.sets.base_entries.get(sym, (0, {}))
+                        if (signal_at != math.floor(time.time() / 60) * 60
+                                or stamp != signal_at or set_id not in admissions
+                                or (admissions[set_id] or self.sets.hist_time_bars) != entry_hold
+                                or self.sets.sets.get(set_id) is not chosen or chosen.exec_grid is not decision
+                                or not self.sets.is_eligible(chosen)):
+                            return {"code": -2, "msg": "Exec qualification changed before submission"}
+                        if not self.entry_capacity(sym) or self.occupying(sym, side):
+                            return {"code": -2, "msg": "Exec entry capacity or slot changed before submission"}
+                        intents = self.__dict__.setdefault("exec_intents", {})
+                        intents[order_cid] = {"id": exec_lane_id, "base": set_id, "symbol": sym, "side": side, "at": time.time(),
+                                              "pack": pack, "lane": lane}
+                    saved = self.write_exec_intents()
+                    if not saved:
+                        intents.pop(order_cid, None)
+                if not saved:
                     return {"code": -2, "msg": "Exec intent could not be persisted"}
             response = self.api.post("/openApi/swap/v2/trade/order", _entry_body(order_qty, order_cid))
             if exec_lane_id and not self.ok(response) and not response.get("error") and response.get("code") != -1:
@@ -5946,6 +5972,7 @@ class Pulse:
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
         self.coord.load(cts, ov)
         self.indications.load(ov)
+        ov.setdefault("fixedSlBands", {})
         self.sets.load(ov, cts)
         # live: a Set is valid only while its evaluation is at most two refresh intervals old (no sticky state)
         self.sets.fresh_s = 2.0 * self.sets.refresh_s

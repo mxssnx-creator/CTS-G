@@ -26,6 +26,8 @@ MIN_VALIDATION_N = 8         # no last-N validation reads fewer orders than this
 OVERALL_N_DEFAULT = 50       # the overall validation's last N (setGateWindow, the Base gate window)
 # One shipped policy is consumed by both the Python engine and settings UI.
 _PROTECTION_POLICY = json.loads(Path(__file__).with_name("protection-policy.json").read_text())
+DEFAULT_MAX_STOP_RATIO = _PROTECTION_POLICY["maxStopLossRatio"]
+FIXED_SL_BANDS = _PROTECTION_POLICY["fixedSlBands"]
 SL_TP_RATIOS = tuple(_PROTECTION_POLICY["slTpRatios"])
 SL_TP_MIN, SL_TP_MAX = SL_TP_RATIOS[0], SL_TP_RATIOS[-1]
 SL_TP_STEP = SL_TP_RATIOS[1] - SL_TP_RATIOS[0]
@@ -37,6 +39,14 @@ SL_RATIOS_ALL = SL_RATIOS
 MIN_SL_DISTANCE_PCT_DEFAULT = _PROTECTION_POLICY["minSlDistancePct"]["default"]
 
 
+def fixed_stop_max_ratio(value):
+    if value is None or (type(value) in (int, float) and value == 0):
+        return DEFAULT_MAX_STOP_RATIO  # older desks stored zero for their uncapped ratio grid
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 5:
+        raise ValueError("maxStopLossRatio must be positive and at most 5")
+    return float(value)
+
+
 def normalize_min_sl_distance_pct(value: Any = None) -> float:
     bounds = _PROTECTION_POLICY["minSlDistancePct"]
     return max(bounds["min"], min(bounds["max"], finite(value, bounds["default"])))
@@ -44,14 +54,14 @@ def normalize_min_sl_distance_pct(value: Any = None) -> float:
 # TP grid (base Sets), owner 2026-11-02: the step is an ABSOLUTE distance, TP = k x TP_UNIT_PCT of price with k = 2..32, i.e. 0.2 % .. 3.2 % in 0.1 %
 # steps. It was k x PositionCost (a distance that moves with the venue's fees); PositionCost still pays for every order and floors the TP (TP_MIN_COSTS).
 TP_UNIT_PCT = 0.1
-TP_STEP_MIN = 2
+TP_STEP_MIN = 1
 TP_STEP_MAX = 50                # the ceiling a setting can reach: 5.0 % (owner 2026-11-03: limits raised; was 32)
 TP_STEP_DEFAULT_MAX = 32        # the shipped grid's last step (3.2 %), unchanged
 TP_MIN_COSTS = 1.0              # a TP never sits under this many PositionCosts (was 2): the net at the TP stays positive
 # Named TP ranges (owner 2026-11-03: "Ranges Micro, Minimal, Short, Normal, Long, Wide"), each a band of TP steps switched on or off on its own
 # (overlay tpRanges {name: bool}). Micro .. Long cover the shipped grid 0.2 .. 3.2 %; Wide adds 3.3 .. 5.0 %. A switched-off range builds none of its Sets;
 # the other ranges' Sets are unchanged (every Set is its own step, lane and tape).
-TP_RANGES = (("micro", 2, 3), ("minimal", 4, 6), ("short", 7, 12), ("normal", 13, 20), ("long", 21, 32), ("wide", 33, 50))
+TP_RANGES = (("micro", 1, 3), ("minimal", 4, 6), ("short", 7, 12), ("normal", 13, 20), ("long", 21, 32), ("wide", 33, 50))
 TP_RANGES_DEFAULT = {"micro": True, "minimal": True, "short": True, "normal": True, "long": True, "wide": False}
 
 

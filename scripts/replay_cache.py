@@ -31,6 +31,7 @@ def fingerprint(data_dir, names, overlay, pulse_dir, stage_eval_path):
     # Only the enabled mode can affect collection. Its window counts and
     # signs filter the resulting tapes after collection, in every simulation.
     shadow_settings = {**settings, "stageLastN": True} if isinstance(grid, dict) and grid.get("enabled", True) else settings
+    shadow_settings = {k: v for k, v in shadow_settings.items() if k not in ("maxOpen", "maxPerGroup")}
     return {"version": 1,
             "markets": {name: file_sha(os.path.join(data_dir, name + ".json")) for name in names},
             # the profit group gate (groupGate*), the relation lanes (relationLanes) the lane order (laneOrder) the basis of the last-N windows (lastNBasis), the Block rounds (blockRounds) and the disjoint Axis rule (axisDisjoint, axisLastOutcome) act on the scoring or at entry time and change no tape:

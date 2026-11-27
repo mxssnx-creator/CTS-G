@@ -1,4 +1,5 @@
 {
+  "historicalStopModel": "sl-ratio",
   "stratIndications": false,
   "stratGeneral": false,
   "stratTrend": false,

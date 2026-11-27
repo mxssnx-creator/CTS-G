@@ -319,7 +319,7 @@
   "histWarmup": 30,
   "histRefreshS": 120,
   "setPfWindow": 8,
-  "setPriceDistanceGrid": false,
+  "setPriceDistanceGrid": true,
   "setPriceSlDistances": [
     0.2,
     0.3,
@@ -375,7 +375,128 @@
   "setMaxDdtHours": 24,
   "setGateWindow": 50,
   "setGateMinTrades": 12,
-  "stageLastN": {"enabled": true, "base": {"short": [4, 8, 12, 16], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "long": [10, 20, 30, 40, 50]}, "main": {"short": [4, 8, 12, 16], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}, "real": {"short": [4, 8, 12, 16, 20, 24, 28, 30], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}, "exec": {"short": [4, 8, 12, 16, 20, 24, 28, 30], "last": [1, 2, 3, 4, 5], "shortModes": ["positive", "negative"], "lastModes": ["positive", "negative"], "longModes": ["none", "inherit"]}},
+  "stageLastN": {
+    "enabled": true,
+    "base": {
+      "short": [
+        4,
+        8,
+        12,
+        16
+      ],
+      "last": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "shortModes": [
+        "positive",
+        "negative"
+      ],
+      "lastModes": [
+        "positive",
+        "negative"
+      ],
+      "long": [
+        10,
+        20,
+        30,
+        40,
+        50
+      ]
+    },
+    "main": {
+      "short": [
+        4,
+        8,
+        12,
+        16
+      ],
+      "last": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "shortModes": [
+        "positive",
+        "negative"
+      ],
+      "lastModes": [
+        "positive",
+        "negative"
+      ],
+      "longModes": [
+        "none",
+        "inherit"
+      ]
+    },
+    "real": {
+      "short": [
+        4,
+        8,
+        12,
+        16,
+        20,
+        24,
+        28,
+        30
+      ],
+      "last": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "shortModes": [
+        "positive",
+        "negative"
+      ],
+      "lastModes": [
+        "positive",
+        "negative"
+      ],
+      "longModes": [
+        "none",
+        "inherit"
+      ]
+    },
+    "exec": {
+      "short": [
+        4,
+        8,
+        12,
+        16,
+        20,
+        24,
+        28,
+        30
+      ],
+      "last": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "shortModes": [
+        "positive",
+        "negative"
+      ],
+      "lastModes": [
+        "positive",
+        "negative"
+      ],
+      "longModes": [
+        "none",
+        "inherit"
+      ]
+    }
+  },
   "stagesEnabled": true,
   "lastNDisjoint": false,
   "setGateShortMode": "positive",
@@ -432,7 +553,10 @@
   "minPfByRange": {
     "micro": 1.01
   },
-  "autoPfDefaultByRange": { "minimal": 1.24, "short": 1.42 },
+  "autoPfDefaultByRange": {
+    "minimal": 1.24,
+    "short": 1.42
+  },
   "rankByLane": true,
   "setScratchEnabled": false,
   "tpRanges": {
@@ -612,5 +736,38 @@
   "configGatePf": 1,
   "configGateHours": 24,
   "configGateMin": 1,
-  "gateRecovery": true
+  "gateRecovery": true,
+  "fixedSlBands": {
+    "short": [
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9,
+      1.0,
+      1.1,
+      1.2,
+      1.3,
+      1.4,
+      1.5,
+      1.6
+    ],
+    "long": [
+      0.4,
+      0.6,
+      0.8,
+      1.0,
+      1.2,
+      1.4,
+      1.6,
+      1.8,
+      2.0,
+      2.2,
+      2.4,
+      2.6
+    ]
+  }
 }
