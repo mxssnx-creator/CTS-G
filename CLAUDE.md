@@ -58,7 +58,7 @@
   shipped all four 1.000 / 127, 0.783 / 66; **prev 4 alone 1.227 / 121, 1.084 / 51** (prev 8 / 12 and cont 8 equal no Axis on sealed; cont 1 1.074, pause 4 0.970 dev / 1.420 sealed,
   last 1 / 2 0.864 / 0.953 sealed). **x02 now runs Axis prev 4 only** (`axisPrevMaxWindow` 4, last / cont / pause off; better than the shipped all-four on both windows and not
   worse than no Axis on either, 6 fewer orders on development). Block v2 on admitted parents 0.956 dev against 1.000 (unchanged). DCA (10 arms): none better than without
-  on both windows (best dev rung 0.8 x stop 1.055 / sealed 1.046 against 1.054 / 1.082); x02 keeps DCA on its Axis gate by the owner's "run always all".
+  on both windows (best dev rung 0.8 x stop 1.055 / sealed 1.046 against 1.054 / 1.082); x02 previously enabled DCA on its Axis gate. The November 27 fixed-stop study leaves funded Set and Axis DCA opt-in.
 - **2026-11-15 (latest), owner: "For all: use better working but also prioritize higher order amount."** Selection rule for every setting, indication, gate, Axis / Block /
   DCA arm and default: (1) the executed PF must be better than the current setting on development AND sealed; (2) among arms that pass, prefer the one with MORE
   executed orders (a higher PF on fewer orders is not preferred over a slightly lower PF on clearly more orders); a gain carried by a handful of orders is not shipped.
@@ -129,7 +129,7 @@
   (e) **Owner's expectation, recorded as asked ("note this for later and projects"):** only validated high-PF Sets should process, so the executed PF should be higher
   than the pool's. The measurements in this file (selection PF 1.7 - 25 against delivered 0.2 - 0.9; persistence sign flips between regimes) say it is not on these signals:
   a gate selects the end of a lucky stretch. Keep reporting executed PF next to the selection PF; do not read a higher gate as a higher executed PF.
-  (f) **"Run always all ... the evals decide" (x02 demo only):** DCA on behind its own Axis gate (`dcaEnabled`, `stratDca`, `dcaOnAxis` true, `dcaOnSets` false) and every
+  (f) **"Run always all ... the evals decide" (x02 demo only):** direct DCA evaluation enabled (`dcaEnabled` and `stratDca` true). The November 27 defaults require opt-in for funded Set or Axis DCA (`dcaOnAxis` and `dcaOnSets` false) and every
   pack's Exit Sets (`exitSetsByPack` {}); every pack, range, type and both directions already run. x01 and the Bybit overlays / presets keep the earlier values (checks
   `logistics.dca-off-by-default-...` and `grid.shipped-overlays-switch-off-the-indications-exit-sets` name x02 as the exception). Independence is pinned by
   `stages.every-config-set-is-independent-with-its-own-floor-and-execution-window` (40 other Sets turned to noise: the probe Sets' verdicts, windows, lane, execution

@@ -39,7 +39,7 @@
   "dcaEnabled": true,
   "dcaAuto": true,
   "dcaOnSets": false,
-  "dcaOnAxis": true,
+  "dcaOnAxis": false,
   "dcaMaxExposureX": 0,
   "symbols": [
     "*"
