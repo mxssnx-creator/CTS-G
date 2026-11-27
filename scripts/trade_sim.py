@@ -619,6 +619,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--direct-post-base"]:
+        if sys.argv[2:3] == ["walk-forward"]:
+            from direct_base.walk_forward import main as walk_forward
+            sys.exit(walk_forward(sys.argv[3:]))
         from direct_base.study import main as direct_study
         sys.exit(direct_study(sys.argv[2:]))
     sys.exit(main())

@@ -67,9 +67,7 @@ def init_workers(set_ids):
     SETS = [BOOK.sets[k] for k in set_ids]
 
 
-def raw_symbol(task):
-    import set_engine as se
-    path, symbol, index, manifest = task
+def candle_rows(path, symbol, manifest):
     raw = (Path(path) / (symbol+'.json')).read_bytes()
     if hashlib.sha256(raw).hexdigest() != manifest['sha256'][symbol]:
         raise ValueError(f"{symbol} candle hash mismatch")
@@ -83,9 +81,16 @@ def raw_symbol(task):
         if (t != ts or not all(map(math.isfinite, candle)) or not 0 < low <= min(o, c) <= max(o, c) <= h or vol < 0):
             raise ValueError(f"{symbol} invalid OHLCV at {ts}")
         bars.append([o, h, low, c, vol])
+    return bars
+
+
+def raw_symbol(task):
+    import set_engine as se
+    path, symbol, index, manifest = task
+    bars = candle_rows(path, symbol, manifest)
     packs = sorted({st.pack for st in SETS})
     warm = BOOK.warmup
-    signals = se.pack_signals(bars, packs, dict(BOOK.ind_settings, portedSymbol=symbol), clocks[0]/1000 + 60, warm)
+    signals = se.pack_signals(bars, packs, dict(BOOK.ind_settings, portedSymbol=symbol), manifest['start_ms']/1000 + 60, warm)
     directions = {p: [s[0] for s in signals[p]] for p in packs}
     confidence = {p: [s[1] for s in signals[p]] for p in packs}
     candidates = {p: [i for i in range(warm, len(bars)) if directions[p][i] and confidence[p][i] >= LANE_CFG['entry_conf']] for p in packs}
