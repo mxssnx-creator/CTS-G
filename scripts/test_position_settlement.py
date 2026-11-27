@@ -23,6 +23,31 @@ def sample():
 
 
 class Settlement(unittest.TestCase):
+    def test_dca_windows_recover_valid_shared_settings(self):
+        book = pt.DcaBook()
+        book.load_windows({"dcaPfWindow": "bad", "setPfWindow": 40, "dcaDeactN": float("inf")})
+        self.assertEqual((book.pf_n, book.deact_n), (40, 25))
+        book.load_windows({"dcaPfWindow": 2, "dcaDeactN": 120})
+        self.assertEqual((book.pf_n, book.deact_n), (5, 120))
+
+    def test_dca_bounce_reads_two_consecutive_completed_minutes_only(self):
+        from unittest.mock import patch
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        pulse.klines_tf, pulse.real_1m, pulse.bar_min = {"1m": {}}, {}, {}
+        symbol = "A-USDT"
+        def tick(minute, price):
+            pulse.px = {symbol: price}
+            with patch.object(pt.time, "time", return_value=minute * 60):
+                pulse.seed_px_bars()
+                return pulse.dca_bounce(symbol, "LONG"), pulse.dca_bounce(symbol, "SHORT")
+        self.assertEqual(tick(100, 99), (False, False))
+        self.assertEqual(tick(101, 100), (False, False))
+        self.assertEqual(tick(102, 70), (True, False))
+        self.assertEqual(tick(102, 75), (True, False))
+        self.assertEqual(tick(103, 150), (False, True))
+        self.assertEqual(tick(106, 160), (False, False))
+        self.assertEqual(tick(107, 170), (False, False))
+
     def test_position_snapshot_cannot_round_an_owned_fill_entry(self):
         sys.path.insert(0,str(Path(__file__).resolve().parent/'regression'))
         from trader import _isolated,_StubExchange,_enter
@@ -135,6 +160,27 @@ class Settlement(unittest.TestCase):
         pos.exec_lane_id = "qualified"
         pos.close_pending = {"t":1001}
         self.assertFalse(pulse.dca_eligible(pos))
+
+    def test_paid_dca_owner_survives_more_than_eighty_unrelated_closes_on_boot(self):
+        import json
+        sys.path.insert(0,str(Path(__file__).resolve().parent/'regression'))
+        from trader import _isolated, _StubExchange
+        def run():
+            mark = int(pt.time.time()) - 500
+            def close(i, dca):
+                return dict(t=mark+i, symbol="X-USDT", side="LONG", pnl=-1., pnl_pct=-.01, qty=1.,
+                    set_id="S", exec_lane_id="A" if dca else "B", entry=100., exit=99., reason="sl",
+                    client_id=pt.TAG+"o"+str(i), dca_gross_pct=-.01 if dca else None,
+                    dca_net_pct=-.011 if dca else None)
+            with open(pt.TRADES_PATH,"w") as f:
+                for i in range(98):
+                    f.write(json.dumps(close(i,i<12))+"\n")
+            p = pt.Pulse(_StubExchange(), {})
+            self.assertEqual(len(p.closed),80)
+            self.assertEqual(p.dca.score("A|X-USDT|LONG|pos")["count"],12)
+            self.assertFalse(p.dca.score("A|X-USDT|LONG|pos")["active"])
+            self.assertTrue(p.dca.score("B|X-USDT|LONG|pos")["active"])
+        _isolated(run)
 
     def test_direct_block_partial_fill_recovers_across_two_books(self):
         import tempfile

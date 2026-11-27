@@ -51,6 +51,8 @@ Each Set add rechecks its owning Exec path. Block and DCA persist the client ord
 
 Use an archived candle directory and the local matching simulator cache and receipts. The comparison verifies the candle hashes against the original run.
 
+At startup, DCA rebuilds each owner's evaluation window from eligible journal records, including trades older than the 80-row activity display. The bounce condition compares consecutive completed minutes for the same symbol. An intraminute tick or a gap cannot qualify a rung.
+
 ```sh
 python scripts/trade_sim.py --data "$CANDLE_DIR" --symbols 32 --last-hours 48 \
   --patch presets/fixed-stop-confluence-rsi-stage-study.json --refresh 0 --eval-every 3600 \

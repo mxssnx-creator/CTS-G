@@ -1226,6 +1226,8 @@ class Pulse:
         self.last_px: Dict[str, float] = {}
         self.recon_ok = True
         self.recon_detail = "pending"
+        self.dca = DcaBook()
+        self.dca.load_windows(load_json_file(OVERLAY_PATH) or {})
         self._load_trade_history()
         self._exec_boot()
         self._load_open_book()
@@ -1258,7 +1260,6 @@ class Pulse:
         self.relate = RelateBook(path=BLOCK_PATH + ".relate.json")
         self.coord = Coordinator()
         self.indications = IndicationBook()
-        self.dca = DcaBook()
         self.variants = VariantBook()
         self.sets = SetBook()
         self.exits = ExitBook()
@@ -2532,6 +2533,11 @@ class Pulse:
                 if rec:
                     if not hasattr(self, "last_closed_1m"):
                         self.last_closed_1m = {}
+                    previous = self.last_closed_1m.get(s)
+                    if previous and previous[0] != int(rec[0]):
+                        if not hasattr(self, "previous_closed_1m"):
+                            self.previous_closed_1m = {}
+                        self.previous_closed_1m[s] = previous
                     self.last_closed_1m[s] = (int(rec[0]), float(rec[4]))   # the minute that just completed and its close
                     bars = self.klines_tf["1m"].setdefault(s, [])
                     bars.append([rec[1], rec[2], rec[3], rec[4], 0.0])
@@ -5482,6 +5488,12 @@ class Pulse:
                             self._exec_stage_note(outcome, verified=known_price)
                         else:
                             self._exec_note(outcome)
+                            gross = number(rec.get("dca_gross_pct"))
+                            if cid and gross is not None and getattr(self, "dca", None) is not None:
+                                self.dca.on_close({"scope":self.dca_scope(outcome), "symbol":outcome.symbol,
+                                                   "side":outcome.side, "client_id":cid, "dca_n":1,
+                                                   "pnl_pct":gross, "net_pnl_pct":number(rec.get("dca_net_pct"))},
+                                                  restoring=True)
                     except (ValueError, TypeError, AttributeError):
                         continue
         except Exception:
@@ -5732,9 +5744,6 @@ class Pulse:
                 if c.conn and c.conn != CONN_SHORT:
                     continue
                 c.dca_gross_pct, c.dca_net_pct = rec.get("dca_gross_pct"), rec.get("dca_net_pct")
-                if c.dca_gross_pct is not None and c.client_id:
-                    self.dca.on_close({"scope":self.dca_scope(c), "symbol":c.symbol, "side":c.side, "client_id":c.client_id,
-                                       "dca_n":1, "pnl_pct":c.dca_gross_pct, "net_pnl_pct":c.dca_net_pct})
                 self.closed.append(c)
                 if cid:
                     self.seen_fill_cids.add(cid)
@@ -6542,6 +6551,14 @@ class Pulse:
             return bool(self.coord.judge(rows, self.coord.net_streak(rows), min_pf=self.set_axis_floor(st, lane))["allow"])
         return False
 
+    def dca_bounce(self, symbol: str, side: str) -> bool:
+        minute = int(time.time() // 60)
+        last = getattr(self, "last_closed_1m", {}).get(symbol)
+        previous = getattr(self, "previous_closed_1m", {}).get(symbol)
+        if not last or not previous or last[0] != minute - 1 or previous[0] != minute - 2:
+            return False
+        return last[1] > previous[1] if side == "LONG" else last[1] < previous[1]
+
     def maybe_dca_adds(self) -> None:
         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
         if not getattr(self.dca, "enabled", False) or self.halted:
@@ -6575,13 +6592,8 @@ class Pulse:
             if against and adv > max(sl_pct * 1.5, 0.012):
                 self.dca.skips += 1
                 continue
-            if self.dca.auto and self.dca.confirm_bounce:
-                closed = getattr(self, "last_closed_1m", {}).get(pos.symbol)
-                candles = getattr(self, "klines_tf", {}).get("1m", {}).get(pos.symbol, ())
-                if not closed or closed[0] != int(time.time() // 60) - 1 or len(candles) < 2:
-                    continue
-                if (candles[-1][3] - candles[-2][3]) * (1 if pos.side == "LONG" else -1) <= 0:
-                    continue
+            if self.dca.auto and self.dca.confirm_bounce and not self.dca_bounce(pos.symbol, pos.side):
+                continue
             lane = self.dca.restore_position(pos, sl_pct)
             seed = lane.parent_qty
             row = self.dca.due(pos.symbol, pos.side, seed, lane.ref_entry, px, sl_frac=sl_pct, scope=self.dca_scope(pos))

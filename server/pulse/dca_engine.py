@@ -178,11 +178,24 @@ class DcaBook:
         self.be_pct = be / 100.0   # dcaBreakevenProfitPct is percent
         cd_raw = ov.get("dcaCooldownSeconds", coord.get("dcaCooldownSeconds", cts.get("dcaCooldownSeconds", 30)))
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
-        self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
-        self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
+        self.load_windows(ov)
         self.min_pf = gate_min_pf(ov, "dcaMinPf", "minPf")
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
+
+    def load_windows(self, ov: Dict[str, Any]) -> None:
+        def window(own: str, shared: str, default: int, minimum: int) -> int:
+            for key in (own, shared):
+                try:
+                    value = int(ov.get(key))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if value > 0:
+                    return max(minimum, value)
+            return default
+
+        self.pf_n = window("dcaPfWindow", "setPfWindow", 15, 5)
+        self.deact_n = window("dcaDeactN", "setDeactN", 25, 10)
 
     def unlimited(self) -> bool:
         return int(self.max_steps or 0) <= 0
@@ -348,7 +361,7 @@ class DcaBook:
         lane.filled_n += 1
         self.emits += 1
 
-    def on_close(self, rec: Dict[str, Any]) -> None:
+    def on_close(self, rec: Dict[str, Any], *, restoring: bool = False) -> None:
         why = str(rec.get("reason") or "")
         cid = str(rec.get("client_id") or rec.get("clientId") or "")
         if not rec.get("dca_n") and "dca" not in why.lower() and not (len(cid) > 4 and cid[4:5] == "d"):
@@ -363,10 +376,10 @@ class DcaBook:
         self._scores.pop(scope, None)
         self._scores.pop("", None)
         self.closes.append(rec)
-        if len(self.closes) > 80:
-            self.closes = self.closes[-80:]
-        self.drop(str(rec.get("symbol") or ""), str(rec.get("side") or ""))
-        self.score()
+        del self.closes[:-max(80, self.pf_n, self.deact_n)]
+        if not restoring:
+            self.drop(str(rec.get("symbol") or ""), str(rec.get("side") or ""))
+            self.score()
 
     def snapshot(self) -> Dict[str, Any]:
         pc = self.score()
