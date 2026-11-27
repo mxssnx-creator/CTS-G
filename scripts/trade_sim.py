@@ -193,7 +193,7 @@ def tp_range_name(st):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(epilog="For the signed Base → execution experiment, use --direct-post-base --help.")
     ap.add_argument("--data", required=True)
     ap.add_argument("--cache", required=True)
     ap.add_argument("--symbols", type=int, default=20)
@@ -618,4 +618,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--direct-post-base"]:
+        from direct_base.study import main as direct_study
+        sys.exit(direct_study(sys.argv[2:]))
     sys.exit(main())

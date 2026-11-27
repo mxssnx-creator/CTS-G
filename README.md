@@ -94,3 +94,5 @@ node scripts/overall-test.mjs    # desk / results / system / settings
 npm run typecheck
 npm test
 ```
+
+The test branch includes a direct post-Base paper simulation with signed Short and Last windows. Run `python3 scripts/trade_sim.py --direct-post-base --help` for the replay options. The [study report and reproducible inputs](reports/direct-base-20261127/) include the full threshold matrix and chronological holdout.

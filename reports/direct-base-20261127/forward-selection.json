@@ -1,0 +1,38 @@
+{
+  "block": {
+    "set": "reversion:L:1m:sl0.75:st6",
+    "base": "S16-",
+    "baseFloor": 1.5,
+    "end": "S20+ T1+",
+    "endFloor": 2,
+    "axis": 0,
+    "block": 4
+  },
+  "axis": {
+    "set": "reversion:L:1m:sl0.75:st6",
+    "base": "L20+",
+    "baseFloor": 2.5,
+    "end": "T2-",
+    "endFloor": 2,
+    "axis": 3,
+    "block": 0
+  },
+  "both": {
+    "set": "reversion:S:1m:sl0.75:st6",
+    "base": "T3+",
+    "baseFloor": 1.5,
+    "end": "S12- T1+",
+    "endFloor": 2,
+    "axis": 2,
+    "block": 4
+  },
+  "plain": {
+    "set": "reversion:L:1m:sl0.75:st6",
+    "base": "S16-",
+    "baseFloor": 1.5,
+    "end": "S20+ T1+",
+    "endFloor": 2,
+    "axis": 0,
+    "block": 0
+  }
+}
