@@ -31,6 +31,16 @@ SMALL = {                                   # a small Set grid for checks that t
     "trailVariants": ["0.3:0.1"],
 }
 
+# The window-parity checks vary their stage gates over real fixed-stop Sets.
+# Two independent bands and the General/Indication packs cover that contract in every run.
+WINDOW_GRID = {
+    **SMALL, "fixedSlBands": {"short": [.3, .6], "long": [.4, .8]}, "axisSets": {"enabled": False},
+    "stratGeneral": True, "stratIndications": True, "stratShortRange": False,
+    "stratTrend": False, "stratBreakout": False, "stratReversion": False, "stratFlow": False,
+    "stratMulti": False, "stratSignals": False, "signalConfigs": [], "indicationConfigs": [],
+}
+
+
 
 class Skip(Exception):
     """The check cannot run in this environment."""
