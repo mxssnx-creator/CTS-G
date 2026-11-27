@@ -45,6 +45,8 @@ The grid covered four Axis settings, the shipped Block policy and six alternativ
 
 On a 60-close fixture with combined Axis rules enabled, the previous implementation took 14.77 ms per evaluation and the updated implementation took 1.75 ms. Both selected the same rule, volume and admission decision. These are medians of five batches of 20 calls on this machine. The updated kernel evaluates each distinct rule once per history prefix. DCA reuses the score for an unchanged owner and invalidates it on a confirmed close or a policy change.
 
+Across 10,000 newly constructed empty Sets, Python 3.12 allocated an average of 1,457 bytes per Set, down from 3,856 bytes. This measures Python allocations with shared geometry strings before market history arrives. Each Set still owns its mutable histories and reads older dictionary-based replay snapshots.
+
 ## Execution and reproduction
 
 Each Set add rechecks its owning Exec path. Block and DCA persist the client order identity before submission and use the venue’s confirmed cumulative fills, including partial quantities and fees. Repeated receipts and restarts preserve each leg’s quantity. The replay uses minute-close fills without a venue queue or lot-size simulation. The native settlement tests separately exercise acknowledgements, partial fills, restarts, foreign receipts and unchanged parent economics.

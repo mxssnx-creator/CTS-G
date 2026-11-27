@@ -23,7 +23,7 @@ from array import array
 from collections import defaultdict
 import threading
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import MISSING, asdict, dataclass, field, fields, replace
 from itertools import accumulate, islice, repeat
 from operator import le, neg
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -1427,8 +1427,13 @@ class SimTrade:
     source: str = "hist"
 
 
-@dataclass
-class SetState:
+class _SetExtensions:
+    """Keep a dictionary for optional caller fields while storing declared fields in slots."""
+    __slots__ = ("__dict__", "__weakref__")
+
+
+@dataclass(slots=True)
+class SetState(_SetExtensions):
     id: str
     pack: str
     tf: str
@@ -1545,6 +1550,21 @@ class SetState:
     score_before: bool = False      # decision-time paper windows exclude closes at this clock
     locked: bool = False
     source_n: int = 0
+
+    def __setstate__(self, state) -> None:
+        # Older replay snapshots stored every field in one dictionary.
+        if isinstance(state, tuple):
+            extra, declared = state
+            state = {**(extra or {}), **declared}
+        for key, value in state.items():
+            setattr(self, key, value)
+        for item in fields(self):
+            if item.name in state:
+                continue
+            if item.default is not MISSING:
+                setattr(self, item.name, item.default)
+            elif item.default_factory is not MISSING:
+                setattr(self, item.name, item.default_factory())
 
     def tape(self) -> List[Dict[str, Any]]:
         # A fill may execute the very same signal as a paper row. They are different
