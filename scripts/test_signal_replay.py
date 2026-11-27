@@ -77,8 +77,8 @@ class SignalContracts(unittest.TestCase):
         for source in SOURCES:
             for range_name in ("short", "medium"):
                 volumes = [1+i%7 for i in range(len(closes))]
-                full = states(closes, source, range_name, highs, lows, volumes)
-                for count in (20, 50, 123, 270): self.assertEqual(states(closes[:count], source, range_name, highs[:count], lows[:count], volumes[:count]), full[:count])
+                full = states(closes, source, range_name, highs, lows, volumes, closes)
+                for count in (20, 50, 123, 270): self.assertEqual(states(closes[:count], source, range_name, highs[:count], lows[:count], volumes[:count], closes[:count]), full[:count])
                 bars = [[T0+i*60000, x, x+1, x-1, x, 1] for i,x in enumerate(closes)]
                 prefix = onsets(bars[:300], source, range_name, 5)
                 self.assertEqual(prefix, {t:s for t,s in onsets(bars, source, range_name, 5).items() if t <= T0+300*60000})

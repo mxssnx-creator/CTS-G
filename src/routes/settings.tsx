@@ -1,3 +1,4 @@
+import { REVERSAL_TACTICS } from "../../shared/cts-reversal/reversal.ts";
 import { StageGridPanel, StageGridSettings } from "@/components/stage-grid";
 import execIndicationProfiles from "../../presets/exec-indication-profiles.json" with { type: "json" };
 import {VolumeRatioSliders} from "../../shared/cts-volume/sliders.tsx";
@@ -549,6 +550,13 @@ function SettingsPage() {
               title="Indications by range"
               hint="Each entry builds indications from library families x ranges x timeframes x relations; every name it makes is its own strategy with its own Sets and its own Base validation, with this entry's TP-step range, SL ratios, types and pause. Combinations the library does not know are dropped and listed below. A wide entry multiplies the Set count: keep ranges and steps narrow."
             >
+              <button type="button" className="mb-3 rounded border border-border px-3 py-2 text-sm"
+                onClick={() => patch("indicationConfigs", indicationConfigList([
+                  ...overlay.indicationConfigs.filter(entry => entry.label !== "Trend-Reversal"),
+                  { ...structuredClone(DEFAULT_INDICATION_CONFIG), label: "Trend-Reversal",
+                    families: REVERSAL_TACTICS.map(tactic => "trrev" + tactic.id), ranges: [6, 10, 16],
+                    timeframes: [1, 5], relations: [""], stepMin: 5, stepMax: 10, slRatios: [.6, 1, 1.5] },
+                ]))}>Add Trend-Reversal configurations</button>
               <IndicationConfigEditor
                 value={overlay.indicationConfigs}
                 onChange={(v) => patch("indicationConfigs", v)}

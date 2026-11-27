@@ -9,8 +9,11 @@ from __future__ import annotations
 import math
 from collections import deque
 
-SOURCES = ("ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian",
+from trend_reversal import SOURCES as REVERSAL_SOURCES, reversal_at, signal_period
+
+DEFAULT_SOURCES = ("ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian",
            "bb-bounce", "cci-reversal", "obv-trend")
+SOURCES = DEFAULT_SOURCES + REVERSAL_SOURCES
 RANGES = ("short", "medium")
 TIMEFRAMES = (1, 5, 15, 30)
 
@@ -19,6 +22,9 @@ def warmup_bars(source, range_name):
     """Minimum completed TF bars for the first possible nonzero source state."""
     if source not in SOURCES or range_name not in RANGES:
         raise ValueError("unsupported Signal source/range")
+    if source in REVERSAL_SOURCES:
+        period = signal_period(range_name)
+        return period * (2 if source.endswith(("pullback", "confluence")) else 1) + 2
     return {"ema-cross": (21, 55), "ema-trend": (26, 50),
             "macd-cross": (26, 35), "rsi-reversal": (8, 15),
             "rsi-momentum": (15, 22), "donchian": (11, 21), "bb-bounce": (20, 50),
@@ -97,9 +103,16 @@ def held(events, keep=6):
     return out
 
 
-def states(closes, source, range_name, highs=None, lows=None, volumes=None):
+def states(closes, source, range_name, highs=None, lows=None, volumes=None, opens=None):
     if source not in SOURCES or range_name not in RANGES:
         raise ValueError("unsupported Signal source/range")
+    if source in REVERSAL_SOURCES:
+        if any(col is None or len(col) != len(closes) for col in (opens, highs, lows, volumes)):
+            raise ValueError("Trend-Reversal needs all OHLCV columns")
+        rows = list(zip(opens, highs, lows, closes, volumes))
+        period = signal_period(range_name)
+        tactic = source.removeprefix("trend-reversal-")
+        return [reversal_at(rows, i, period, tactic) for i in range(len(rows))]
     if source == "bb-bounce":
         period = 20 if range_name == "short" else 50
         out = [0] * len(closes)
@@ -177,6 +190,6 @@ def states(closes, source, range_name, highs=None, lows=None, volumes=None):
 def onsets(rows, source, range_name, minutes):
     """Decision at a completed bar's end; a model fill can use the next 1m open."""
     bars = completed_bars(rows, minutes)
-    series = states([b[4] for b in bars], source, range_name, [b[2] for b in bars], [b[3] for b in bars], [b[5] for b in bars])
+    series = states([b[4] for b in bars], source, range_name, [b[2] for b in bars], [b[3] for b in bars], [b[5] for b in bars], [b[1] for b in bars])
     return {int(bars[i][0] + minutes * 60000): side for i, side in enumerate(series)
             if i > 0 and side and side != series[i - 1]}
