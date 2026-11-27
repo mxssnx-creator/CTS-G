@@ -2204,10 +2204,9 @@ def no_other_lane_touches_a_set_position():
         p.entries_blocked = lambda: False
         p.missing_controls = lambda _p: False
         p.score = lambda s_: (1 if pos.side == "LONG" else -1, "x", 0.9)
-        p.dca = types.SimpleNamespace(
-            enabled=True, lanes={}, key=lambda s_, side: f"{s_}:{side}", skips=0,
-            due=lambda *a, **k: seen.__setitem__("dca", seen["dca"] + 1) or None,
-            on_close=lambda *a, **k: None, drop=lambda *a, **k: None, attach=lambda *a, **k: None)
+        p.dca = pt.DcaBook()
+        p.dca.enabled = True
+        p.dca.due = lambda *a, **k: seen.__setitem__("dca", seen["dca"] + 1) or None
         p.dca_last_emit = 0.0
         p.dca_fail_cd = {}
         p.max_book_notional = lambda: 1e9
@@ -3738,9 +3737,9 @@ def a_dca_add_learns_the_venues_minimum_order():
         p.entries_blocked = lambda: False
         p.missing_controls = lambda _p: False
         p.dca_eligible = lambda _p: True
-        p.dca = types.SimpleNamespace(enabled=True, lanes={}, key=lambda s_, side: f"{s_}:{side}", skips=0, auto=False, max_expo=3.0,
-                                      due=lambda *a, **k: {"n": 1, "qty": 0.001, "mult": 1.0}, on_close=lambda *a, **k: None,
-                                      drop=lambda *a, **k: None, attach=lambda *a, **k: None)
+        p.dca = pt.DcaBook()
+        p.dca.enabled, p.dca.auto, p.dca.max_expo = True, False, 3.
+        p.dca.due = lambda *a, **k: {"n": 1, "qty": .001, "mult": 1.}
         p.dca_last_emit = 0.0
         p.dca_fail_cd = {}
         p.max_book_notional = lambda: 1e9

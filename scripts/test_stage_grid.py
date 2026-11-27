@@ -17,6 +17,7 @@ import pulse_trader as pt
 import set_engine as se
 import stage_grid as sg
 import auto_set_pf
+import replay_cache
 from indication_extra import (CTS_C_TECHNICAL, THIN_INDICATOR_SETTINGS, bollinger_reclaim, keltner_cross,
                               resolve, rsi_trend_reclaim, sar_retest, sar_signal, sar_state)
 from stage_eval import AutoFloors, execute, gate_metrics, grid_at, relation_rows
@@ -80,6 +81,76 @@ def plain(grid, rows, now, lookback, floor):
 
 
 class StageGridTest(unittest.TestCase):
+    def test_trade_cache_shares_only_stage_window_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "BTC.json").write_text("[]")
+            engine = root / "engine"
+            engine.mkdir()
+            source = engine / "sim.py"
+            source.write_text("")
+            def fingerprint(windows, cost=.11, **limits):
+                return replay_cache.fingerprint(directory, ["BTC"], {"stageLastN": windows, "cost": cost, **limits},
+                                                str(engine), str(source))
+            first = fingerprint({"base": {"last": [1]}})
+            second = fingerprint({"base": {"last": [2]}})
+            cache = str(root / "cache.gz")
+            replay_cache.save(cache, {"BTC": [1]}, first)
+            self.assertNotEqual(first["settings"], second["settings"])
+            self.assertEqual(replay_cache.load(cache, second), {"BTC": [1]})
+            capped = fingerprint({"base": {"last": [1]}}, maxOpen=2, maxPerGroup=1)
+            self.assertNotEqual(first["settings"], capped["settings"])
+            self.assertEqual(replay_cache.load(cache, capped), {"BTC": [1]})
+            for other in (fingerprint(False), fingerprint({}, .22)):
+                with self.assertRaises(ValueError):
+                    replay_cache.load(cache, other)
+
+    def test_fresh_bar_wakes_history_once_and_only_fetches_missing_symbols(self):
+        pulse = pt.Pulse.__new__(pt.Pulse)
+        book = pulse.sets = se.SetBook()
+        book.load({"stageLastN": {}, "histEnabled": True})
+        pulse.open = {}
+        symbols = ["AAA", "BBB", "CCC", "DDD"]
+        book.bars = {s: [[100, 101, 99, 100, 5]] * book.min_bars for s in symbols}
+        book.bar_t = {s: 540 for s in symbols}
+        book.bar_t["CCC"] = 480
+        book.progress.ready, book._lookback_pending = True, False
+        with patch.object(pt, "SYMBOLS", symbols), patch.object(pt.time, "time", return_value=603), \
+                patch.object(book, "due", return_value=False), patch.object(book, "replay_all") as replay, \
+                patch.object(pulse, "_budget", return_value=SimpleNamespace(scan_chunk=False, hist_run=True)), \
+                patch.object(pulse, "_hist_fetch", return_value={"CCC"}) as fetch:
+            pulse._hist_tick()
+            pulse._hist_tick()
+            fetch.assert_called_once_with(["CCC"])
+            self.assertEqual(replay.call_count, 1)
+            self.assertEqual(replay.call_args.kwargs["symbols"], symbols)
+
+    def test_native_replay_publishes_only_the_latest_actual_base_entry(self):
+        book = se.SetBook()
+        book.load({"stageLastN": {}, "histEnabled": True, "histMinBars": 60, "histLookbackBars": 120,
+                   "setMinStep": 4, "setStepMax": 4, "setSlRatios": [1], "directionMode": "both",
+                   "stratIndications": False, "stratTrailing": False, "exitSets": False})
+        st = book.by_idx[0]
+        symbol, now = "BTC-USDT", 180000
+        bars = [[100, 100.01, 99.99, 100, 100] for _ in range(120)]
+        for previous, expected in ((1, True), (2, False)):
+            book.ingest_bars(symbol, bars, last_t=now-60)
+            count = len(book.bars[symbol])
+            self.assertEqual(count, 120 if expected else 121)
+            signals = {p: [(1, .99) if i >= count - previous else (0, 0) for i in range(count)] for p in book.packs}
+            with patch.object(se, "pack_signals", return_value=signals):
+                book.replay_all(now=now)
+            stamp, admissions = book.base_entries[symbol]
+            self.assertEqual(stamp, now)
+            self.assertEqual(st.id in admissions, expected)
+            now += 60
+
+        corrected = [[100, 100.01, 99.99, 100, 5]]
+        book.ingest_bars(symbol, corrected, last_t=now-180)
+        self.assertEqual(book.bar_t[symbol], now-120)
+        self.assertEqual(book.bars[symbol][-2][4], 5)
+        self.assertEqual(len(book.bars[symbol]), 121)
+
     def test_dated_replay_and_stage_scores_only_repeat_changed_work(self):
         window = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
         book = se.SetBook()
@@ -250,12 +321,29 @@ class StageGridTest(unittest.TestCase):
         book.load(changed)  # A routine reload must leave the fixed-window rebuild pending.
         self.assertTrue(book._lookback_pending)
         book.replay_all(now=now, symbols=names[1:], expected_symbols=names)
-        self.assertFalse(book.progress.ready)
-        book.replay_all(now=now, symbols=names[:1], expected_symbols=names)
         self.assertTrue(book.progress.ready)
         self.assertFalse(book._lookback_pending)
         self.assertEqual(st.n, 80)
         self.assertTrue(st.exec_grid.ready)
+
+    def test_changing_only_stage_windows_revokes_proof_and_reuses_raw_history(self):
+        book = se.SetBook()
+        policy = {"stageLastN": {}, "stratTrailing": False, "setMinStep": 4, "setStepMax": 4}
+        book.load(policy)
+        st = book.by_idx[0]
+        raw = {"unrelated": se.RowCols([])}
+        book._hist_rows["TEST"] = raw
+        original = book._topo_gen
+        st.exec_grid = object()
+        with patch.object(book, "_load", wraps=book._load) as rebuild:
+            book.load(policy)
+            self.assertIsNotNone(st.exec_grid)
+            book.load({**policy, "stageLastN": {"exec": {"short": [4, 30], "last": [2]}}})
+            self.assertIsNone(st.exec_grid)
+            self.assertFalse(book.progress.ready)
+            self.assertIs(book._hist_rows["TEST"], raw)
+            self.assertEqual(original, book._topo_gen)
+            rebuild.assert_not_called()
 
     def test_auto_pf_refits_when_late_training_closes_arrive(self):
         book = se.SetBook()
@@ -375,7 +463,7 @@ class StageGridTest(unittest.TestCase):
             rows = execute(book, names, bars, times, shadow, tapes, [hour], refresh_s=0, include_open=True)
         evaluated = [(call.args[2].idx, call.args[3]) for call in gates.call_args_list]
         self.assertEqual(evaluated, [(st.idx, hour + 60) for st in book.by_idx]
-                         + [(st.idx, hour + 120) for st in book.by_idx if st.pack == active])
+                         + [(st.idx, hour + 120) for st in book.by_idx if st.pack == active and st.side in (0, 1)])
         self.assertEqual({row["symbol"] for row in rows if "symbol" in row}, set(names))
 
     def test_replay_position_cap_counts_open_slots_and_releases_closed_ones(self):
@@ -387,7 +475,7 @@ class StageGridTest(unittest.TestCase):
                    "stratIndications": False, "stratTrailing": False, "exitSets": False,
                    "setSlRatios": [1.0], "directionMode": "both", "timeStopS": 3600})
         st = book.by_idx[0]
-        now, names = 200 * 3600, ["AAA-USDT", "BBB-USDT"]
+        now, names = 200 * 3600, ["SOL-USDT", "XRP-USDT"]
         history = [now - 60*i for i in range(90, 0, -1)]
         tapes = SimpleNamespace(by_set={st.idx: (history, [t-30 for t in history], [.02]*len(history))},
                                 cf=se.cost_as_frac(book.cost_pct))
@@ -395,17 +483,97 @@ class StageGridTest(unittest.TestCase):
         times = {s: [now + 60*i for i in range(8)] for s in names}
         shadow = {s: (0, {st.pack: [1,0,0,0,1,0,0,0]}, {st.pack: [.9]*8}, {}) for s in names}
 
-        def replay(cap):
-            return [r for r in execute(book, names, bars, times, shadow, tapes, [now],
-                                       include_open=True, max_open=cap) if 'symbol' in r]
+        def replay(cap=None, markets=names, group=None):
+            return [r for r in execute(book, markets, bars, times, shadow, tapes, [now],
+                                       include_open=True, max_open=cap, max_per_group=group) if 'symbol' in r]
 
         self.assertEqual({r['symbol'] for r in replay(0)}, set(names))
         self.assertEqual([(r['symbol'],r['open_at_end']) for r in replay(1)], [(names[0],True)])
+        for data in (bars, times, shadow):
+            data["DOGE-USDT"] = data[names[1]]
+        markets = [*names, "DOGE-USDT"]
+        with patch.dict(book.processing_overlay, {"maxOpen": 2, "maxPerGroup": 1}):
+            self.assertEqual([r["symbol"] for r in replay(markets=markets)], ["SOL-USDT", "DOGE-USDT"])
+            self.assertEqual([r["symbol"] for r in replay(1, markets)], ["SOL-USDT"])
+            self.assertEqual([r["symbol"] for r in replay(0, markets, 0)], markets)
         bars[names[0]][2] = [100, 102, 99.9, 101]
         shadow[names[0]][1][st.pack][4]=0
         final = replay(1)
+        # The other slot missed its first Base entry while capacity was
+        # occupied. A repeat during that still-open Base trade cannot fund it.
+        self.assertEqual([r['symbol'] for r in final], names[:1])
+        bars[names[1]][2] = [100, 102, 99.9, 101]
+        book.cooldown_bars = 0
+        final = replay(1)
         self.assertEqual([r['symbol'] for r in final], names)
+        self.assertEqual([r['symbol'] for r in replay(0, group=1)], names)
         self.assertLess(final[0]['t'], final[1]['t_in'])
+
+    def test_fixed_stops_are_owned_by_distance_band_and_direction(self):
+        options = dict(fixedSlBands={}, minSlDistancePct=.1, positionCostPct=.01, setMinStep=1,
+                       setStepMax=50, tpRanges={"wide": True}, stratIndications=False, stratTrailing=False,
+                       stratGeneral=True, tpStepMin=0, directionMode="split")
+        book = se.SetBook()
+        book.load(options)
+        roots = [s for s in book.by_idx if s.pack == "general" and s.kind == "base"]
+        side = roots[0].side
+        for step in range(1, 51):
+            cells = [s for s in roots if s.step == step and s.side == side]
+            expected = {(band, sl) for band, row in se.FIXED_SL_BANDS.items()
+                        if round(row["tpMinPct"] * 10) <= step <= round(row["tpMaxPct"] * 10)
+                        for sl in row["stopPcts"] if sl <= step / 10 * 2.5 + 1e-10}
+            self.assertEqual({(s.price_sl_band, s.price_sl_pct) for s in cells}, expected)
+            self.assertEqual(len({s.id for s in cells}), len(expected))
+            for st in cells:
+                self.assertAlmostEqual(book.lane_fracs(st)[0], st.price_sl_pct / 100)
+                self.assertAlmostEqual(se.SetLane(st, "SOL-USDT").sl_base, st.price_sl_pct / 100)
+        keep = next(s for s in roots if s.step == 12 and s.price_sl_pct == .8 and s.price_sl_band == "short")
+        book.load({**options, "fixedSlBands": {"short": [.8], "long": []}})
+        self.assertIs(book.sets[keep.id], keep)
+        with self.assertRaises(ValueError):
+            book.load({**options, "fixedSlBands": {"long": [.5]}})
+        self.assertIs(book.sets[keep.id], keep)
+
+    def test_fixed_ratio_ceiling_filters_every_kind_before_admission(self):
+        settings = dict(fixedSlBands={}, setMinStep=4, setStepMax=16, stratGeneral=True,
+                        directionMode="split", exitSets=True, stratExit=True, stratTrailing=True,
+                        stratNormal=True, positionCostPct=.01, minSlDistancePct=.1, trailMinSteps=1, trailMinStep=2,
+                        setPriceTrailGaps=[.2], trailVariants=["0.4:0.2","1.2:0.2"])
+        book = se.SetBook()
+        book.load(settings)
+        self.assertEqual(book.sl_max_ratio, 2.5)
+        for honor in (True, False):
+            for cap in (2.5, 1, .5):
+                book.load({**settings, "maxStopLossRatio":cap, "setHonorTp":honor})
+                roots = [s for s in book.by_idx if s.pack == "general"]
+                self.assertEqual({s.kind for s in roots}, {"base","exit","trail"})
+                for st in roots:
+                    tp = st.trail_arm if st.kind == "trail" and not book.hist_honor_tp else st.tp_pct * 100
+                    sl, _ = book.lane_fracs(st)
+                    self.assertLessEqual(100 * sl, cap * tp + 1e-10)
+                boundary = [s for s in roots if s.kind == "base" and s.step == 4]
+                self.assertEqual(max(s.price_sl_pct for s in boundary), .4 * cap)
+        kept = tuple(s.id for s in book.by_idx)
+        for invalid in (-1, 6, True, "bad", float("nan")):
+            with self.assertRaises(ValueError):
+                book.load({**settings, "maxStopLossRatio":invalid})
+            self.assertEqual(kept, tuple(s.id for s in book.by_idx))
+        book.load(settings, {"coordinationSettings":{"maxStopLossRatio":.75}})
+        self.assertEqual(book.sl_max_ratio, .75)
+
+    def test_capacity_reserves_one_slot_per_unresolved_owned_exposure(self):
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.open = {"SOL-USDT:LONG": SimpleNamespace(symbol="SOL-USDT", side="LONG")}
+        p.exec_intents = {"a": {"symbol": "XRP-USDT", "side": "SHORT"},
+                          "b": {"symbol": "SOL-USDT", "side": "LONG"}}
+        p.relate = SimpleNamespace(pending={"a": {"receipt": {"identity": p.exec_intents["a"]}}})
+        p.unknown_entry = {"XRP-USDT:SHORT": 990, "ADA-USDT:LONG": 700}
+        with patch.object(pt.time, "time", return_value=1000), patch.object(pt, "MAX_OPEN", 3), patch.object(pt, "MAX_PER_GROUP", 2):
+            self.assertFalse(p.entry_capacity("ETC-USDT"))
+            self.assertTrue(p.entry_capacity("DOGE-USDT"))
+            p.unknown_entry["ADA-USDT:LONG"] = 999
+            self.assertFalse(p.entry_capacity("DOGE-USDT"))
+        self.assertEqual(p.group_of("UNMAPPED-USDT"), pt.symbol_group("UNMAPPED-USDT"))
 
     def test_auto_pf_independence_and_strict_boundaries(self):
         early = 72 * 3600
@@ -765,6 +933,14 @@ class StageGridTest(unittest.TestCase):
                 self.assertAlmostEqual(tally.gain, gain)
                 self.assertAlmostEqual(tally.loss, loss)
             self.assertEqual(got.ready, any(len(k) == 4 for k in paths))
+            for depth, tally in enumerate(got.counts):
+                actual = [got.lanes.path_at(depth, offset) for offset in range(tally.qualified)]
+                self.assertEqual(set(actual), {path for path in paths if len(path) == depth + 1})
+                self.assertEqual(len(actual), len(set(actual)))
+                if actual:
+                    for path in (actual[0], actual[-1]):
+                        self.assertTrue(got.lanes.contains(path))
+                        self.assertEqual(got.path_orders(path, 3), paths[path][-3:])
             if got.path:
                 self.assertEqual(got.streams, tuple(paths[got.path[:i]] for i in range(1, len(got.path) + 1)))
                 for w, total, blocks in zip(got.path, got.selected_evidence, got.selected_blocks):
@@ -801,6 +977,25 @@ class StageGridTest(unittest.TestCase):
         self.assertEqual(report["parentIds"]["exec"], report["setIds"]["real"])
         self.assertTrue(all(report["selectedBlocks"][stage]["last"]["orders"] for stage in sg.STAGES))
         self.assertGreater(short_output.validated_base.count, len(short_output.row_ids[0]))
+
+    def test_funded_gate_uses_only_earlier_settled_receipts_of_the_exact_slot_and_lane(self):
+        rule = {"short": [4], "last": [1], "shortModes": ["positive"], "lastModes": ["positive"]}
+        grid = sg.StageGrid.from_settings({"base": {**rule, "long": [10]},
+            **{s: {**rule, "longModes": ["none"]} for s in sg.STAGES[1:]}})
+        history = sg.StageHistory(grid, range(120), [i - .5 for i in range(120)], [.1] * 120, 200, lambda _: 1.1)
+        decision = history.evaluate(120)
+        ledger = sg.SettledLanes()
+        path = decision.entry_path("BTC", 1, 120, "set", ledger)
+        self.assertTrue(path)
+        identity = sg.lane_id("set", path)
+        for close in (116, 117, 119, 118, 120):
+            ledger.record("BTC", 1, identity, close, -.1, 200, str(close))
+            ledger.record("BTC", 1, identity, close, 1., 200, str(close))
+        self.assertEqual(len(ledger.slots["BTC", 1][identity]), 5)
+        self.assertEqual(decision.entry_path("BTC", 1, 120, "set", ledger), path)
+        self.assertFalse(decision.entry_path("BTC", 1, 121, "set", ledger))
+        for symbol, side, root in (("ETH", 1, "set"), ("BTC", -1, "set"), ("BTC", 1, "sibling")):
+            self.assertEqual(decision.entry_path(symbol, side, 121, root, ledger), path)
 
     def test_native_and_replay_relations_read_every_qualified_base_lane_once(self):
         book = se.SetBook()
@@ -1016,11 +1211,13 @@ class StageGridTest(unittest.TestCase):
         pulse.cooldown[pulse.position_key(symbols[0], "LONG")] = 1000
         signals = [("scoped", 1, .9, "test"), ("general", 1, .8, "test"), ("general", -1, .7, "test")]
         pulse._entry_sig = {symbol: (540, signals) for symbol in symbols}
+        book.base_entries = {symbol: (600, {"root": 8}) for symbol in symbols}
+        book.base_entries[symbols[2]] = (540, {"root": 8})
         with patch.object(pt, "SYMBOLS", symbols), patch.object(book, "entry_signals_pending", return_value=False), \
                 patch.object(book, "symbol_allows", side_effect=lambda pack, sym: pack != "scoped" or sym == symbols[-1]), \
-                patch.object(pulse, "_scope_choice", return_value=(object(), "pos", "")) as pick:
+                patch.object(pulse, "grid_entry_choice", return_value=(object(), ())) as pick:
             candidates = pulse.set_entry_candidates(now=610)
-        self.assertEqual(len(candidates), 399)
+        self.assertEqual(len(candidates), 397)
         self.assertEqual(pick.call_count, 3)
         self.assertIn("set:scoped:", candidates[pulse.position_key(symbols[-1], "LONG")][3])
         self.assertIn("set:general:", candidates[pulse.position_key(symbols[1], "LONG")][3])

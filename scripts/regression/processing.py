@@ -909,11 +909,11 @@ def sim_gate_equals_the_engine_for_every_window_configuration():
     import sys as _sys
     _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", ""))
     import stage_eval as sg
-    from common import SMALL, T0, synth_bars
+    from common import WINDOW_GRID, T0, synth_bars
     names = ["S0-USDT", "S1-USDT"]
     bars = {s_: synth_bars(21 + i, 1100, drift=0.0006 if i % 2 == 0 else -0.0006, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
-    base_patch = {**SMALL, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+    base_patch = {**WINDOW_GRID, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
                   "setGateWindow": 20, "setGateShortN": 8, "mainGateN": 8, "mainShortWindows": [4], "realGateN": 4, "setMaxDdtHours": 36, "setGateMinTrades": 0}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")
     try:

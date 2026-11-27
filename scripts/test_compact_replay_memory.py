@@ -12,6 +12,23 @@ from compact_replay_memory import CompactMemory
 
 
 class PackedEvidence(unittest.TestCase):
+    def test_legacy_and_current_set_state_round_trip(self):
+        import pickle
+        from dataclasses import asdict
+        state = sg.se.SetState("a","general","1m",.5,"",0.,0.)
+        state.hist.append({"t": 1.0})
+        state.custom = "extra"
+        archived = {**asdict(state), "custom": state.custom}
+        del archived["price_sl_band"], archived["held_exec_evidence"]
+        restored = sg.se.SetState.__new__(sg.se.SetState)
+        restored.__setstate__(archived)
+        self.assertEqual(asdict(restored), asdict(state))
+        again = pickle.loads(pickle.dumps(restored))
+        self.assertEqual(asdict(again), asdict(state))
+        self.assertEqual(again.custom, state.custom)
+        again.hist.clear()
+        self.assertEqual(state.hist, [{"t": 1.0}])
+
     def test_prefixes_and_hourly_learning_equal_native_without_object_copies(self):
         book=sg.se.SetBook();book.load(overlay(**{**SMALL,'holdAuto':False,'minPfByStep':True,'minPfStepAuto':True,'minPfStepAutoN':10}))
         book.by_idx=book.by_idx[:8];book.lookback=120

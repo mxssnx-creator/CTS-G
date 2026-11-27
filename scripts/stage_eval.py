@@ -44,7 +44,8 @@ sys.path.insert(0, PULSE)
 import set_engine as se  # noqa: E402
 import auto_set_pf  # noqa: E402
 from position_cost import cost_as_frac, signed_result_r
-from stage_grid import GridResult, lane_id, STAGES  # noqa: E402
+from exposure_limits import symbol_group
+from stage_grid import GridResult, SettledLanes, lane_id, STAGES  # noqa: E402
 
 OVERLAY = os.path.join(PULSE, "overlay-bingx-x01.json")
 
@@ -67,6 +68,8 @@ def replay_overlay():
     ov = json.load(open(OVERLAY))
     patch = json.loads(os.environ.get("STAGE_OVERLAY_PATCH") or "{}")
     ov.update(patch)
+    if patch.get("historicalStopModel") == "sl-ratio":
+        ov.pop("fixedSlBands", None)
     schedule = FeeSchedule()
     contracts, now = {}, 0
     snapshot_path = os.environ.get("STAGE_FEE_SNAPSHOT")
@@ -134,6 +137,7 @@ def _symbol_job(args):
     cfg = lane_cfg(b)
     acc = se.BarIndex(bars)
     out = {}
+    open_entries = {}
     cands = {p: [i for i in range(warm, len(bars)) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]] for p in b.packs}
     cand_side = b._cand_by_side(cands, dirs)
     # the rest after a winning close (overlay pauseMode / pausePack): the engine's own plan, chosen only from earlier results
@@ -145,6 +149,8 @@ def _symbol_job(args):
         lane = se.SetLane(st, s)
         sel_pause = b._lane_pause(lane, st.pack, plan, st.side)
         trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
+        if lane.open is not None:
+            open_entries[st.idx] = lane.open["i"]
         ent = array("i", (t["entry_i"] for t in trades))
         ex = array("i", (t["exit_i"] for t in trades))
         pp = array("d", (t["pnl_pct"] for t in trades))
@@ -153,6 +159,7 @@ def _symbol_job(args):
     for key, (fixed, fn) in plan.items():
         pauses[key] = array("H", (min(65535, int(fn(i))) for i in range(len(bars)))) if fn is not None else array("H", [min(65535, int(fixed))] * len(bars))
     out[-1] = pauses            # (pack, side) -> the pause (minutes) the plan chooses at each exit bar: what an executed win waits
+    out[-2] = open_entries      # A Base entry exists even if its exit is beyond the available candles.
     return s, warm, dirs, confs, out
 
 
@@ -220,10 +227,19 @@ def build_hold_auto(names, bars, times, shadow):
         book.bar_t[s] = times[s][-1]
     now = max(times[s][-1] for s in names) + 60.0
     book.replay_all(now=now)
-    out = {s: dict(shadow[s][3]) for s in names}
+    out = {s: {**shadow[s][3], -2: dict(shadow[s][3].get(-2, {})), -3: {}} for s in names}
     for st in book.by_idx:
         base = book._tape_rows(st.id, names, float("-inf"))
-        rows = book._choose_hold(st, base, names, float("-inf")) if book.auto_holds(st) else base
+        rows = base
+        if book.auto_holds(st):
+            open_entries = {}
+            holds = {s: {} for s in names}
+            rows = book._choose_hold(st, base, names, float("-inf"), open_entries=open_entries, entry_holds=holds)
+            for s in names:
+                out[s][-2].pop(st.idx, None)
+                if s in open_entries:
+                    out[s][-2][st.idx] = open_entries[s]
+                out[s][-3][st.idx] = holds[s]
         per: Dict[str, Tuple[List[int], List[int], List[float]]] = {s: ([], [], []) for s in names}
         for r in rows:
             s = r[1]
@@ -586,7 +602,11 @@ def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[flo
 def lane_stream_entries(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float, float]]:
     """lane_stream with each order's entry time: (exit t, entry t, net), oldest exit first."""
     if getattr(book, "stage_grid", None):
-        streams = grid_at(book, tapes, st, now).streams
+        result = grid_at(book, tapes, st, now)
+        if lane not in ("pos", "neg"):
+            path = book.stage_grid.path(st.id, lane)
+            return list(result.path_orders(path[:-1], se.PROC_KEEP)) if path else []
+        streams = result.streams
         return list(streams[2]) if lane == "pos" and len(streams) > 2 else []
     lb = evidence_s(book)
     tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
@@ -843,7 +863,7 @@ class AutoFloors:
         if getattr(self, "_sl_sets", None) is None:
             rows = []
             for st in book.by_idx:
-                if st.kind == "trail":
+                if st.kind == "trail" or st.price_sl_pct:
                     continue
                 tx, te, pp = tapes.by_set[st.idx]
                 symbols = getattr(tapes, "symbols_by_set", {}).get(st.idx) or (f"unknown:{st.id}",) * len(tx)
@@ -945,10 +965,18 @@ class AutoFloors:
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
             refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None,
-            candidate_filter=None, max_open: int = 0) -> List[Dict[str, Any]]:
+            candidate_filter=None, max_open: int | None = None, max_per_group: int | None = None) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
-    this often inside the hour (the live engine refreshes every histRefreshS, 120 s). max_open mirrors a venue session's position cap."""
+    this often inside the hour in legacy mode. Capacity follows the loaded session unless explicitly overridden."""
+    overlay = getattr(book, "processing_overlay", {})
+    if max_open is None:
+        max_open = int(overlay.get("maxOpen") or 0)
+    if max_per_group is None:
+        max_per_group = int(overlay.get("maxPerGroup") or 0)
+    capped = max_open > 0 or max_per_group > 0
+    symbol_groups = {s: symbol_group(s) for s in names} if max_per_group > 0 else {}
+    group_open = dict.fromkeys(symbol_groups.values(), 0)
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -956,6 +984,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     grid_enabled = bool(getattr(book, "stage_grid", None))
     axis_sizing = None
     if grid_enabled:
+        # The reporting cadence never delays qualification of a new signal.
+        refresh_s = 0
         axis_sizing, axis_pick, axis_coord = axis_pick, None, None
     sequences = {}
     for pack in book.packs:
@@ -967,6 +997,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             sequences[pack] = [(lane, kinds) for lane in getattr(book, "lane_order", ("pos", "neg"))
                                for kinds in (("base", "exit"), ("trail",))]
     busy = {} if grid_enabled else {s: -1 for s in names}
+    settlements = SettledLanes() if grid_enabled else None
+    pending_settlements = []
     executed: List[Dict[str, Any]] = []
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
     cf = cost_as_frac(book.cost_pct)
@@ -976,7 +1008,13 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it
     axis_cache: Dict[Tuple[int, str], Any] = {}
     opened: List[Tuple[float, str, str]] = []           # (exit t, Set id, lane) of executed positions: the Axis continuation cap counts the open ones
-    active_ends: List[float] = []
+    active_ends: List[Tuple[float, str]] = []
+
+    def reserve(symbol, end_time):
+        group = symbol_groups.get(symbol, "")
+        heappush(active_ends, (end_time, group))
+        if group:
+            group_open[group] += 1
     # the profit group gate (SetBook.group_gate, owner 2026-11-06): a group (pack x kind x TP range x lane) opens only while the newest groupGateN net results it executed inside
     # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
     gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if not grid_enabled and getattr(book, "group_gate", False) else None
@@ -1011,6 +1049,34 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     for st in eligible_sets:
         sets_by_pack.setdefault(st.pack, []).append(st)
 
+    legacy_entries = {}
+    def base_entered(st, symbol, i):
+        warm, directions, confidences, rows = shadow[symbol]
+        if -2 in rows:
+            if rows[-2].get(st.idx) == i:
+                return True
+            entries = rows[st.idx][0]
+        else:
+            # Adapters/old in-memory tapes may omit the unfinished Base
+            # position. Reconstruct it from signals, without requiring a close.
+            key = symbol, st.idx
+            if key not in legacy_entries:
+                ds, cs = directions[st.pack], confidences[st.pack]
+                bars_ = bars[symbol]
+                signals = [j for j in range(warm, len(bars_)) if ds[j] and (not st.side or ds[j] == st.side)
+                           and cs[j] >= cfg["entry_conf"]]
+                pause = rows.get(-1, {}).get((st.pack, st.side))
+                lane = se.SetLane(st, symbol)
+                closed = lane.scan(warm, len(bars_), bars_, ds, cs, True, cfg, signals, accs[symbol],
+                                   select_pause=pause.__getitem__ if pause is not None else None)
+                entries = array("i", (trade["entry_i"] for trade in closed))
+                if lane.open:
+                    entries.append(lane.open["i"])
+                legacy_entries[key] = entries
+            entries = legacy_entries[key]
+        index = bisect.bisect_left(entries, i)
+        return index < len(entries) and entries[index] == i
+
     def rank_at(now: float, sets):
         ranked_: Dict[Tuple[str, str], List[Any]] = {}
         valid_ = 0
@@ -1038,8 +1104,14 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         for minute in range(60):
             t = int(h) + minute * 60
             entry_t = float(t + 60)
-            while active_ends and active_ends[0] <= entry_t:
-                heappop(active_ends)
+            admitted_ranks = {}
+            while pending_settlements and pending_settlements[0][0] < entry_t:
+                at, symbol, side, identity, net = heappop(pending_settlements)
+                settlements.record(symbol, side, identity, at, net, se.EXEC_SETTLEMENT_HISTORY_S)
+            while active_ends and active_ends[0][0] <= entry_t:
+                _, released_group = heappop(active_ends)
+                if released_group:
+                    group_open[released_group] -= 1
             if refresh_s and minute and minute % every == 0:
                 ranked, _ = rank_at(entry_t, eligible_sets)
                 ranked_t = entry_t
@@ -1047,6 +1119,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             for s, desired in slots:
                 if max_open > 0 and len(active_ends) >= max_open:
                     break
+                if max_per_group > 0 and group_open[symbol_groups[s]] >= max_per_group:
+                    continue
                 slot = (s, desired) if desired else s
                 i = idx_of[s].get(t)
                 if i is None or i <= busy.get(slot, -1):
@@ -1059,6 +1133,12 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                                   and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
                 if not signals:
                     continue
+                paths = {}
+                def entry_path(st):
+                    if st.idx not in paths:
+                        result = grid_at(book, tapes, st, entry_t, streams=axis_sizing is not None)
+                        paths[st.idx] = result.entry_path(s, desired, entry_t, st.id, settlements)
+                    return paths[st.idx]
                 if not refresh_s and ranked_t != entry_t:
                     # The hour's diagnostic needs every Set. Exact entry ranking
                     # only needs packs that can actually enter at this clock.
@@ -1066,7 +1146,17 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 # As live, try the next signal if the stronger pack has no
                 # executable Set for THIS direction / lane / Axis / group.
                 for pack, conf, d in signals:
-                    if ranked_packs is not None and pack not in ranked_packs:
+                    pack_candidates = ranked
+                    if grid_enabled and ranked_packs is not None:
+                        admitted = [st for st in sets_by_pack.get(pack, ())
+                                    if st.side in (0, d) and base_entered(st, s, i)]
+                        if not admitted:
+                            continue
+                        membership = tuple(st.idx for st in admitted)
+                        if membership not in admitted_ranks:
+                            admitted_ranks[membership], _ = rank_at(entry_t, admitted)
+                        pack_candidates = admitted_ranks[membership]
+                    elif ranked_packs is not None and pack not in ranked_packs:
                         pack_ranks, _ = rank_at(entry_t, sets_by_pack.get(pack, ()))
                         ranked.update(pack_ranks)
                         ranked_packs.add(pack)
@@ -1077,8 +1167,10 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
                         chosen = None
                         for lane_, kinds in sequences[pack]:
-                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                            cands = sorted([r for k_ in kinds for r in pack_candidates.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
+                                if grid_enabled and ((ranked_packs is None and not base_entered(st_c, s, i)) or not entry_path(st_c)):
+                                    continue
                                 if not group_ok(st_c, lane_, entry_t):
                                     continue
                                 ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
@@ -1093,8 +1185,10 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
                         chosen = None
                         for lane_, kinds in sequences[pack]:
-                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                            cands = sorted([r for k_ in kinds for r in pack_candidates.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
+                                if grid_enabled and ((ranked_packs is None and not base_entered(st_c, s, i)) or not entry_path(st_c)):
+                                    continue
                                 if not group_ok(st_c, lane_, entry_t):
                                     continue
                                 ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
@@ -1109,12 +1203,16 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     for lane_, kinds_ in (() if (axis_coord is not None or axis_pick is not None) else sequences[pack]):
                         # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...)); the (lane, kinds) walk is the engine's
                         # SetBook.pick_sequence_for (trailPick / trailPickByPack: lanes outside, or kinds outside for first-any)
-                        pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
+                        pool = [st for _, st in sorted([r for k_ in kinds_ for r in pack_candidates.get((pack, k_, lane_), []) if r[1].side in (0, d)],
                                                        key=lambda r: r[0], reverse=True)]
                         if gg is not None or cg:
                             pool = [st_ for st_ in pool if group_ok(st_, lane_, entry_t)]
                         if candidate_filter:
                             pool = [st_ for st_ in pool if candidate_filter(st_, s, d, entry_t, ranked_t)]
+                        if grid_enabled and ranked_packs is None:
+                            pool = [candidate for candidate in pool if base_entered(candidate, s, i)]
+                        if grid_enabled and (s.upper(), desired) in settlements.slots:
+                            pool = [candidate for candidate in pool if entry_path(candidate)]
                         if pool:
                             lane_pick = lane_
                             break
@@ -1133,17 +1231,26 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     if axis and not axis_allows(closes if axis_evidence is None else axis_evidence, entry_t, axis, cf):
                         continue
                     st = pick(pool, (s, t)) if pick else pool[0]
-                    if axis_sizing is not None:
-                        allowed, adjustment = axis_sizing(st, lane_pick, ranked_t)
-                        if allowed:
-                            vol_pick = adjustment
                     break
                 else:
                     continue
-                path_id = lane_id(st.id, grid_at(book, tapes, st, ranked_t, streams=False).path) if grid_enabled else ""
+                path_id = ""
+                if grid_enabled:
+                    path = entry_path(st)
+                    if not path:
+                        continue
+                    path_id = lane_id(st.id, path)
+                    if axis_sizing is not None:
+                        allowed, adjustment = axis_sizing(st, path_id, entry_t)
+                        if allowed:
+                            vol_pick = adjustment
                 lane = se.SetLane(st, s)
                 end = end_of[s]
                 # The explicit candidate admits only this bar. Later signals on the same tape cannot reopen it.
+                if grid_enabled:
+                    hold = shadow[s][3].get(-3, {}).get(st.idx, {}).get(i)
+                    if hold is not None:
+                        lane.hold = hold
                 tr = lane.scan(i, end, bars[s], dirs[pack], confs[pack], True, cfg, (i,), accs[s])
                 if not tr:
                     if lane.open is not None:
@@ -1153,9 +1260,10 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # The position also occupies its Axis continuation slot.
                         # Its exit is unknown beyond this replay window; omitting
                         # it here lets other symbols exceed the live per-Set cap.
-                        opened.append((float("inf"), st.id, lane_pick))
-                        if max_open > 0:
-                            heappush(active_ends, float("inf"))
+                        if axis_coord is not None:
+                            opened.append((float("inf"), st.id, lane_pick))
+                        if capped:
+                            reserve(s, float("inf"))
                         if include_open:
                             pos = lane.open
                             mark = float(bars[s][end - 1][3])
@@ -1183,10 +1291,14 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                        "pack": pack, "kind": st.kind, "lane": lane_pick, "execLaneId": path_id, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
                        "tr": tr, "fracs": book.lane_fracs(st), "vol": vol_pick * set_factor(weights, st, s) * axis_weight}
                 executed.append(rec)
-                closes.append((rec["t"], rec["net"]))
-                opened.append((rec["t"], st.id, lane_pick))
-                if max_open > 0:
-                    heappush(active_ends, rec["t"])
+                if grid_enabled:
+                    heappush(pending_settlements, (rec["t"], s, d, path_id, rec["net"]))
+                if axis and axis_evidence is None:
+                    closes.append((rec["t"], rec["net"]))
+                if axis_coord is not None:
+                    opened.append((rec["t"], st.id, lane_pick))
+                if capped:
+                    reserve(s, rec["t"])
                 if gg is not None:
                     ghist.setdefault(se.set_group(st.id, lane_pick, gside), []).append((rec["t"], rec["net"]))
                 if cg:

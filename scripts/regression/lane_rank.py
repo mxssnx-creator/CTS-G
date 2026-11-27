@@ -117,7 +117,8 @@ def simulator_and_engine_rank_valid_sets_the_same_way():
     names = ["S0-USDT", "S1-USDT"]
     bars = {s_: synth_bars(61 + i, 1100, drift=0.0007 if i % 2 == 0 else -0.0007, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
-    patch = {**SMALL, "stageLastN": False, "setStepMax": 50, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True, "setGateWindow": 20,
+    from common import WINDOW_GRID
+    patch = {**WINDOW_GRID, "stageLastN": False, "setStepMax": 50, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True, "setGateWindow": 20,
              "setGateShortN": 8, "mainGateN": 8, "mainShortWindows": [4], "realGateN": 4, "setMaxDdtHours": 36, "setGateMinTrades": 0, "rankByLane": True,
              "minPfByStep": False, "minPfBySize": False, "directionMode": "both", "pauseMode": "off", "setMinPf": 0.5}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")
@@ -261,6 +262,7 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
         with _Env() as env:
             p, pos = env.p, env.pos
             p.equity = 1000
+            p.overlay["blockSetAddsEnabled"] = True
             st = p.sets.by_idx[0]
             pos.set_id, pos.lane, pos.pack = st.id, lane, st.pack
             pos.base_entry, pos.base_qty, pos.set_hold_bars = pos.entry, pos.qty, 10

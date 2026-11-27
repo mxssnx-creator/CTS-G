@@ -16,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "8fc9baa69c3fb80eae3bc7ee558ad4bd4c917a74"
+PIN_WANT = "b86028a80f5c9f8096e8eda0c45044a893bd68f2"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -225,18 +225,27 @@ def dca_is_off_by_default_with_set_and_axis_options_off_everywhere():
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
     hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
     ok_all, detail = hard, [f"kill_switch_not_thrown={hard}"]
-    # owner 2026-11-14 ("run always all ... the evals decide"): the x02 demo runs DCA behind its own Axis gate (dcaOnAxis), never unconditionally on Sets;
-    # x01 keeps it off
+    # The demo can evaluate direct DCA. Funding a qualified Set or Axis add is a separate opt-in.
     for path in (X01, X02):
         ov = json.load(open(path))
         if path == X02:
             good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
-                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is True)
+                    and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
         else:
             good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
                     and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
         ok_all = ok_all and good
         detail.append(f"{os.path.basename(path)}: enabled={ov.get('dcaEnabled')} auto={ov.get('dcaAuto')} onSets={ov.get('dcaOnSets')} onAxis={ov.get('dcaOnAxis')}")
+    for name in ("overlay-bingx-x01.json", "overlay-bingx-x02.json", "overlay-bybit-x01.json", "overlay-bybit-x02.json"):
+        with open(os.path.join(PULSE, name), encoding="utf-8") as source:
+            overlay = json.load(source)
+        axis = overlay.get("axisSets") or {}
+        sizing = tuple(axis.get(k) for k in ("enabled", "n", "minN", "vmin", "vmax"))
+        adds_off = all(overlay.get(k) is False for k in ("blockSetAddsEnabled", "dcaOnSets", "dcaOnAxis"))
+        rung = (overlay.get("dcaAutoRungFractions"), overlay.get("dcaAutoRungMultiplier"), overlay.get("dcaConfirmBounce"))
+        if sizing != (True, 15, 8, .75, 1) or not adds_off or rung != ([.6], .1, True) or overlay.get("maxStopLossRatio") != 2.5:
+            ok_all = False
+            detail.append(f"{name} sizing={sizing} adds_off={adds_off} rung={rung} maxSL/TP={overlay.get('maxStopLossRatio')}")
     return ok_all, " ".join(detail)
 
 

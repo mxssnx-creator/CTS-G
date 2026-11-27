@@ -1,4 +1,10 @@
 {
+  "axisSets": {"enabled": true, "n": 15, "minN": 8, "margin": 1.05, "vol": "floor", "vmin": 0.75, "vmax": 1, "strict": false, "combos": false},
+  "blockSetAddsEnabled": false,
+  "dcaAutoRungFractions": [0.6],
+  "dcaAutoRungMultiplier": 0.1,
+  "dcaConfirmBounce": true,
+  "fixedSlBands": {},
   "targetNotional": 2.15,
   "volumeFactor": 0.05,
   "sizePctOfBalance": 0,
@@ -33,7 +39,7 @@
   "dcaEnabled": true,
   "dcaAuto": true,
   "dcaOnSets": false,
-  "dcaOnAxis": true,
+  "dcaOnAxis": false,
   "dcaMaxExposureX": 0,
   "symbols": [
     "*"
@@ -50,7 +56,7 @@
   "noise": 0.05,
   "volWeight": 0.3,
   "minStep": 10,
-  "maxStopLossRatio": 1.4,
+  "maxStopLossRatio": 2.5,
   "setSlRatios": [
     0.5,
     0.75,

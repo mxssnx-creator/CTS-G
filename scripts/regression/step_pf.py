@@ -252,7 +252,7 @@ def the_simulator_learns_the_engines_floors():
     names = ["S0-USDT", "S1-USDT"]
     bars = {s_: synth_bars(41 + i, 1500, drift=0.0005 if i % 2 == 0 else -0.0005, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
-    patch = {**SMALL, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 600, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+    patch = {**SMALL, "historicalStopModel": "sl-ratio", "axisSets": {"enabled": False}, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 600, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
              "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoMin": 30, "minPfStepAutoN": 5, "directionMode": "split", "pauseMode": "off",
              "setScratchEnabled": True}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")
@@ -300,7 +300,7 @@ def the_simulator_learns_the_engines_own_floor_of_every_set():
     names = ["S0-USDT", "S1-USDT"]
     bars = {s_: synth_bars(41 + i, 1500, drift=0.0005 if i % 2 == 0 else -0.0005, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
-    patch = {**SMALL, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 600, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+    patch = {**SMALL, "historicalStopModel": "sl-ratio", "axisSets": {"enabled": False}, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 600, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
              "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoMin": 30, "minPfStepAutoN": 5, "minPfStepAutoScope": "set", "minPfSetAutoMin": 10, "directionMode": "split", "pauseMode": "off",
              "setScratchEnabled": True}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")
@@ -508,7 +508,7 @@ def the_packed_simulator_floors_equal_the_plain_ones():
     names = ["S0-USDT", "S1-USDT"]
     bars = {s_: synth_bars(61 + i, 1300, drift=0.0004 if i % 2 == 0 else -0.0004, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
-    patch = {**SMALL, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+    patch = {**SMALL, "historicalStopModel": "sl-ratio", "axisSets": {"enabled": False}, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
              "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoMin": 20, "minPfStepAutoN": 5, "minPfStepAutoScope": "set", "minPfSetAutoMin": 8,
              "directionMode": "split", "pauseMode": "off", "setScratchEnabled": True}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")
@@ -579,7 +579,7 @@ def the_simulator_learns_the_engines_sl_ranges_and_the_gate_reads_them():
     names = ["S0-USDT", "S1-USDT"]
     bars = {s_: synth_bars(71 + i, 1300, drift=0.0004 if i % 2 == 0 else -0.0004, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
-    patch = {**SMALL, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+    patch = {**SMALL, "historicalStopModel": "sl-ratio", "axisSets": {"enabled": False}, "stageLastN": False, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
              "setSlRatios": [0.5, 0.75, 1.0, 1.25, 1.5], "slAutoRange": True, "slAutoMin": 10, "slAutoTol": 5,
              "directionMode": "split", "pauseMode": "off", "setScratchEnabled": True}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")

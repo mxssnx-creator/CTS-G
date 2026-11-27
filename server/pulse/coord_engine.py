@@ -6,7 +6,7 @@ from dataclasses import dataclass, asdict
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, base_min_pf, last_n_cost_pf, net_pnl_pct, pf_floor, window_n
-from position_cost import row_net_pnl_pct
+from position_cost import DEFAULT_MAX_STOP_RATIO, fixed_stop_max_ratio, row_net_pnl_pct
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -70,7 +70,7 @@ class Coordinator:
         self.min_samples = 12
         self.real_eval = 15
         self.min_step = 6
-        self.max_sl_ratio = 2.5
+        self.max_sl_ratio = DEFAULT_MAX_STOP_RATIO
         self.trailing_min_step = 6
         self.pos_count_vol_ratio = 0.05
         self.rearrange = True
@@ -128,7 +128,7 @@ class Coordinator:
         self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 20)
         self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 15)
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or 6)
-        self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
+        self.max_sl_ratio = fixed_stop_max_ratio(ov.get("maxStopLossRatio", cts.get("maxStopLossRatio", coord.get("maxStopLossRatio"))))
         self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 6)
         self.pos_count_vol_ratio = float(ov.get("posCountsVolumeRatio") or coord.get("posCountsVolumeRatio") or cts.get("posCountsVolumeRatio") or 0.05)
         self.rearrange = bool(ov.get("rearrange", True))

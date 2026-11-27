@@ -240,19 +240,18 @@ def main() -> int:
         return 2
     overlay = sg.replay_overlay()
     shared = {k.strip() for k in a.cache_shared.split(",") if k.strip()}
-    if shared:
-        overlay = {k: v for k, v in overlay.items() if k not in shared}
-    manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
+    cache_overlay = {k: v for k, v in overlay.items() if k not in shared}
+    manifest = replay_cache.fingerprint(a.data, names, cache_overlay, sg.PULSE, sg.__file__)
     loaded_names, bars, times = sg.load_bars(a.data, a.symbols)
     print(f'Loaded {len(names)} market histories; {len(book.by_idx)} independent Sets', flush=True)
-    if loaded_names != names or replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
+    if loaded_names != names or replay_cache.fingerprint(a.data, names, cache_overlay, sg.PULSE, sg.__file__) != manifest:
         raise ValueError("replay inputs changed while reading market data")
     if os.path.exists(a.cache):
         print('Checking saved replay provenance', flush=True)
         shadow = replay_cache.load(a.cache, manifest)
     else:
         shadow = sg.build(names, bars, times, a.jobs)
-        if replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
+        if replay_cache.fingerprint(a.data, names, cache_overlay, sg.PULSE, sg.__file__) != manifest:
             raise ValueError("replay inputs changed during cache generation")
         replay_cache.save(a.cache, shadow, manifest)
     shadow = sg.build_hold_auto(names, bars, times, shadow)      # hold Auto on: each Set's tape is the engine's own lane with the causally chosen hold
@@ -452,6 +451,10 @@ def main() -> int:
         import axis_sets as _axs
         _cache = {}
         def axis_pick(st, lane, now):
+            if book.stage_grid:
+                result = sg.grid_at(book, tapes, st, now)
+                verdict = book.grid_axis_verdict(result, book.stage_grid.path(st.id, lane))
+                return verdict["allow"], verdict["vol"]
             key = (st.idx, lane, int(now // 60))
             if key not in _cache:
                 rows_ = sg.lane_stream_entries(book, tapes, st, now, lane)
@@ -534,6 +537,8 @@ def main() -> int:
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
                                               "real_n": book.realst_n, "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
+                      "max_sl_to_tp_ratio": book.sl_max_ratio,
+                      "max_open": int(overlay.get("maxOpen") or 0), "max_per_group": int(overlay.get("maxPerGroup") or 0),
                       "scratch_bars": book.scratch_bars, "scratch_min_pct": round(book.scratch_min * 100, 3),
                       "cost_pct": book.cost_pct, "extra_indicators": list(book.ind_settings.get("extraIndicators") or [])},
            "auto_pf": {"enabled": book.grid_auto_enabled(), "fallback_by_range": book.pf_auto_defaults,
@@ -543,7 +548,7 @@ def main() -> int:
            "indications": [summary(k) for k in sorted(groups) if k[0] == "indication"],
            "configurations": [{**summary(('configuration', st.id)), 'pack': st.pack, 'kind': st.kind,
                                'side': st.side, 'step': st.step, 'sl_ratio': st.sl_ratio,
-                               'price_sl_pct': st.price_sl_pct or None,
+                               'price_sl_pct': st.price_sl_pct or None, 'price_sl_band': st.price_sl_band or None,
                                'trail': st.trail_key, 'trail_sl': st.trail_sl} for st in book.by_idx],
            "ranges": [summary(k) for k in sorted(groups) if k[0] == "range"],
            "sl": [summary(k) for k in sorted(groups) if k[0] == "sl"],

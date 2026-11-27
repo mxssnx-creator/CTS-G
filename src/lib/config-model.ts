@@ -130,12 +130,12 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
 
 /** TP grid, owner 2026-11-02: one TP step is an absolute 0.1 % of price (steps 2..32 = 0.2 % .. 3.2 %), not a multiple of PositionCost. Mirrors position_cost.py. */
 export const TP_UNIT_PCT = 0.1;
-export const TP_STEP_MIN = 2;
+export const TP_STEP_MIN = 1;
 export const TP_STEP_MAX = 50;
 export const TP_STEP_DEFAULT_MAX = 32;
 /** Named TP ranges (server: position_cost.TP_RANGES): each a band of TP steps switched on or off on its own (overlay tpRanges). Wide (3.3-5.0 %) is off by default. */
 export const TP_RANGES = [
-  { id: "micro", label: "Micro", lo: 2, hi: 3 },
+  { id: "micro", label: "Micro", lo: 1, hi: 3 },
   { id: "minimal", label: "Minimal", lo: 4, hi: 6 },
   { id: "short", label: "Short", lo: 7, hi: 12 },
   { id: "normal", label: "Normal", lo: 13, hi: 20 },
@@ -160,6 +160,22 @@ export const TP_RANGES_DEFAULT: Record<TpRangeId, boolean> = { micro: true, mini
 /** Trailing grid ceiling: arms up to trailStepMax steps (default 22 = 2.2 %, at most 30 = 3.0 %). */
 export const TRAIL_STEP_MAX_DEFAULT = 22;
 export const TRAIL_STEP_CEIL = 30;
+type SetAxis = { enabled: boolean; n: number; minN: number; margin: number; vol: "floor" | "base" | "flat"; vmin: number; vmax: number; strict: boolean; combos: boolean };
+const DEFAULT_SET_AXIS: SetAxis = {enabled:true,n:15,minN:8,margin:1.05,vol:"floor",vmin:.75,vmax:1,strict:false,combos:false};
+export const DEFAULT_MAX_STOP_RATIO = protectionPolicy.maxStopLossRatio;
+export function maxStopRatioOf(raw: unknown): number {
+  const value = typeof raw === "number" ? raw : Number.NaN;
+  return Number.isFinite(value) && value > 0 && value <= 5 ? value : DEFAULT_MAX_STOP_RATIO;
+}
+export const FIXED_SL_BANDS = protectionPolicy.fixedSlBands;
+export type StopBand = keyof typeof FIXED_SL_BANDS;
+type FixedStops = Record<StopBand, number[]>;
+export function fixedStopsOf(raw?: Partial<FixedStops>): FixedStops {
+  return {
+    short: priceDistancesOf(raw?.short, FIXED_SL_BANDS.short.stopPcts),
+    long: priceDistancesOf(raw?.long, FIXED_SL_BANDS.long.stopPcts),
+  };
+}
 export const PRICE_SL_DISTANCES = Array.from({ length: 21 }, (_, index) => (index + 2) / 10);
 export const PRICE_TRAIL_GAPS = Array.from({ length: 25 }, (_, index) => (index + 2) / 10);
 export function priceDistancesOf(raw: unknown, grid: number[]): number[] {
@@ -318,6 +334,11 @@ export type PulseOverlay = {
   dcaBreakevenProfitPct: number;
   dcaTakeProfitMode: string;
   dcaStepDistancesPct: number[];
+  axisSets: SetAxis;
+  blockSetAddsEnabled: boolean;
+  dcaConfirmBounce: boolean;
+  dcaAutoRungFractions: number[];
+  dcaAutoRungMultiplier: number;
   dcaStepVolumeMultipliers: number[];
   dcaAutoDeact: boolean;
   dcaAuto: boolean;
@@ -590,6 +611,7 @@ export type PulseOverlay = {
   execGateN: number;
   stageLastN: StageGridConfig;
   slRatiosByRange: Record<string, number[]>;
+  fixedSlBands: FixedStops;
   setPriceDistanceGrid: boolean;
   setPriceSlDistances: number[];
   setPriceTrailGaps: number[];
@@ -694,6 +716,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaBreakevenProfitPct: 0.2,
   dcaTakeProfitMode: "average",
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
+  axisSets: {...DEFAULT_SET_AXIS},
+  blockSetAddsEnabled: false,
+  dcaConfirmBounce: true,
+  dcaAutoRungFractions: [.6],
+  dcaAutoRungMultiplier: .1,
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
   dcaAuto: true,
@@ -799,7 +826,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   noise: 0.05,
   volWeight: 0.3,
   minStep: 10,
-  maxStopLossRatio: 1.4,
+  maxStopLossRatio: DEFAULT_MAX_STOP_RATIO,
   trailingMinStep: 6,
   posCountsVolumeRatio: 0.05,
   rearrange: true,
@@ -929,7 +956,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   execGateN: 0,
   stageLastN: stageGridOf(null),
   slRatiosByRange: { long: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], wide: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] },
-  setPriceDistanceGrid: false,
+  fixedSlBands: fixedStopsOf(),
+  setPriceDistanceGrid: true,
   setPriceSlDistances: PRICE_SL_DISTANCES,
   setPriceTrailGaps: PRICE_TRAIL_GAPS,
   exitSetHoldBars: 720,
@@ -967,6 +995,7 @@ export function defaultOverlay(): PulseOverlay {
 }
 
 export type CtsSettings = {
+  maxStopLossRatio?: number;
   coordination_settings?: Record<string, unknown>;
   coordinationSettings?: Record<string, unknown>;
   strategyBaseTrailingVariants?: string[];
@@ -1008,6 +1037,11 @@ export type CtsSettings = {
   dcaBreakevenProfitPct?: number;
   dcaTakeProfitMode?: string;
   dcaStepDistancesPct?: number[];
+  axisSets?: Partial<SetAxis>;
+  blockSetAddsEnabled?: boolean;
+  dcaConfirmBounce?: boolean;
+  dcaAutoRungFractions?: number[];
+  dcaAutoRungMultiplier?: number;
   dcaStepVolumeMultipliers?: number[];
   dcaAutoDeact?: boolean;
   dcaAuto?: boolean;
@@ -1229,6 +1263,7 @@ export type CtsSettings = {
   execGateN?: number;
   stageLastN?: StageGridConfig;
   slRatiosByRange?: Record<string, number[]>;
+  fixedSlBands?: Partial<FixedStops>;
   setPriceDistanceGrid?: boolean;
   setPriceSlDistances?: number[];
   setPriceTrailGaps?: number[];
@@ -1597,6 +1632,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaBreakevenProfitPct: num(cts.dcaBreakevenProfitPct ?? coord.dcaBreakevenProfitPct, 0.2),
     dcaTakeProfitMode: String(cts.dcaTakeProfitMode ?? coord.dcaTakeProfitMode ?? "average"),
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
+    axisSets: {...DEFAULT_SET_AXIS,...cts.axisSets},
+    blockSetAddsEnabled: bool(cts.blockSetAddsEnabled,false),
+    dcaConfirmBounce: bool(cts.dcaConfirmBounce,true),
+    dcaAutoRungFractions: arr<number>(cts.dcaAutoRungFractions, [.6]),
+    dcaAutoRungMultiplier: num(cts.dcaAutoRungMultiplier,.1),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
     dcaAuto: bool(cts.dcaAuto, true),
@@ -1689,7 +1729,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     noise: num(cts.activeNoiseFilter, 0.05),
     volWeight: num(cts.activeVolatilityWeight, 0.3),
     minStep: num((coord as { minStep?: number }).minStep, 6),
-    maxStopLossRatio: num((coord as { maxStopLossRatio?: number }).maxStopLossRatio, 2.5),
+    maxStopLossRatio: maxStopRatioOf(cts.maxStopLossRatio ?? coord.maxStopLossRatio),
     trailingMinStep: num((coord as { trailingMinStep?: number }).trailingMinStep, 6),
     posCountsVolumeRatio: num(cts.posCountsVolumeRatio ?? (coord as { posCountsVolumeRatio?: number }).posCountsVolumeRatio, 0.05),
     indRewardRisk: num(cts.indRewardRisk, 1.8),
@@ -1829,7 +1869,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       }
       return out;
     })(cts.slRatiosByRange),
-    setPriceDistanceGrid: cts.setPriceDistanceGrid === true,
+    fixedSlBands: fixedStopsOf(cts.fixedSlBands),
+    setPriceDistanceGrid: true,
     setPriceSlDistances: priceDistancesOf(cts.setPriceSlDistances, PRICE_SL_DISTANCES),
     setPriceTrailGaps: priceDistancesOf(cts.setPriceTrailGaps, PRICE_TRAIL_GAPS),
     exitSetHoldBars: num(cts.exitSetHoldBars, 720),
@@ -1851,7 +1892,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
   out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);
   out.strategyProcessingByRange = processingByRangeOf(out.strategyProcessingByRange);
-  out.setPriceDistanceGrid = out.setPriceDistanceGrid === true;
+  out.axisSets = {...DEFAULT_SET_AXIS,...out.axisSets};
+  out.maxStopLossRatio = maxStopRatioOf(out.maxStopLossRatio);
+  out.fixedSlBands = fixedStopsOf(out.fixedSlBands);
+  out.setPriceDistanceGrid = true;
   out.setPriceSlDistances = priceDistancesOf(out.setPriceSlDistances, PRICE_SL_DISTANCES);
   out.setPriceTrailGaps = priceDistancesOf(out.setPriceTrailGaps, PRICE_TRAIL_GAPS);
   if (out.setTrailingDistance !== "fixed" && out.setTrailingDistance !== "both") out.setTrailingDistance = "dynamic";

@@ -9,7 +9,7 @@ const evidence = (step: number, side: number, auto: number) => ({step, side, tpP
 test("Auto PF display preserves both directions and wide-step table mapping", () => {
   const overlay = {...defaultOverlay(), directionMode:"split" as const, minPfByRange:{}};
   const rows = stepPfRows(overlay, [evidence(7,1,1.12), evidence(7,-1,1.38), evidence(35,1,1.26), evidence(35,-1,1.56)]);
-  assert.equal(rows.length,98);
+  assert.equal(rows.length,100);
   assert.deepEqual(rows.filter(r=>r.step===7).map(r=>[r.side,r.used]), [[1,1.12],[-1,1.38]]);
   assert.deepEqual(rows.filter(r=>r.step===50).map(r=>[r.side,r.bucket,r.used]), [[1,35,1.26],[-1,35,1.56]]);
 });

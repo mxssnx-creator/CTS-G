@@ -64,14 +64,21 @@ test("SL grids normalize legacy ratios once and empty grids retain the ten defau
 
 test("absolute protection grids preserve their own valid stops and gaps across reload", () => {
   const defaults = overlayFromCts(cts());
-  assert.equal(defaults.setPriceDistanceGrid, false);
+  assert.equal(defaults.setPriceDistanceGrid, true);
+  assert.equal(defaults.maxStopLossRatio, 2.5);
+  assert.equal(overlayFromCts(cts({ coordinationSettings: { maxStopLossRatio: 1.5 } })).maxStopLossRatio, 1.5);
+  assert.equal(overlayFromCts(cts({ maxStopLossRatio: .75 })).maxStopLossRatio, .75);
+  assert.equal(overlayFromCts(cts(), {...defaults,maxStopLossRatio:1.25}).maxStopLossRatio, 1.25);
+  assert.deepEqual(defaults.fixedSlBands.short, Array.from({length:15}, (_, i) => (i+2)/10));
+  assert.deepEqual(defaults.fixedSlBands.long, Array.from({length:12}, (_, i) => (i+2)/5));
   assert.deepEqual(defaults.setPriceSlDistances, Array.from({ length: 21 }, (_, index) => (index + 2) / 10));
   assert.deepEqual(defaults.setPriceTrailGaps, Array.from({ length: 25 }, (_, index) => (index + 2) / 10));
   const saved = syncOverlayFlags(overlayFromCts(cts({
-    setPriceDistanceGrid: true, setPriceSlDistances: [.6, .2, .6, 2.3], setPriceTrailGaps: [2.6, .1, 1.25, .4],
+    fixedSlBands: {short:[.2,.6],long:[.4,2.6]}, setPriceDistanceGrid: true, setPriceSlDistances: [.6, .2, .6, 2.3], setPriceTrailGaps: [2.6, .1, 1.25, .4],
   })));
   const restored = overlayFromCts(cts(), saved);
   assert.equal(restored.setPriceDistanceGrid, true);
+  assert.deepEqual(restored.fixedSlBands, {short:[.2,.6],long:[.4,2.6]});
   assert.deepEqual(restored.setPriceSlDistances, [.2, .6]);
   assert.deepEqual(restored.setPriceTrailGaps, [.4, 2.6]);
 });

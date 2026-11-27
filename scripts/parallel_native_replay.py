@@ -24,7 +24,7 @@ _RAW=('entry_conf','hist_time_bars','scratch_s','scratch_min','cooldown_bars','c
       'min_sl_distance_pct','hist_honor_tp','warmup','hold_auto','direction_split','lookback',
       'pause_mode','pause_fixed','pause_candidates','pause_auto_min','pause_auto_max','pause_pack')
 _LANE=('id','idx','pack','kind','side','step','tp_pct','sl_ratio','trail_arm','trail_give',
-       'trail_sl','price_sl_pct','hold_bars','pause_bars')
+       'trail_sl','price_sl_pct','price_sl_band','hold_bars','pause_bars')
 
 
 class PauseLookup:
@@ -64,7 +64,7 @@ def _calculate(payload):
         inputs['pause'] = {key: (fixed, PauseLookup(array('i', (fn(i) for i in range(count + 1)))) if fn else None)
                            for key, (fixed, fn) in inputs['pause'].items()}
     else:
-        inputs = {}
+        inputs = {"base_entries": inputs.get("base_entries", {})}
     while len(book._sig_cache)>4:book._sig_cache.pop(next(iter(book._sig_cache)))
     return packed,inputs,codes,pauses
 

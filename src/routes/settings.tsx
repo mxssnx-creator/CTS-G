@@ -73,7 +73,7 @@ import {
   TP_STEP_DEFAULT_MAX,
   TP_STEP_MIN,
   TP_UNIT_PCT,
-  PRICE_SL_DISTANCES,
+  FIXED_SL_BANDS,
   PRICE_TRAIL_GAPS,
   priceDistancesOf,
   TRAIL_SL_RATIOS,
@@ -548,7 +548,7 @@ function SettingsPage() {
           {section === "packs" && (
             <Card
               title="Indications by range"
-              hint="Each entry builds indications from library families x ranges x timeframes x relations; every name it makes is its own strategy with its own Sets and its own Base validation, with this entry's TP-step range, SL ratios, types and pause. Combinations the library does not know are dropped and listed below. A wide entry multiplies the Set count: keep ranges and steps narrow."
+              hint="Each entry builds indications from library families x ranges x timeframes x relations; every name it makes is its own strategy with its own Sets and its own Base validation, with this entry's TP-step range, types and pause. Combinations the library does not know are dropped and listed below. A wide entry multiplies the Set count: keep ranges and steps narrow."
             >
               <button type="button" className="mb-3 rounded border border-border px-3 py-2 text-sm"
                 onClick={() => patch("indicationConfigs", indicationConfigList([
@@ -818,23 +818,6 @@ function SettingsPage() {
                     label={`${r.label} range · TP ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}%${r.id === "wide" ? " (on extends the grid past Step max to 5.0 %)" : ""}`}
                     on={(overlay.tpRanges ?? {})[r.id] ?? r.id !== "wide"}
                     onChange={(v) => patch("tpRanges", { ...overlay.tpRanges, [r.id]: v })}
-                  />
-                ))}
-                {TP_RANGES.filter((r) => r.id === "normal" || r.id === "long" || r.id === "wide").map((r) => (
-                  <Slider
-                    key={`slmax-${r.id}`}
-                    label={`${r.label} range · largest SL ratio (0 = no limit)`}
-                    value={(overlay.slMaxByRange ?? {})[r.id] ?? 0}
-                    min={0}
-                    max={3.5}
-                    step={0.25}
-                    hint={`Sets of TP ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}% are built only with SL ratio up to this. Default: Long and Wide 1.0, Normal none.`}
-                    onChange={(v) => {
-                      const next = { ...(overlay.slMaxByRange ?? {}) };
-                      if (v < 0.2) delete next[r.id];
-                      else next[r.id] = Math.round(v * 4) / 4;
-                      patch("slMaxByRange", next);
-                    }}
                   />
                 ))}
                 <div className="col-span-full mt-2 font-mono text-[11px] text-muted">
@@ -1935,6 +1918,13 @@ function SettingsPage() {
                 onChange={(v) => patch("dcaOnAxis", v)}
               />
               <Grid>
+                <EnableSlider label="Require a completed one-minute bounce for Auto DCA" on={overlay.dcaConfirmBounce} onChange={v=>patch("dcaConfirmBounce",v)}/>
+                <CsvField label="Auto DCA rungs (fraction of initial SL)" value={overlay.dcaAutoRungFractions.join(", ")}
+                  hint="For example, 0.4 adds after a move of 40% of the initial stop distance."
+                  onCommit={s => {const r=s.split(/[,;\s]+/).filter(Boolean).map(Number);
+                    if (r.length && r.every(x => x > 0 && x < 1)) patch("dcaAutoRungFractions", [...new Set(r)].sort((a,b)=>a-b));}}/>
+                <Num label="Auto DCA size per rung (× base quantity)" value={overlay.dcaAutoRungMultiplier}
+                  min={0.01} max={8} step={0.01} onChange={v=>patch("dcaAutoRungMultiplier",v)} />
                 <Num
                   label="Max exposure × base size (auto; 0 = no ceiling)"
                   value={overlay.dcaMaxExposureX}
@@ -2060,6 +2050,16 @@ function SettingsPage() {
           {section === "axes" && (
             <Card title="Coordination · rearrangements · thresholds" hint="CTS Main-stage axes live on pulse">
               <div className="space-y-2">
+                <EnableSlider label="Size Exec by its own Axis history" on={overlay.axisSets.enabled}
+                  hint="Uses the qualified Real parent of the exact Exec path." onChange={enabled=>patch("axisSets",{...overlay.axisSets,enabled})}/>
+                <Num label="Axis lookback (settled orders)" value={overlay.axisSets.n} min={3} max={200} step={1}
+                  onChange={n=>patch("axisSets",{...overlay.axisSets,n,minN:Math.min(n,overlay.axisSets.minN)})}/>
+                <Num label="Minimum Axis size" value={overlay.axisSets.vmin} min={.1} max={1} step={.05}
+                  onChange={vmin=>patch("axisSets",{...overlay.axisSets,vmin})}/>
+                <Num label="Maximum Axis size" value={overlay.axisSets.vmax} min={1} max={5} step={.05}
+                  onChange={vmax=>patch("axisSets",{...overlay.axisSets,vmax})}/>
+                <EnableSlider label="Fund qualified Block additions on strategy Sets" on={overlay.blockSetAddsEnabled}
+                  hint="Block continues to measure its candidates while funding is off." onChange={v=>patch("blockSetAddsEnabled",v)}/>
                 <LiveAxis
                   name="Previous"
                   range="4–12 step 2"
@@ -2111,46 +2111,26 @@ function SettingsPage() {
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
                 {!overlay.stageLastN.enabled && <Slider label="Execution last N (end of Real)" value={overlay.execGateN} min={0} max={60} step={5} hint="the newest N results of the lane's Real Set must pass the minimum PF again right before execution; 0 = off (10 .. 35 tested)" onChange={(v) => patch("execGateN", v)} />}
-                <EnableSlider label="Absolute price-distance Sets" on={overlay.setPriceDistanceGrid} hint="Each stop and trailing gap gets its own Set and PF evidence. Existing cost and protection floors still apply." onChange={(value) => patch("setPriceDistanceGrid", value)} />
+                <Num label="Maximum SL / TP ratio" value={overlay.maxStopLossRatio} min={0.01} max={5} step={0.01}
+                  hint="Default 2.5. Each Set requires fixed SL ≤ reference TP × this limit. An Exit Set uses its configured TP step. A trailing Set without a target uses its activation distance."
+                  onChange={value => patch("maxStopLossRatio", value)} />
+                {(["short", "long"] as const).map(band => {
+                  const spec = FIXED_SL_BANDS[band];
+                  return <CsvField key={band} label={`Fixed SL for TP ${spec.tpMinPct}–${spec.tpMaxPct}%`}
+                    value={overlay.fixedSlBands[band].join(", ")}
+                    hint={band === "short" ? "0.2–1.6% in steps of 0.1. Blank disables this band." : "0.4–2.6% in steps of 0.2. Both bands run independently where their TP ranges overlap."}
+                    onCommit={value => patch("fixedSlBands", { ...overlay.fixedSlBands,
+                      [band]: priceDistancesOf(value.trim() ? value.split(/[,;\s]+/) : [], spec.stopPcts) })} />;
+                })}
                 {overlay.setPriceDistanceGrid && <>
-                  <CsvField label="SL distances (%)" value={overlay.setPriceSlDistances.join(", ")} hint="0.2–2.2% in 0.1% steps" onCommit={(value) => patch("setPriceSlDistances", priceDistancesOf(value.trim() ? value.split(/[,;\s]+/) : undefined, PRICE_SL_DISTANCES))} />
                   <CsvField label="Trailing gaps (%)" value={overlay.setPriceTrailGaps.join(", ")} hint="0.2–2.6% in 0.1% steps" onCommit={(value) => patch("setPriceTrailGaps", priceDistancesOf(value.trim() ? value.split(/[,;\s]+/) : undefined, PRICE_TRAIL_GAPS))} />
                 </>}
-                <EnableSlider label="Auto SL range per TP step" on={overlay.slAutoRange} hint="each TP step (and direction) learns its min / max SL ratio from the orders closed before the window it judges; a Set outside it is not valid (trailing Sets never); without enough orders the manual grid below stands" onChange={(v) => patch("slAutoRange", v)} />
-                <Slider label="Auto SL range: orders a range needs" value={overlay.slAutoMin} min={1} max={500} step={1} onChange={(v) => patch("slAutoMin", v)} />
-                <Slider label="Auto SL range: tolerance to the best PF (%)" value={overlay.slAutoTol} min={0} max={50} step={1} hint="the widest range whose PF is within this of the best" onChange={(v) => patch("slAutoTol", v)} />
                 <Slider label="Min TP step of the TP / Exit Sets" value={overlay.tpStepMin} min={0} max={32} step={1} hint={`no TP Set under ${(overlay.tpStepMin * 0.1).toFixed(1)}% (0 = the grid's min step); trailing stops do not move. Live x02 (11-12 .. 11-15): TP Sets from 2.6 % read PF 1.04 on 92 closes, all of them 0.77 on 264`} onChange={(v) => patch("tpStepMin", v)} />
                 <Slider label="Min trailing arm (TP steps)" value={overlay.trailStepMin} min={0} max={20} step={1} hint={`no trailing Set arms under ${(overlay.trailStepMin * 0.1).toFixed(1)}% (0 = every arm the grid builds)`} onChange={(v) => patch("trailStepMin", v)} />
-                <Slider label="Min SL ratio" value={overlay.setSlMinRatio} min={0} max={2} step={0.25} hint="no Set is built with a stop under this ratio x TP (0 = off)" onChange={(v) => patch("setSlMinRatio", v)} />
                 <Slider label="Exit Set hold" value={overlay.exitSetHoldBars} min={0} max={720} step={30} unit="min" hint="time exit of Exit Sets (no TP); 0 = the global time stop" onChange={(v) => patch("exitSetHoldBars", v)} />
                 <Toggle label="Time exit on trailing Sets (on by default; off: no max hold, they leave by stop and trail only)" on={overlay.trailTimeExit} onChange={(v) => patch("trailTimeExit", v)} />
                 <Slider label="Trailing Sets' own max hold" value={overlay.trailHoldBars} min={0} max={1440} step={30} unit="min" hint="with the time exit on: 0 = the global time stop" onChange={(v) => patch("trailHoldBars", v)} />
                 <Toggle label="No time exit once a trail has armed (the max hold applies only while unarmed)" on={overlay.trailHoldArmedFree} onChange={(v) => patch("trailHoldArmedFree", v)} />
-                {(["micro", "minimal", "short", "normal", "long", "wide"] as const).map((rg) => {
-                  const xs = overlay.slRatiosByRange?.[rg] ?? [];
-                  const own = xs.length > 0;
-                  const lo = own ? xs[0] : 0.5;
-                  const hi = own ? xs[xs.length - 1] : 1.25;
-                  const setRange = (a: number, b: number) => {
-                    const from = Math.min(a, b), to = Math.max(a, b);
-                    const list: number[] = [];
-                    for (let r = from; r <= to + 1e-9; r += 0.1) list.push(Math.round(r * 100) / 100);
-                    patch("slRatiosByRange", { ...overlay.slRatiosByRange, [rg]: list });
-                  };
-                  const clear = () => {
-                    const next = { ...overlay.slRatiosByRange };
-                    delete next[rg];
-                    patch("slRatiosByRange", next);
-                  };
-                  return (
-                    <div key={rg} className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
-                      <Num label={`${rg} SL min ${own ? "" : "(global grid)"}`} value={lo} min={0.1} max={2} step={0.1} onChange={(v) => setRange(v, hi)} />
-                      <Num label={`${rg} SL max`} value={hi} min={0.1} max={2} step={0.1} onChange={(v) => setRange(lo, v)} />
-                      <button type="button" className="mb-1 text-xs text-muted hover:text-fg" disabled={!own} onClick={clear}>global</button>
-                    </div>
-                  );
-                })}
-                <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={0.25} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
                   label="Pos-count vol ratio"
@@ -2924,7 +2904,6 @@ function IndicationConfigEditor({
               onCommit={(t) => set(i, { timeframes: t.split(/[,;\s]+/).filter(Boolean).map((x) => (x === "c" || x === "x" ? x : Number(x))) as IndicationConfig["timeframes"] })}
             />
             <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; trend T5 / B15 / M30; RSI regime RS5 / rs5 (dip); drawdown DR240 / dr240; recovery RC240 / rc240; VWAP VW240 / vw240; past PR480 / YD1440; average MA60 / ma60; I inverts. Upper case with the direction, lower case against it." onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
-            <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.25–3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
             <Slider label="TP step from" value={e.stepMin} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMin).toFixed(1)}%`} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
             <Slider label="TP step to" value={e.stepMax} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMax).toFixed(1)}%`} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
             <Slider label="Trailing arm from (0 = every arm)" value={e.trailStepMin ?? 0} min={0} max={TP_STEP_MAX} step={1} hint={e.trailStepMin ? `${tpPctOfStep(e.trailStepMin).toFixed(1)}%` : "every arm up to the TP step to"} onChange={(v) => set(i, { trailStepMin: v < 2 ? 0 : v, trailStepMax: v < 2 ? e.trailStepMax : Math.max(v, e.trailStepMax ?? 0) })} />
