@@ -191,7 +191,7 @@ class RelateBook:
             for source in c['sources']:
                 state=book.get(source+':'+keys[source],{})
                 rows=[r for r in state.get('rows',[]) if r[0]<now][-c['lastN']:]
-                s=stats([r[1] for r in rows]);diagnostics[source]=s
+                s=stats([r[1] for r in rows if r[1] is not None][-c['lastN']:]);diagnostics[source]=s   # unscored closes (downtime, unverified) teach nothing: they no longer poison the window as 'unknown'
                 prev=rows[-1] if rows else None
                 known=prev and len(prev)>=4 and finite(prev[2]) and prev[2]>0 and isinstance(prev[3],int)
                 won=c.get('trigger','win')=='every' or (known and prev[1] is not None and prev[1]>0)

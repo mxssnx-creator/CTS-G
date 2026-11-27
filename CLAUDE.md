@@ -2,6 +2,11 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-27 (latest), owner: "Update x01, symbols 80, non performing configs disabled, Block optimal, vol factor by half, fix all issues".** **Relate defect fixed:** an unscored close (downtime, unverified; 565 of 729 closes live because
+  the container restarts) was stored as an unknown return and made every relation's window "unknown", so no relation could ever qualify (`relate_engine.decide` now judges the newest `lastN` scored returns; check
+  `relate.unscored-closes-do-not-block-qualification`, fails on the old code). Shipped on x01: `symbolCap` 80, `volumeFactor` **0.00625** (`VOLUME_FACTOR_FLOOR` 0.00625; the venue minimum lot still binds), `tpStepsOff` + 5 / 6 / 18 / 29
+  (50-symbol sim, 2 days: PF 0.17 / 0.12 / 0.45 / 0.63 on 47 / 47 / 58 / 63 orders), `packSidesOff` + indications:S (live 0.42 / 19, sim 0.77: the pack is now off on both sides), Block rounds `maxMult` 2 and level 2
+  (the 9 live closes raised by Block lost, PF 0.0, -0.69 USDT; counts 1 + 2, ratio 1.0, Auto stay). Same-window sim: PF 1.07 / 1088 orders, 24 of 48 hours positive: no edge claimed. Revert = the earlier values.
 - **2026-11-27 (later), owner: "Weitere nicht performende configs und trailings deaktivieren, x01 symbols auf 60".** Live x01 engine closes since 11-26 11:14 (150): trailing **0.26 / 73 (-2.2 USDT)**, every
   trailing pair losing (1.2:1.2 0.00 / 8, 1.2:0.6 0.34 / 9, 1.2:0.7 0.51 / 6), TP step 22 0.18 / 10, 21 0.00 / 6, 13 0.22 / 6, flow LONG 0.32 / 40, indications LONG 0.26 / 18. Shipped on x01: `trailRanges` all off
   (no trailing Set is built), `tpStepsOff` + 13 / 21 / 22, `packSidesOff` + flow:L / indications:L, `symbolCap` 60. Isolated-PF removal, no counterfactual sim (2026-11-06 caveat); account at 0.76 USDT, so the sample is thin.

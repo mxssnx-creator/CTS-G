@@ -59,7 +59,7 @@ def partials_unknown_duplicates():
     duplicate=b.close(d,'parent',203,.99,accepted=True,final=True)
     d2=b.decide(ID,204,.003,.01,qualified=True)
     s=next(iter(d2['policies'].values()))['stats']['config']
-    return not a and mid==59 and accepted and not duplicate and b.closed==60 and s['unknown']==1 and d2['total']==1, str(s)
+    return not a and mid==59 and accepted and not duplicate and b.closed==60 and s['unknown']==0 and s['n']==59 and d2['total']==1, str(s)
 
 def future_and_policy_edit():
     b=RelateBook([config()]);warm(b)
@@ -140,6 +140,16 @@ def step_relation_pools_symbols_and_packs():
     third=lvl(dict(ID,config='third:set',symbol='SOL-USDT',step=6));other=lvl(dict(ID,step=7));short=lvl(dict(ID,side='SHORT',step=6));none=lvl(dict(ID))
     return third>0 and other==0 and short==0 and none==0,f'same step other Set {third}, other step {other}, other direction {short}, no step {none}'
 
+def unscored_closes_do_not_block_qualification():
+    # owner 2026-11-27: downtime / unverified closes carry no return; they used to turn a whole relation 'unknown' and so never qualify.
+    b=RelateBook([config(minTrades=20,minPf=1.1,maxLossRun=0,trigger='every')])
+    for i in range(44):
+        d=b.decide(ID,i*2,.003,.01,qualified=True)
+        b.close(d,'u%d'%i,i*2+1,None if i%2 else .01,accepted=True,final=True)
+    d=b.decide(ID,100,.003,.01,qualified=True)
+    p=next(iter(d['policies'].values()))['parts']['config']
+    return p['level']>0 and d['total']>1, str(p)
+
 def loss_in_a_row_cap():
     """maxLossRun k: a source qualifies only while the longest losing streak inside its last-N window is at most k (0 = off). 30 wins, 3 losses in a row, then 6 wins:
     k=3 qualifies, k=2 does not, off qualifies."""
@@ -160,7 +170,7 @@ def default_policy_identity_is_unchanged():
     d=clean_configs([config(maxLossRun=2)])[0]
     return policy_key(c)==want and policy_key(d)!=want and c['maxLossRun']==0,f'default {policy_key(c)==want}, loss-run policy differs {policy_key(d)!=want}'
 
-CHECKS=[('relate.step-relation-pools-symbols-and-packs',step_relation_pools_symbols_and_packs),('relate.loss-in-a-row-cap',loss_in_a_row_cap),('relate.default-policy-identity-unchanged',default_policy_identity_is_unchanged),
+CHECKS=[('relate.unscored-closes-do-not-block-qualification',unscored_closes_do_not_block_qualification),('relate.step-relation-pools-symbols-and-packs',step_relation_pools_symbols_and_packs),('relate.loss-in-a-row-cap',loss_in_a_row_cap),('relate.default-policy-identity-unchanged',default_policy_identity_is_unchanged),
  ('relate.config-wide-source-pools-symbols',config_wide_source_pools_symbols),('relate.lowered-minimum-and-stop-ceiling',lowered_minimum_and_stop_ceiling),('relate.default-policy-unchanged-by-the-new-source',default_policy_is_unchanged_by_the_new_source),
  ('relate.twelve-step-growth-loss-reset',progression_twelve_steps),('relate.exact-context-isolation',independent_contexts),
  ('relate.effective-stop-cost-floor-half-target',stop_and_cost_floor),('relate.parent-partials-unknown-idempotence',partials_unknown_duplicates),

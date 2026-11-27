@@ -16,7 +16,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "ff2bf0cb05dccbd3df544cc4ea33920bf610513c"
+PIN_WANT = "297951416ac230a41cf5d8e396e42be69a9ce6f6"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -108,7 +108,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     "axisContEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
     "axisPauseEnabled": "owner 2026-11-26, x01 only: Axis prev 4 alone (measured 2026-11-15: 1.227 / 121 against all four 1.000 / 127 dev, 1.084 / 51 against 0.783 / 66 sealed, as x02); the desk default keeps all four",
     "histLookbackBars": "owner 2026-11-26, x01 only: 2880 bars of pre-history (sim qO executed PF 1.145 / 223 orders against 0.871 / 217 at 1920); the desk default keeps 1920",
-    "volumeFactor": "owner 2026-11-26, x01 only: 0.0125 (a quarter of the default, halved twice); the desk default keeps 0.05",
+    "volumeFactor": "owner 2026-11-26, x01 only: 0.00625 (an eighth of the default, halved three times); the desk default keeps 0.05",
     "minPfStepAutoTol": "owner 2026-11-25, x01 only: Auto PF tolerance 2 % (measured 1.751 / 194 against 1.631 / 188 at 5 %); the desk default keeps 5",
     "minPfStepAutoLow": "owner 2026-11-25, x01 only: lowest learned floor 1.15 (fewer positions, higher Auto PF); the desk default keeps 1.02",
     "stratGeneral": "owner 2026-11-24, x01 only: the general pack is off (pooled PF 0.72 on 74 orders); the desk default keeps it on",

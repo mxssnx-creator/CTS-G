@@ -154,7 +154,7 @@ def rank_self_test() -> Tuple[bool, str]:
 
 TARGET_NOTIONAL = 2.15
 VOLUME_FACTOR_MIN = 0.05        # the volume factor's default (owner 2026-10-28): a missing, zero or broken value never sizes above it
-VOLUME_FACTOR_FLOOR = 0.0125    # the lowest explicit value (owner 2026-11-26: halved twice from 0.05); the venue minimum lot still binds most entries
+VOLUME_FACTOR_FLOOR = 0.00625   # the lowest explicit value (owner 2026-11-26: halved twice from 0.05; 2026-11-27: halved again); the venue minimum lot still binds most entries
 VOLUME_FACTOR_MAX = 10.0
 VOLUME_SIZING_DIVISOR = 5.0
 

@@ -460,7 +460,8 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     # (trend, reversion, flow and multi next to breakout) with the SL ratios 0.25 / 0.5 / 0.75; the earlier trend-off and Normal-off decisions above are superseded by that instruction,
     # their counterfactual numbers stay the evidence they were. Still true: Micro Sets exist, no trailing pair is dropped for its lock, the pack set below is complete.
     # owner 2026-11-18: trend and multi lost in both 1.35 sims (trend -14.4 % / -8.1 %, multi -6.1 % / -8.0 %): off on x01
-    all_packs = {"shortrange", "indications", "reversion", "flow", "breakout"}   # the general pack is off on x01 (owner 2026-11-24, pooled PF 0.72 on 74 orders)
+    all_packs = {"shortrange", "reversion", "flow", "breakout"}   # indications is off (both sides: indications:L and :S, owner 2026-11-27, live PF 0.26 / 0.42 and sim 0.77)
+       # the general pack is off on x01 (owner 2026-11-24, pooled PF 0.72 on 74 orders)
     # Current x02 profile: TP Sets start at step 2 and trail arms at step 3. x01 arm C also starts at step 2, with trail arms at step 12; enabled packs retain independent grids.
     gen = [st.step for st in base if st.pack in ("general", "indications", "trend", "reversion", "flow", "multi", "breakout")]
     ok = (all_packs <= {st.pack for st in b.by_idx} and not ({"trend", "multi"} & {st.pack for st in b.by_idx}) and gen and min(gen) == 2 and b.tp_step_min == 2 and b.trail_step_min == 12

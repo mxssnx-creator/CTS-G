@@ -2190,10 +2190,10 @@ function SettingsPage() {
                 <Slider
                   label="Volume factor"
                   value={overlay.volumeFactor ?? 0.05}
-                  min={0.0125}
+                  min={0.00625}
                   max={5}
-                  step={0.0125}
-                  hint={`Effective sizing factor ×${(overlay.volumeFactor / VOLUME_SIZING_DIVISOR).toFixed(3)} before venue lot minimums; configurable down to 0.0125. Independent per Live / VST.`}
+                  step={0.00625}
+                  hint={`Effective sizing factor ×${(overlay.volumeFactor / VOLUME_SIZING_DIVISOR).toFixed(3)} before venue lot minimums; configurable down to 0.00625. Independent per Live / VST.`}
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num

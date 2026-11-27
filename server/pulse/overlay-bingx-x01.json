@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 0.0125,
+  "volumeFactor": 0.00625,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 60,
+  "symbolCap": 80,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -344,7 +344,7 @@
     "relations": [
       "step"
     ],
-    "maxMult": 4.0,
+    "maxMult": 2.0,
     "auto": true,
     "autoN": 30,
     "autoMin": 15,
@@ -355,14 +355,14 @@
         "on": true,
         "ratio": 1.0,
         "step": true,
-        "maxLevel": 3,
+        "maxLevel": 2,
         "pause": 0
       },
       "2": {
         "on": true,
         "ratio": 1.0,
         "step": true,
-        "maxLevel": 3,
+        "maxLevel": 2,
         "pause": 0
       },
       "3": {
@@ -398,18 +398,23 @@
   "stratTrend": false,
   "stratGeneral": false,
   "tpStepsOff": [
+    5,
+    6,
     7,
     9,
     13,
+    18,
     19,
     21,
     22,
+    29,
     30,
     31
   ],
   "packSidesOff": [
     "flow:L",
     "indications:L",
+    "indications:S",
     "reversion:L"
   ],
   "stratReversion": true,
