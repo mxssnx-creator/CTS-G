@@ -121,8 +121,15 @@ class StageGrid:
 
     @cached_property
     def rules(self) -> dict[tuple[int, int], tuple[Window, ...]]:
-        return {(depth, long): self.windows(depth, long)
-                for depth in range(len(STAGES)) for long in (self.longs if depth else (0,))}
+        return {(depth, long): self.windows(depth, long if "inherit" in self.options[depth].long_modes else 0)
+                for depth in range(len(STAGES))
+                for long in ((*self.longs, 0) if depth and not self.uses_inherited_long[depth]
+                             else self.longs if depth else (0,))}
+
+    @cached_property
+    def uses_inherited_long(self) -> tuple[bool, ...]:
+        return tuple(any("inherit" in stage.long_modes for stage in self.options[depth:])
+                     for depth in range(len(STAGES)))
 
     @cached_property
     def sample_bounds(self) -> dict[tuple[int, int], tuple[int, int]]:
@@ -767,7 +774,8 @@ class StageHistory:
                         if candidate_key > picked_key:
                             picked_path, picked_evidence, picked_key = (w,), evidence, candidate_key
                         continue
-                    key = (w.long if depth == 0 else base_long, tape.child_mask(w, depth))
+                    long = (w.long if depth == 0 else base_long) if self.grid.uses_inherited_long[depth + 1] else 0
+                    key = (long, tape.child_mask(w, depth))
                     first, copies = paths.get(key, (w, 0))
                     paths[key] = (first, copies + 1)
 

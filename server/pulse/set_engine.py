@@ -4604,7 +4604,7 @@ class SetBook:
         own_floor: Dict[str, float] = {}
         # Identical causal observations may reuse a calculation after tuple equality is checked.
         # A pooled tape fingerprint alone cannot establish an individual Set's evidence.
-        own_cache: Dict[Tuple[Tuple[float, float], ...], Optional[float]] = {}
+        own_cache: Dict[Tuple[Optional[float], Tuple[Tuple[float, float], ...]], Optional[float]] = {}
         cf = cost_as_frac(self.cost_pct)
         n_win = self.pf_step_auto_n
         until = math.nextafter(float(learn_before), float("-inf"))
@@ -4635,11 +4635,11 @@ class SetBook:
                     observations.append((99.0, nets[k]))
             if per_set and observations:
                 evidence = tuple(observations)
-                if evidence not in own_cache:
-                    got = learn_step_floor(evidence, self.pf_set_auto_min, self.pf_step_auto_tol,
-                                           self.step_auto_candidates(), self.pf_auto_factor)
-                    own_cache[evidence] = got["floor"] if got else None
-                threshold = own_cache[evidence]
+                signal_floor = self.signal_auto_minimum(st)
+                key = signal_floor, evidence
+                if key not in own_cache:
+                    own_cache[key] = self.learn_owned_auto_floor(evidence, signal_floor)
+                threshold = own_cache[key]
                 if threshold is not None:
                     own_floor[st.id] = float(threshold)
             if sig not in seen:
@@ -4693,6 +4693,7 @@ class SetBook:
             return
         sources = tuple(self._hist_rows[symbol] for symbol in tape_order)
         sets = [(st.id, self.grid_auto_fallback(st)[0]) for st in self.by_idx if not self.auto_holds(st)]
+        signal_sets = {st.id for st in self.by_idx if is_signal_pack(st.pack)}
         previous, minimum = self.pf_step_auto_n, self.pf_set_auto_min
         tolerance, orders_factor, candidates = self.pf_step_auto_tol, self.pf_auto_factor, self.step_auto_candidates()
         cost = cost_as_frac(self.cost_pct)
@@ -4711,8 +4712,9 @@ class SetBook:
                 close = [row[0] for row in rows]
                 entry = [row[0] - row[5] for row in rows]
                 nets = [row[4] - cost for row in rows]
+                floors = self.signal_auto_floors(fallback) if sid in signal_sets else candidates
                 model = auto_set_pf.RollingFloors(close, entry, nets, previous, minimum, fallback,
-                                                 candidates, tolerance, orders_factor)
+                                                 floors, tolerance, orders_factor)
                 models[sid] = model
                 floor = model.learned(upper)
                 if floor is not None:
@@ -4819,7 +4821,7 @@ class SetBook:
 
     def auto_pf_per_set(self, st: "SetState") -> bool:
         """An explicit Last-N profile owns its floor even on a desk with pooled ordinary Sets."""
-        return bool(self.stage_grid) or self.pf_set_auto or st.pack in self.owned_auto_packs
+        return bool(self.stage_grid) or self.pf_set_auto or is_signal_pack(st.pack) or st.pack in self.owned_auto_packs
 
     def auto_step_bucket(self, st: "SetState") -> int:
         """The shared Auto table ends at 3.5%; wider targets use its final bucket.
@@ -4875,6 +4877,10 @@ class SetBook:
         if auto and per_set:
             own = self.set_floor_auto.get(st.id)
             if own is not None:
+                if is_signal_pack(st.pack):
+                    minimum, source = self.own_manual_floor(st)
+                    learned = min(float(own), round(minimum + .2, 6))
+                    return (learned, "auto-set") if learned > minimum else (minimum, source)
                 return min(float(own), high), "auto-set"
             if self.stage_grid:
                 return self.grid_auto_fallback(st)
@@ -4895,6 +4901,22 @@ class SetBook:
         if value is not None:
             return min(self.pf_step_auto_high, max(self.pf_step_auto_low, value)), "auto-range-default"
         return self.manual_step_floor_for(st), "manual-step"
+
+    @staticmethod
+    def signal_auto_floors(minimum: float) -> tuple[float, ...]:
+        """Search just above the exact Signals floor on the Set's own evidence."""
+        return tuple(round(minimum + step * .05, 6) for step in range(1, 5))
+
+    def signal_auto_minimum(self, st: "SetState") -> Optional[float]:
+        return self.own_manual_floor(st)[0] if is_signal_pack(st.pack) else None
+
+    def learn_owned_auto_floor(self, evidence: Sequence[Tuple[float, float]], signal_floor: Optional[float]) -> Optional[float]:
+        if signal_floor is not None:
+            return auto_set_pf.fit(evidence, self.pf_set_auto_min, signal_floor, self.signal_auto_floors(signal_floor),
+                                   self.pf_step_auto_tol, self.pf_auto_factor)
+        result = learn_step_floor(evidence, self.pf_set_auto_min, self.pf_step_auto_tol,
+                                  self.step_auto_candidates(), self.pf_auto_factor)
+        return result["floor"] if result else None
 
     def manual_step_floor_for(self, st: "SetState") -> float:
         bucket = self.step_bucket(st)
@@ -5019,9 +5041,12 @@ class SetBook:
                                      params.max_dd_s, params.consistency)
         main_filter = (lambda values: negative_filter_ok(values, params.negative_filter)) if params.negative_filter else None
         need = max(params.negative_filter["windows"]) if params.negative_filter else 0
-        auto = (stage_grid.WindowAuto(self.grid_auto_fallback(st)[0], self.pf_set_auto_min,
-                                     tuple(self.step_auto_candidates()), self.pf_step_auto_tol, self.pf_auto_factor)
-                if self.grid_auto_enabled() else None)
+        auto = None
+        if self.grid_auto_enabled():
+            fallback, _ = self.grid_auto_fallback(st)
+            candidates = self.signal_auto_floors(fallback) if is_signal_pack(st.pack) else tuple(self.step_auto_candidates())
+            auto = stage_grid.WindowAuto(fallback, self.pf_set_auto_min, candidates,
+                                         self.pf_step_auto_tol, self.pf_auto_factor)
         return stage_grid.StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
                                        params.floor_for, risk, main_filter, need, window_auto=auto)
 

@@ -334,7 +334,16 @@ def the_simulator_learns_the_engines_own_floor_of_every_set():
         fallback = sum(1 for st in book.by_idx if st.id not in eng)
         from position_cost import tp_range_of as _rng
         ranged = {st.id for st in book.by_idx if (book.pf_range_floor or {}).get(_rng(book.step_bucket(st))) is not None}   # an explicit range floor (minPfByRange) wins
-        uses_own = all(abs(eng_floor[k] - min(v, book.pf_step_auto_high)) < 1e-12 for k, v in eng.items() if k not in ranged) and any(k not in ranged for k in eng)
+        expected_own = {}
+        for st in book.by_idx:
+            if st.id not in eng or st.id in ranged:
+                continue
+            if se.is_signal_pack(st.pack):
+                minimum, _ = book.own_manual_floor(st)
+                expected_own[st.id] = max(minimum, min(eng[st.id], minimum + .2))
+            else:
+                expected_own[st.id] = min(eng[st.id], book.pf_step_auto_high)
+        uses_own = bool(expected_own) and all(abs(eng_floor[k] - v) < 1e-12 for k, v in expected_own.items())
     finally:
         if saved is None:
             _os.environ.pop("STAGE_OVERLAY_PATCH", None)
@@ -668,7 +677,9 @@ def every_coordination_asks_its_own_floor_auto_first_then_its_own_manual_default
     for x in (micro, sig, pol, gen):
         b.set_floor_auto[x.id] = 1.18
     ask("micro, own", micro, 1.18, "auto-set")
-    ask("signals, own", sig, 1.18, "auto-set")
+    ask("signals, lower own", sig, 2.4, "signals")
+    b.set_floor_auto[sig.id] = 2.5
+    ask("signals, higher own", sig, 2.5, "auto-set")
     ask("policy, own", pol, 1.18, "auto-set")
     ask("generic, own", gen, 1.18, "auto-set")
     b.set_floor_auto[gen.id] = 1.9

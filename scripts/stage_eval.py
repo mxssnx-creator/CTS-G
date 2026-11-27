@@ -889,9 +889,11 @@ class AutoFloors:
                 end = bisect.bisect_left(tx, upper)
                 if end - start <= book.pf_step_auto_n:
                     continue
+                fallback, _ = book.grid_auto_fallback(st)
+                candidates = book.signal_auto_floors(fallback) if se.is_signal_pack(st.pack) else book.step_auto_candidates()
                 model = auto_set_pf.RollingFloors(tx[start:end], te[start:end], [p - self.tapes.cf for p in pp[start:end]],
-                                               book.pf_step_auto_n, book.pf_set_auto_min, book.grid_auto_fallback(st)[0],
-                                               book.step_auto_candidates(), book.pf_step_auto_tol, book.pf_auto_factor)
+                                               book.pf_step_auto_n, book.pf_set_auto_min, fallback,
+                                               candidates, book.pf_step_auto_tol, book.pf_auto_factor)
                 models[st.id] = model
                 floor = model.learned(upper)
                 if floor is not None:
@@ -909,17 +911,16 @@ class AutoFloors:
         before: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
         seen: set = set()
         own: Dict[str, float] = {}
-        set_scope = bool(getattr(book, "pf_set_auto", False))
-        owned_packs = getattr(book, "owned_auto_packs", ())
         for key, tx, sig, pairs, sid in self.sets:
             cut = bisect.bisect_left(tx, boundary)        # native now - lookback; strict close boundary
             if cut <= n_win:
                 continue
-            if set_scope or (owned_packs and book.sets[sid].pack in owned_packs):
-                got_own = se.learn_step_floor([(p_, n_) for (t_, p_, n_) in pairs if t_ < boundary], book.pf_set_auto_min, book.pf_step_auto_tol,
-                                              book.step_auto_candidates(), getattr(book, "pf_auto_factor", 0.0))
-                if got_own:
-                    own[sid] = float(got_own["floor"])
+            st = book.sets[sid]
+            if book.auto_pf_per_set(st):
+                result = book.learn_owned_auto_floor([(p_, n_) for (t_, p_, n_) in pairs if t_ < boundary],
+                                                    book.signal_auto_minimum(st))
+                if result is not None:
+                    own[sid] = float(result)
             if sig[cut - 1] in seen:
                 continue                                  # a copy of a Set already read, on the orders the engine can see at this hour
             seen.add(sig[cut - 1])

@@ -107,7 +107,7 @@ export const PF_TYPE_DEFAULTS = {
   minPfShort: 1.15,
   minPfMedium: 1.25,
   minPfLong: 1.5,
-  minPfSignals: 2.2,
+  minPfSignals: 2.25,
 } as const;
 export const SL_TP_RATIOS: readonly number[] = protectionPolicy.slTpRatios;
 /** Set grid: SL = TP x ratio, 0.25..2.5 step 0.25 (10 ratios, each one a Set). Matches position_cost.SL_RATIOS. */

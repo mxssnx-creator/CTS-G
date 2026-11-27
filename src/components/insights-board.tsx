@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { CartesianGrid, Legend, Line, LineChart, Tooltip, XAxis, YAxis } from "recharts";
 import { ClientChart } from "@/components/visual-stats";
+import { PF_TYPE_DEFAULTS } from "@/lib/config-model";
 import type { LiveStats } from "@/lib/live-stats";
 import {
   fmtPf,
@@ -292,7 +293,7 @@ function SignalsSection({ stats }: { stats: LiveStats | null }) {
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat k="Signals packs" v={String(rep?.packs ?? rows.length)} s={rep?.enabled ? "on (stratSignals)" : "off"} />
         <Stat k="Sets" v={String(rows.reduce((n, r) => n + r.total, 0))} s={`${rows.reduce((n, r) => n + r.valid, 0)} valid through Real`} />
-        <Stat k="Floor" v={fmtPf(stats?.sets?.minPfSignals ?? 2.2)} s="minPfSignals, every window and stage" />
+        <Stat k="Floor" v={fmtPf(stats?.sets?.minPfSignals ?? PF_TYPE_DEFAULTS.minPfSignals)} s="minPfSignals, every window and stage" />
         <Stat k="Executed" v={String(executed.reduce((n, r) => n + r.orders, 0))} s="settled Signals closes" />
       </section>
       <Panel title="Source x range x timeframe" hint="Each cell is its own pack: validated Sets / Sets and PF after Base">

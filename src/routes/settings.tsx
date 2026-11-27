@@ -2558,10 +2558,10 @@ function PfWindowControls({
       <Slider
         label="Signals packs · own minimum PF"
         value={overlay.minPfSignals}
-        min={2.2}
+        min={PF_TYPE_DEFAULTS.minPfSignals}
         max={3}
         step={0.01}
-        hint="The own manual floor of every Signals pack Set (sig-*) in every window and stage, whatever the step or window-size setting. With Auto per config Set on, a Signals Set's own learned floor first and this value as its fallback (never a floor learned on other packs). Minimum 2.20."
+        hint="The own manual floor of every Signals pack Set (sig-*) in every window and stage, whatever the step or window-size setting. Auto PF uses this floor as a lower bound and fits only to the Signals Set’s earlier outcomes."
         onChange={(v) => patch("minPfSignals", v)}
       />
       <div className="col-span-full font-mono text-[11px] text-muted">

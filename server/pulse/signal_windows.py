@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from itertools import product
 import math
 
-SIGNAL_MIN_PF = 2.2
+from position_cost import PF_BY_SIZE_DEFAULTS
+
+SIGNAL_MIN_PF = PF_BY_SIZE_DEFAULTS["minPfSignals"]
 STRATEGY_RANGES = ("signals", "exit")
 DEFAULT_WINDOWS = {"long": [5, 10, 15, 20], "short": [4, 6, 8, 10],
                    "minimal": [1, 2, 3], "polarity": ["positive", "negative"], "shortRatio": .5}
@@ -117,7 +119,7 @@ class History:
 
     def evaluate(self, now, history_ms, policy, floor=SIGNAL_MIN_PF, max_dd=1):
         if not math.isfinite(floor) or floor < SIGNAL_MIN_PF:
-            raise ValueError("Signals positive evaluations require the common PF floor >= 2.2")
+            raise ValueError(f"Signals positive evaluations require the common PF floor >= {SIGNAL_MIN_PF}")
         lo, hi = bisect_left(self.times, now-history_ms), bisect_left(self.times, now)
         if not policy or hi-lo < min(r.long+r.minimal for r in policy):
             return {}

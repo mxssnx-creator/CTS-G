@@ -83,7 +83,7 @@ class SignalProgress:
                 (type(real_n) is str and real_n in ("lane-minimal", "coordinated"))):
             raise ValueError("invalid Signals Real last N")
         if type(config["minPf"]) not in (int,float) or not math.isfinite(config["minPf"]) or config["minPf"] < SIGNAL_MIN_PF:
-            raise ValueError("Signals use a common PF floor >= 2.2 at every positive gate")
+            raise ValueError(f"Signals use a common PF floor >= {SIGNAL_MIN_PF} at every positive gate")
         if type(config["historyMinutes"]) is not int or not 1 <= config["historyMinutes"] <= 43200:
             raise ValueError("invalid Signals history minutes")
         if type(config["maxContextDrawdown"]) not in (int,float) or not 0 < config["maxContextDrawdown"] <= 1:

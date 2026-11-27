@@ -144,7 +144,7 @@ MIN_PF_FLOOR = 1.02          # no validation gate asks less than this net PF, wh
 # regression pin and the docs read these; the desk (src/lib/config-model.ts PF_TYPE_DEFAULTS) and the shipped overlays/presets carry copies that
 # the check gates.pf-defaults-match-every-shipped-overlay holds equal to this table. Where an older note and this table disagree, the higher
 # value stands (Minimal 1.10, Short 1.15; the 2026-10-29 note said 1.08 / 1.12).
-PF_BY_SIZE_DEFAULTS = {"minPfMicro": 1.02, "minPfMinimal": 1.10, "minPfShort": 1.15, "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}
+PF_BY_SIZE_DEFAULTS = {"minPfMicro": 1.02, "minPfMinimal": 1.10, "minPfShort": 1.15, "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.25}
 PF_SIZE_BOUNDS_DEFAULT = {"minPfMicroN": 5, "minPfMinimalN": 10, "minPfShortN": 20, "minPfMediumN": 35}
 
 
