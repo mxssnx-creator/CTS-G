@@ -8,7 +8,7 @@ import numpy as np
 import stage_eval as sg
 from post_base_exec import Trade, decode, encode
 from post_base_gates import (
-    BASE_FLOORS, BASE_WINDOWS, EXEC_FLOORS, EXEC_WINDOWS, SetDecisions,
+    BASE_FLOORS, BASE_WINDOWS, EXEC_FLOORS, EXEC_WINDOWS, BaseMasks, SetDecisions,
     fixed_history, terminal_pass,
 )
 from post_base_results import summarize
@@ -120,6 +120,35 @@ class PostBaseExecTests(unittest.TestCase):
         self.assertTrue(all(w.short in (8, 12) for w in EXEC_WINDOWS if w.short_mode == "negative"))
         self.assertEqual((len(BASE_WINDOWS), len(EXEC_WINDOWS)), (400, 60))
         self.assertLess(history.root.values[0] + cf, 0)
+
+    def test_shared_base_prefixes_preserve_native_drawdown_and_consistency(self):
+        class RiskBook(FixtureBook):
+            def stage_params(self, *_):
+                return SimpleNamespace(lookback_s=7200, max_dd_s=1800, consistency=1.15)
+
+            def grid_history(self, st, *, closes, entries, nets):
+                params = self.stage_params()
+
+                def risk(times, values, gains, losses, now, end, start):
+                    return sg.se._base_tail_ok(times, values, gains, losses, now, end, start,
+                                               params.max_dd_s, params.consistency)
+
+                return StageHistory(self.stage_grid, closes, entries, nets, params.lookback_s,
+                                    lambda size: 1.25, base_risk=risk)
+
+        book, st = RiskBook(), SimpleNamespace(pack="test")
+        closes = np.arange(160) * 60
+        entries = closes - 180
+        gross = np.resize([.007, .001 - 2e-17, -.004, .007, .011, -.002], len(closes))
+        probes = np.arange(3600, 9540, 120)
+        history = fixed_history(book, st, (closes, entries, gross), 1.5, probes)
+        masks = BaseMasks(history, book.stage_params(), 1.5)
+        all_members = []
+        for window in BASE_WINDOWS:
+            native = history.root.child_mask(window, 0)
+            self.assertEqual(masks.members(window), native, window)
+            all_members.append(native)
+        self.assertTrue(any(all_members))
 
     def test_hourly_settlement_and_marks_reconcile(self):
         market = SimpleNamespace(start=0, end=7200, clock=lambda i: i * 60)

@@ -119,7 +119,7 @@ background:linear-gradient(to bottom,transparent 49.5%,#9db0bd 50%,transparent 5
 </section>
 <section class="panel"><h2>Base Last-N coverage</h2>
 <p class="sub" id="base-intro"></p><details><summary>All 400 Base windows</summary><div class="scroll" id="base-grid"></div></details>
-<details><summary>All native strategy Sets</summary><div class="filters"><label>Filter by Set or indication<input id="set-search" type="search"></label></div>
+<details id="base-set-details"><summary>All native strategy Sets</summary><div class="filters"><label>Filter by Set or indication<input id="set-search" type="search"></label></div>
 <p class="sub" id="set-total"></p><div class="scroll" id="base-sets"></div></details></section>
 <section class="panel"><h2>Data and accounting</h2><div id="provenance"></div>
 <p>Every decision reads only earlier closes. A Base lane uses disjoint Long, Short and Last blocks plus the native positive combined PF test. Its derived history contains positions admitted by that same Base lane when they entered. The final gate applies the two signed PF tests independently and uses the trade’s original direction. All outcomes retain their original sign.</p>
@@ -179,9 +179,11 @@ function detail(d,r,b){
   document.querySelectorAll("button.case").forEach(el=>el.setAttribute("aria-pressed",String(el.dataset.key===phaseKey(r))));
   const label=r.window===null?"Portfolio · "+r.axis+" / "+r.block:execWindow(d.execWindows[r.window]);
   $("detail-heading").textContent=label;
+  const targetHours=r.hourly.filter(h=>h.gain>0&&(h.loss===0||h.pf>=r.execPf)).length;
   $("detail-summary").textContent="Execute PF "+pf(r)+" · "+num(r.opened)+" opens · "+num(r.closed)+" closes · "+
     num(r.held)+" held · net "+punit(r.net)+" · held mark "+punit(r.heldMarkNet)+" · "+num(r.heldAdds)+" held adds · "+
-    num(r.positiveHours)+"/"+d.hours+" profitable hours · "+num(r.activeHours)+" hours with settlements";
+    num(r.positiveHours)+"/"+d.hours+" profitable hours · "+num(r.activeHours)+" hours with settlements · "+
+    num(targetHours)+"/"+d.hours+" hours at the final PF floor"+(r.closed?" · "+pct(100*r.wins/r.closed)+" winning closes":"");
   const max=Math.max(...r.hourly.map(h=>Math.abs(h.net)),1e-9);
   $("chart").style.setProperty("--hours",d.hours);
   $("chart").innerHTML=r.hourly.map((h,i)=>'<span title="'+esc(date(d.start+3600*i)+" "+punit(h.net))+
@@ -227,7 +229,8 @@ function refresh(){
     num(b.setMinutes)+" possible Set-minutes. A Set-minute is counted once in this headline even if multiple Base windows passed.";
   table("base-grid",["Long / Short / Last","Complete samples","Coverage","Passed"],d.baseWindows.map((w,i)=>
     [baseWindow(w),num(b.baseFull[i]),pct(100*b.baseFull[i]/b.setMinutes),num(b.basePassed[i])]));
-  sets(d,b);
+  if($("base-set-details").open)sets(d,b);
+  $("base-set-details").ontoggle=()=>{if($("base-set-details").open)sets(d,b);};
   $("set-search").oninput=()=>sets(d,b);
 }
 for(const id of ["period","base","exec","scope","sort"])$(id).onchange=refresh;

@@ -3,7 +3,6 @@
 from array import array
 import argparse
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -67,7 +66,7 @@ def set_columns(st, names, shadow, first):
     )
 
 
-def candidate_index(book, groups, columns, clocks, floor):
+def candidate_index(book, groups, columns, clocks, floor, label):
     picks = {}
     base_pass = np.zeros(len(BASE_WINDOWS), dtype=np.int64)
     base_full = np.zeros_like(base_pass)
@@ -75,13 +74,13 @@ def candidate_index(book, groups, columns, clocks, floor):
     eligible = np.zeros(len(clocks), dtype=np.int32)
     passed = np.zeros((len(EXEC_FLOORS), ARMS, len(clocks)), dtype=np.int32)
     base_sets = []
-    for pack, states in groups.items():
+    for group_no, (pack, states) in enumerate(groups.items(), 1):
         sides = {side: (np.zeros(passed.shape, dtype=np.uint32), np.zeros(passed.shape))
                  for side in (1, -1)}
         kind_priority = {kind: 10 * (len(book.kind_order_for(pack)) - i)
                          for i, kinds in enumerate(book.kind_order_for(pack)) for kind in kinds}
         for st in states:
-            ds = SetDecisions(book, st, columns[st.idx], clocks, floor)
+            ds = SetDecisions(book, st, columns(st.idx), clocks, floor)
             base_pass += ds.base_pass
             base_full += ds.base_full
             eligible += ds.base_valid
@@ -111,6 +110,8 @@ def candidate_index(book, groups, columns, clocks, floor):
         for side, (ids, _) in sides.items():
             if ids.any():
                 picks[pack, side] = ids
+        if group_no % 6 == 0:
+            print(f"{label}: Base {floor:g}, {group_no}/{len(groups)} indication packs scored", flush=True)
 
     def hourly(rows):
         return rows.reshape(*rows.shape[:-1], -1, 60).sum(axis=-1).tolist()
@@ -232,6 +233,9 @@ class MarketReplay:
     def clock(self, bar):
         return self.first + BAR * (bar + 1)
 
+    def columns(self, set_idx):
+        return set_columns(self.book.by_idx[set_idx], self.names, self.shadow, self.first)
+
 
 def offline(event, args):
     if event in {"socket.connect", "socket.getaddrinfo"}:
@@ -242,7 +246,7 @@ def run_floor(market, groups, columns, overlay, label, floor):
     from post_base_results import summarize, strategy_cases
 
     t = time.monotonic()
-    index, coverage = candidate_index(market.book, groups, columns, market.clocks, floor)
+    index, coverage = candidate_index(market.book, groups, columns, market.clocks, floor, label)
     print(f"{label}: Base PF {floor:g} decisions complete in {time.monotonic()-t:.1f}s", flush=True)
     runs = market.execute(index)
     del index
@@ -257,18 +261,6 @@ def run_floor(market, groups, columns, overlay, label, floor):
     return {"basePf": floor, **coverage}, cases
 
 
-_FLOOR_CONTEXT = None
-
-
-def init_floors(market, groups, columns, overlay, label):
-    global _FLOOR_CONTEXT
-    _FLOOR_CONTEXT = market, groups, columns, overlay, label
-
-
-def run_worker(floor):
-    return run_floor(*_FLOOR_CONTEXT, floor)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
@@ -279,6 +271,8 @@ def main():
     parser.add_argument("--symbols", type=int, default=30)
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--jobs", type=int, default=3)
+    parser.add_argument("--base-floor", type=float, choices=BASE_FLOORS, action="append",
+                        help="replay selected Base floors for an individual study shard")
     args = parser.parse_args()
     if not 0 < args.hours <= 48 or args.symbols < 1 or args.jobs < 1:
         parser.error("use 1–48 test hours and positive symbol and worker counts")
@@ -310,10 +304,8 @@ def main():
         replay_cache.save(cache, shadow, manifest)
     market = MarketReplay(book, names, bars, times, shadow, args.hours)
     groups = defaultdict(list)
-    columns = {}
     for st in book.by_idx:
         groups[st.pack].append(st)
-        columns[st.idx] = set_columns(st, names, shadow, market.first)
     result = {"label": args.label, "start": market.start, "end": market.end, "prehistoryStart": market.first,
               "costPct": book.cost_pct, "lookbackMinutes": book.lookback, "hours": args.hours,
               "symbols": names, "source": meta.get("source"), "inputHashes": manifest["markets"],
@@ -323,16 +315,16 @@ def main():
                        for st in book.by_idx],
               "baseWindows": BASE_WINDOWS, "execWindows": EXEC_WINDOWS,
               "floors": [], "cases": []}
-    print(f"{args.label}: {len(names)} symbols, {len(columns)} Sets, {args.hours} decision hours", flush=True)
+    print(f"{args.label}: {len(names)} symbols, {len(book.by_idx)} Sets, {args.hours} decision hours", flush=True)
     args.out.parent.mkdir(exist_ok=True, parents=True)
-    with ProcessPoolExecutor(max_workers=min(args.jobs, len(BASE_FLOORS)), initializer=init_floors,
-                             initargs=(market, groups, columns, overlay, args.label)) as pool:
-        for coverage, cases in pool.map(run_worker, BASE_FLOORS):
-            result["floors"].append(coverage)
-            result["cases"].extend(cases)
-            temp = args.out.with_suffix(".pending")
-            temp.write_text(json.dumps(result, separators=(",", ":"), allow_nan=False))
-            temp.replace(args.out)
+    for floor in sorted(set(args.base_floor or BASE_FLOORS)):
+        coverage, cases = run_floor(market, groups, market.columns, overlay, args.label, floor)
+        result["floors"].append(coverage)
+        result["cases"].extend(cases)
+        temp = args.out.with_suffix(".pending")
+        with temp.open("w", encoding="utf-8") as stream:
+            json.dump(result, stream, separators=(",", ":"), allow_nan=False)
+        temp.replace(args.out)
     print(f"{args.label}: finished in {time.monotonic() - began:.1f}s", flush=True)
 
 

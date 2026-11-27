@@ -50,7 +50,7 @@ class ParentProof:
     def history(self, set_idx):
         book = self.market.book
         st = book.by_idx[set_idx]
-        return fixed_history(book, st, self.columns[set_idx], self.base_floor)
+        return fixed_history(book, st, self.columns(set_idx), self.base_floor)
 
     def child(self, set_idx, base):
         history = self.history(set_idx)
