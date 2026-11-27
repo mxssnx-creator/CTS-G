@@ -14,7 +14,7 @@ def _rows_ms(bars, close_last):
 
 def the_signal_is_the_sources_onset_on_its_own_window():
     """On every 1m bar the pack's signal equals signal_sources.onsets of the same 1m rows the pack reads (its window), at the bar that completes a timeframe bar,
-    and nothing on the bars in between: 9 sources x 2 ranges x 4 timeframes on a synthetic walk."""
+    and nothing on the bars in between, for every supported source, range and timeframe on a synthetic walk."""
     bars = synth_bars(7, 900, drift=0.0002, vol=0.003)
     close0 = float(int(T0 // 1800) * 1800)                  # the first bar closes on a 30-minute boundary
     bad, fired = [], 0
@@ -31,7 +31,7 @@ def the_signal_is_the_sources_onset_on_its_own_window():
                     if got[0] != want:
                         bad.append((pk, i, got[0], want))
                     fired += bool(got[0])
-    return not bad and fired > 50, f"{fired} signals over 72 packs, mismatches {len(bad)} {bad[:3]}"
+    return not bad and fired > 50, f"{fired} signals over {sp.MAX_PACKS} packs, mismatches {len(bad)} {bad[:3]}"
 
 
 def the_signal_never_reads_a_later_bar():
@@ -157,16 +157,20 @@ def the_signal_memo_preserves_utc_alignment():
 
 
 def slow_timeframes_read_two_warm_ups():
-    """Owner 2026-11-14 ("make also 15, 30 min work"): every Signals pack reads at least two warm-ups of its own timeframe bars, so a 30 min EMA of 55 is warm
-    when it signals (the 1,920-row window gave a 30 min pack 64 bars)."""
+    """Slow legacy Signals retain two warm-ups. Finite-window reversal Signals require the current and previous states."""
     short = []
     for src in ss.SOURCES:
         for rng in ss.RANGES:
             for tf in ss.TIMEFRAMES:
                 pk = sp.pack_name(src, rng, tf)
-                if sp.window_minutes(pk) // tf < 2 * ss.warmup_bars(src, rng) + 2:
+                warmup = ss.warmup_bars(src, rng)
+                actual = sp.window_minutes(pk)
+                if src in ss.REVERSAL_SOURCES:
+                    if actual != (warmup + 1) * tf:
+                        short.append(pk)
+                elif actual < (2 * warmup + 2) * tf:
                     short.append(pk)
-    return not short, f"packs under two warm-ups: {short[:5]}"
+    return not short, f"packs outside their completed-bar warm-up contract: {short[:5]}"
 
 
 CHECKS = [

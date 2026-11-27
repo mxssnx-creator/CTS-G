@@ -16,12 +16,14 @@ from __future__ import annotations
 import math
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from signal_sources import RANGES, SOURCES, TIMEFRAMES, completed_bars, states, warmup_bars
+from signal_sources import DEFAULT_SOURCES, RANGES, SOURCES, TIMEFRAMES, completed_bars, states, warmup_bars
+
+from trend_reversal import SOURCES as REVERSAL_SOURCES, reversal_at, signal_period
 
 PREFIX = "sig-"
 KINDS = ("base", "exit", "trail")
 MAX_ENTRIES = 32
-MAX_PACKS = 72                 # 9 sources x 2 ranges x 4 timeframes
+MAX_PACKS = len(SOURCES) * len(RANGES) * len(TIMEFRAMES)
 WINDOW_CAP = 1920              # 1m rows a Signals pack reads at most on the 1 / 5 min timeframes (the Set history's default lookback)
 WINDOW_CAP_SLOW = 4320         # on 15 / 30 min: three days, so the slow EMAs warm up (64 bars of 30 min starved them; owner 2026-11-14 "make also 15, 30 min work")
 CONF = 0.6
@@ -47,11 +49,13 @@ def parse(pack: str) -> Optional[Tuple[str, str, int]]:
 
 
 def window_minutes(pack: str) -> int:
-    """1m rows the pack reads for one bar: six warm-ups of completed timeframe bars plus two, at most WINDOW_CAP."""
+    """Return the bounded minute history for a settled signal bar."""
     p = parse(pack)
     if p is None:
         return 0
     source, rng, tf = p
+    if source in REVERSAL_SOURCES:
+        return (warmup_bars(source, rng) + 1) * tf
     return int(min(WINDOW_CAP_SLOW if tf >= 15 else WINDOW_CAP, (6 * warmup_bars(source, rng) + 2) * tf))
 
 
@@ -87,8 +91,17 @@ def signal(bars: Sequence[Sequence[float]], i: int, close_ts: float, pack: str) 
     agg = _blocks(rows, tf) if tf > 1 else [list(r) for r in rows]
     if len(agg) < 2 or agg[-1][0] + tf * 60000 != int(round(close_ts * 1000.0)):
         return (0, 0.0, "")                                  # the newest completed timeframe bar must end at bar i
+    if source in REVERSAL_SOURCES:
+        recent = [r[1:] for r in agg]
+        tactic = source.removeprefix("trend-reversal-")
+        period = signal_period(rng)
+        i = len(recent) - 1
+        direction = reversal_at(recent, i, period, tactic)
+        if direction and direction != reversal_at(recent, i - 1, period, tactic):
+            return direction, CONF, f"{source}:{rng}:t{tf}"
+        return 0, 0.0, ""
     try:
-        st = states([b[4] for b in agg], source, rng, [b[2] for b in agg], [b[3] for b in agg], [b[5] for b in agg])
+        st = states([b[4] for b in agg], source, rng, [b[2] for b in agg], [b[3] for b in agg], [b[5] for b in agg], [b[1] for b in agg])
     except ValueError:
         return (0, 0.0, "")
     if st[-1] and st[-1] != st[-2]:
@@ -128,7 +141,7 @@ def expand(configs: Any, step_lo: int, step_hi: int, snap_ratio: Callable[[float
         if not isinstance(raw, dict) or raw.get("enabled", True) is False:
             continue
         label = str(raw.get("label") or f"signals {e_i + 1}")[:60]
-        srcs = _words(raw.get("sources")) or list(SOURCES)
+        srcs = _words(raw.get("sources")) or list(DEFAULT_SOURCES)
         rngs = _words(raw.get("ranges")) or list(RANGES)
         tfs = _ints(raw.get("timeframes")) or list(TIMEFRAMES)
         lo = max(step_lo, min(step_hi, int(raw.get("stepMin") or step_lo)))

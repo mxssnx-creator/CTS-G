@@ -33,7 +33,7 @@ function Chips<T extends string | number>({ all, on, onChange, fmt }: { all: rea
 }
 
 /** Editor of `signalConfigs`: every source x range x timeframe of an entry becomes its own Signals pack (own Sets, stages, lanes), with this entry's TP-step
- * range, SL ratios and Set types. Packs = sources x ranges x timeframes (engine bound 72). */
+ * range, SL ratios and Set types. The engine bounds the grid by the supported source, range and timeframe catalogues. */
 export function SignalConfigEditor({ value, onChange }: { value: SignalConfig[]; onChange: (v: SignalConfig[]) => void }) {
   const set = (i: number, patch: Partial<SignalConfig>) => onChange(value.map((e, k) => (k === i ? { ...e, ...patch } : e)));
   const packs = value.filter((e) => e.enabled).reduce((n, e) => n + e.sources.length * e.ranges.length * e.timeframes.length, 0);

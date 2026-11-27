@@ -23,6 +23,8 @@ from functools import wraps
 from operator import mul
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from trend_reversal import PERIODS as REVERSAL_PERIODS, TACTICS as REVERSAL_TACTICS, signal_family
+
 Row = Sequence[float]
 Signal = Optional[Tuple[int, float]]
 WINDOW = 300
@@ -1469,6 +1471,7 @@ def f_rangebrk(b, n):
 
 
 FAMILIES: Dict[str, Tuple[str, Callable]] = {
+    **{"trrev" + tactic: ("microreversal", signal_family(tactic)) for tactic in REVERSAL_TACTICS},
     # name: (group, function)
     "ker": ("trend", f_ker), "chop": ("trend", f_chop), "aroon": ("trend", f_aroon), "vortex": ("trend", f_vortex),
     "adx": ("trend", f_adx), "kama": ("trend", f_kama), "hull": ("trend", f_hull), "ribbon": ("trend", f_ribbon),
@@ -1548,12 +1551,12 @@ def _group(group: Optional[str], rng: str, need: int = 3) -> Callable[[Sequence[
 def build() -> Dict[str, Callable[[Sequence[Row]], Signal]]:
     out: Dict[str, Callable[[Sequence[Row]], Signal]] = {}
     for fam in FAMILIES:
-        for rng, ns in RANGES.items():
-            for n in ns:
-                for tf in TFS_EXT:
-                    out[f"{fam}_n{n}_t{tf}"] = _single(fam, n, tf)
-                out[f"{fam}_c{n}"] = _multi(fam, n)
-                out[f"{fam}_x{n}"] = _multi(fam, n, TFS_EXT)
+        periods = REVERSAL_PERIODS if fam.startswith("trrev") else (n for ns in RANGES.values() for n in ns)
+        for n in periods:
+            for tf in TFS_EXT:
+                out[f"{fam}_n{n}_t{tf}"] = _single(fam, n, tf)
+            out[f"{fam}_c{n}"] = _multi(fam, n)
+            out[f"{fam}_x{n}"] = _multi(fam, n, TFS_EXT)
     for group in ("trend", "break", "revert", "volume", None):
         for rng in RANGES:
             out[f"g_{group or 'all'}_{rng}"] = _group(group, rng)

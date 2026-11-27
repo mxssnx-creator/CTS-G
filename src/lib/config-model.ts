@@ -605,11 +605,15 @@ export type PulseOverlay = {
   modules?: Record<string, boolean>;
 };
 
-export const SIGNAL_SOURCES = ["ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian", "bb-bounce", "cci-reversal", "obv-trend"] as const;
+export const DEFAULT_SIGNAL_SOURCES = ["ema-cross", "macd-cross", "rsi-reversal", "ema-trend", "rsi-momentum", "donchian", "bb-bounce", "cci-reversal", "obv-trend"] as const;
+export const SIGNAL_SOURCES = [...DEFAULT_SIGNAL_SOURCES,
+  "trend-reversal-reclaim", "trend-reversal-structure", "trend-reversal-impulse", "trend-reversal-pullback",
+  "trend-reversal-rsi", "trend-reversal-psar", "trend-reversal-confluence",
+] as const;
 export const SIGNAL_RANGES = ["short", "medium"] as const;
 export const SIGNAL_TIMEFRAMES = [1, 5, 15, 30] as const;
 export const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
-  label: "signals", enabled: true, sources: [...SIGNAL_SOURCES], ranges: [...SIGNAL_RANGES], timeframes: [5, 15],
+  label: "signals", enabled: true, sources: [...DEFAULT_SIGNAL_SOURCES], ranges: [...SIGNAL_RANGES], timeframes: [5, 15],
   stepMin: 5, stepMax: 12, slRatios: [0.5, 0.75, 1.0], types: ["base", "trail"],
 };
 
@@ -1349,7 +1353,7 @@ export function signalConfigList(v: unknown): SignalConfig[] {
     return {
       label: String(e.label ?? `signals ${i + 1}`).slice(0, 60),
       enabled: e.enabled !== false,
-      sources: sources.length ? sources : [...SIGNAL_SOURCES],
+      sources: sources.length ? sources : [...DEFAULT_SIGNAL_SOURCES],
       ranges: ranges.length ? ranges : [...SIGNAL_RANGES],
       timeframes: tfs.length ? tfs : [...DEFAULT_SIGNAL_CONFIG.timeframes],
       stepMin: lo,
