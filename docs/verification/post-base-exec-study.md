@@ -5,6 +5,11 @@ indication replay, Base qualification, simulated exits, Axis Sets and Set
 Block rules. The entry path is **Base → final Short and Last → simulated
 execution**.
 
+The two 30-symbol candle directories are also included in
+`reports/direct-base-20261127/bingx-candles.tar.gz` as `development` and
+`holdout`. Their individual hashes match the inputs of this wide study; the
+`holdout` directory is the wide study's validation directory.
+
 | Stage | Windows | Minimum PF |
 | --- | --- | --- |
 | Base | Long 10, 20, 30, 40, 50. Short 4, 8, 12, 16 with both signs. Last 1–5 with both signs. | 1.5, 2.0, 2.5 |
@@ -121,3 +126,29 @@ holdout PF for the six development-selected compound cases was 0.300–0.454;
 none of the four later treatment choices achieved PF above 1 in the final
 eight hours. These studies use different strategy scopes and scoring rules,
 so their PFs should not be compared as if they were the same portfolio.
+
+## Follow-up verification
+
+A fresh current-branch replay used the five alphabetically first symbols
+(AAVE, ADA, APT, ARB and ATOM), the same development archive and preset,
+and six decision hours on 2026-11-20 06:00–12:00 UTC. It completed all
+684 cases, including all six threshold pairs. The following are the baseline
+all-window portfolios with Axis and Block off; open holdings are excluded
+from PF and profitable-hour counts.
+
+| Base PF | Final PF | Settled PF | Settled | Open at end | Profitable hours |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.5 | 2.0 | 0.506 | 18 | 5 | 2/6 |
+| 1.5 | 2.5 | 0.551 | 17 | 5 | 2/6 |
+| 2.0 | 2.0 | 0.153 | 6 | 5 | 1/6 |
+| 2.0 | 2.5 | 0.000 | 6 | 5 | 0/6 |
+| 2.5 | 2.0 | 0.000 | 4 | 3 | 0/6 |
+| 2.5 | 2.5 | 0.000 | 4 | 3 | 0/6 |
+
+This is a small development-period verification, not an additional holdout.
+An attempted separate 30-symbol re-run was terminated with exit code 137
+after archive and cache fingerprints had been verified. The previously
+completed 30-symbol results above were therefore not independently rerun in
+this follow-up. The report's hourly, path, symbol and PF accounting passed
+reconciliation, and its interactive controls were checked at desktop and
+mobile widths.
